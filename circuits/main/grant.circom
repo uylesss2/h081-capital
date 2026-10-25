@@ -31,6 +31,8 @@ template Grant(levels, nIns, nOuts) {
     signal input maxPerTx[nOuts];
     signal input expiry[nOuts];
     signal input recipientRoot[nOuts];
+    signal input streamRate[nOuts];
+    signal input streamStart[nOuts];
     signal input rho[nOuts];
 
     signal input changeAmount;
@@ -84,6 +86,8 @@ template Grant(levels, nIns, nOuts) {
     component lenRange[nOuts];
     component expRange[nOuts];
     component lenNonZero[nOuts];
+    component rateRange[nOuts];
+    component startRange[nOuts];
     var sumOuts = 0;
     for (var i = 0; i < nOuts; i++) {
         aRange[i] = Range(AMOUNT_BITS());
@@ -101,6 +105,10 @@ template Grant(levels, nIns, nOuts) {
         lenNonZero[i] = NonZero();
         lenNonZero[i].in <== windowLen[i];
         lenNonZero[i].out === 1;
+        rateRange[i] = Range(TIME_BITS());
+        rateRange[i].in <== streamRate[i];
+        startRange[i] = Range(TIME_BITS());
+        startRange[i].in <== streamStart[i];
 
         policy[i] = PolicyHash();
         policy[i].lifetimeCap <== amount[i];
@@ -110,6 +118,8 @@ template Grant(levels, nIns, nOuts) {
         policy[i].expiry <== expiry[i];
         policy[i].recipientRoot <== recipientRoot[i];
         policy[i].ownerPk <== ownerPk.pk;
+        policy[i].streamRate <== streamRate[i];
+        policy[i].streamStart <== streamStart[i];
 
         allow[i] = AllowanceCommitment();
         allow[i].asset <== asset;
@@ -144,4 +154,4 @@ template Grant(levels, nIns, nOuts) {
     signal extDataSquare <== extDataHash * extDataHash;
 }
 
-component main { public [root, inputNullifier, allowanceCommitment, changeCommitment, totalCommitment, extDataHash] } = Grant(20, 2, 8);
+component main { public [root, inputNullifier, allowanceCommitment, changeCommitment, totalCommitment, extDataHash] } = Grant(20, 2, 16);

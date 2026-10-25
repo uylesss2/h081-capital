@@ -34,6 +34,8 @@ template Disclose(levels) {
     signal input expiry;
     signal input recipientRoot;
     signal input ownerPk;
+    signal input streamRate;
+    signal input streamStart;
     signal input pathIndices[levels];
     signal input pathElements[levels];
 
@@ -48,6 +50,8 @@ template Disclose(levels) {
     policy.expiry <== expiry;
     policy.recipientRoot <== recipientRoot;
     policy.ownerPk <== ownerPk;
+    policy.streamRate <== streamRate;
+    policy.streamStart <== streamStart;
 
     component note = AllowanceCommitment();
     note.asset <== asset;

@@ -85,7 +85,7 @@ describe('distribution', () => {
     // the chain learned nine commitments and one opaque total, nothing else
     const logs = res.receipt.logs.filter((l) => l.address === pool.target);
     const parsed = logs.map((l) => pool.interface.parseLog(l)).filter(Boolean);
-    expect(parsed.filter((p) => p!.name === 'NewCommitment')).toHaveLength(9);
+    expect(parsed.filter((p) => p!.name === 'NewCommitment')).toHaveLength(17); // 16 slots + change
     expect(parsed.filter((p) => p!.name === 'NewGrant')).toHaveLength(1);
     const json = JSON.stringify(parsed.map((p) => p!.args.map(String)));
     expect(json).not.toContain((1_000n * U).toString());
@@ -201,5 +201,72 @@ describe('selective disclosure', () => {
     await expect(a1.prove(live, 'remainingAtLeast', 501n * U, audience)).rejects.toThrow();
     // a proof for one audience does not verify for another
     expect(await verifyDisclosure(pool, ok.proof, { ...ok.args, audience: 1n })).toBe(false);
+  });
+});
+
+describe('hierarchical delegation', () => {
+  let s1: Wallet;
+  it('an agent splits its allowance into a tighter sub-allowance without the owner', async () => {
+    s1 = new Wallet(Account.random(), pool.connect(relayerSigner) as Contract);
+    const parent = current(a1); // remaining 500, cap 300/day, max 250/tx
+    const res = await a1.delegate(parent, [{ to: s1.account.address, amount: 100n * U, windowCap: 60n * U, maxPerTx: 50n * U }]);
+    expect(res.residual.remaining).toBe(400n * U);
+    expect(res.residual.policy.windowCap).toBe(300n * U - 60n * U - 3n); // three placeholder slots take one unit each
+    expect(res.receipt.from).toBe(await relayerSigner.getAddress());
+
+    await s1.sync();
+    const sub = current(s1);
+    expect(sub.allowance.remaining).toBe(100n * U);
+    expect(sub.allowance.policy.maxPerTx).toBe(50n * U);
+    expect(sub.allowance.policy.ownerPk).toBe(owner.account.keys.pk);
+    expect(current(a1).allowance.remaining).toBe(400n * U);
+  });
+
+  it('the sub-agent spends under the sub-policy; the owner sees and can reclaim the sub-allowance', async () => {
+    const vendor = await vendorSigner.getAddress();
+    const before = await token.balanceOf(vendor);
+    await s1.pay(current(s1), 50n * U, vendor);
+    expect(await token.balanceOf(vendor)).toBe(before + 50n * U);
+    await expect(s1.pay(current(s1), 51n * U, vendor)).rejects.toThrow(); // sub max per tx
+    await expect(s1.pay(current(s1), 11n * U, vendor)).rejects.toThrow(); // 50 + 11 > 60 sub window cap
+
+    await owner.sync();
+    const subAsOwner = current(owner, s1.account.keys.pk);
+    expect(subAsOwner.allowance.remaining).toBe(50n * U);
+    const bal = owner.balance(asset);
+    await owner.reclaim(subAsOwner);
+    expect(owner.balance(asset)).toBe(bal + 50n * U);
+  });
+});
+
+describe('streaming budgets', () => {
+  let s: Wallet;
+  it('releases budget at a rate per second', async () => {
+    s = new Wallet(Account.random(), pool.connect(relayerSigner) as Contract);
+    const vendor = await vendorSigner.getAddress();
+    await owner.grant(asset, [{ to: s.account.address, amount: 600n * U, streamRate: 1n * U }]); // 1 USDG per second
+    await s.sync();
+    await expect(s.pay(current(s), 100n * U, vendor)).rejects.toThrow(); // only a few seconds have streamed
+    await increaseTime(300);
+    const res = await s.pay(current(s), 100n * U, vendor);
+    expect(res.next.remaining).toBe(500n * U);
+    await expect(s.pay(current(s), 250n * U, vendor)).rejects.toThrow(); // about 200 of the 300 streamed remain
+    await increaseTime(60);
+    await s.pay(current(s), 250n * U, vendor); // 360 streamed, 350 spent after this
+  });
+});
+
+describe('sixteen agents per grant', () => {
+  it('funds sixteen agents in one proof and each sees only its own slot', async () => {
+    const fleet = Array.from({ length: 16 }, () => new Wallet(Account.random(), pool.connect(relayerSigner) as Contract));
+    const res = await owner.grant(asset, fleet.map((w, i) => ({ to: w.account.address, amount: BigInt(10 + i) * U, maxPerTx: 5n * U })));
+    expect(res.total).toBe(fleet.reduce((sum, _, i) => sum + BigInt(10 + i) * U, 0n));
+    const parsed = res.receipt.logs.filter((l) => l.address === pool.target).map((l) => pool.interface.parseLog(l)!);
+    expect(parsed.filter((p) => p.name === 'NewCommitment')).toHaveLength(17);
+    await Promise.all(fleet.map((w) => w.sync()));
+    fleet.forEach((w, i) => {
+      expect(w.agentAllowances(asset)).toHaveLength(1);
+      expect(w.agentAllowances(asset)[0].allowance.remaining).toBe(BigInt(10 + i) * U);
+    });
   });
 });

@@ -11,7 +11,11 @@ interface ITransactVerifier {
 }
 
 interface IGrantVerifier {
-    function verifyProof(uint256[2] calldata a, uint256[2][2] calldata b, uint256[2] calldata c, uint256[14] calldata input) external view returns (bool);
+    function verifyProof(uint256[2] calldata a, uint256[2][2] calldata b, uint256[2] calldata c, uint256[22] calldata input) external view returns (bool);
+}
+
+interface IDelegateVerifier {
+    function verifyProof(uint256[2] calldata a, uint256[2][2] calldata b, uint256[2] calldata c, uint256[9] calldata input) external view returns (bool);
 }
 
 interface ISpendVerifier {
@@ -34,12 +38,14 @@ contract StipendPool is MerkleTreeWithHistory, ReentrancyGuard {
     /// @dev `now` in a spend proof must fall inside this window around block time.
     uint256 public constant NOW_LOOKBACK = 15 minutes;
     uint256 public constant NOW_LOOKAHEAD = 1 minutes;
-    uint256 public constant GRANT_OUTPUTS = 8;
+    uint256 public constant GRANT_OUTPUTS = 16;
+    uint256 public constant DELEGATE_OUTPUTS = 4;
 
     ITransactVerifier public immutable transactVerifier;
     IGrantVerifier public immutable grantVerifier;
     ISpendVerifier public immutable spendVerifier;
     IDiscloseVerifier public immutable discloseVerifier;
+    IDelegateVerifier public immutable delegateVerifier;
 
     mapping(uint256 => bool) public nullifierHashes;
 
@@ -100,6 +106,20 @@ contract StipendPool is MerkleTreeWithHistory, ReentrancyGuard {
         bytes encryptedPayment;   // payout note, for a shielded recipient
     }
 
+    struct DelegateArgs {
+        uint256 root;
+        uint256 nullifier;
+        uint256[DELEGATE_OUTPUTS] subCommitments;
+        uint256 residualCommitment;
+        uint256 timestamp; // `now` inside the proof
+        uint256 extDataHash;
+    }
+
+    struct DelegateExtData {
+        bytes[DELEGATE_OUTPUTS] encryptedSubs;
+        bytes encryptedResidual;
+    }
+
     struct DiscloseArgs {
         uint256 root;
         uint256 kind;
@@ -121,12 +141,14 @@ contract StipendPool is MerkleTreeWithHistory, ReentrancyGuard {
         ITransactVerifier _transact,
         IGrantVerifier _grant,
         ISpendVerifier _spend,
-        IDiscloseVerifier _disclose
+        IDiscloseVerifier _disclose,
+        IDelegateVerifier _delegate
     ) MerkleTreeWithHistory(_levels, _hasher) {
         transactVerifier = _transact;
         grantVerifier = _grant;
         spendVerifier = _spend;
         discloseVerifier = _disclose;
+        delegateVerifier = _delegate;
     }
 
     // ------------------------------------------------------------------
@@ -191,16 +213,16 @@ contract StipendPool is MerkleTreeWithHistory, ReentrancyGuard {
         require(args.extDataHash == _hash(abi.encode(ext)), "ext data");
         require(args.inputNullifiers[0] != args.inputNullifiers[1], "same nullifier");
 
-        uint256[14] memory input;
+        uint256[22] memory input;
         input[0] = args.root;
         input[1] = args.inputNullifiers[0];
         input[2] = args.inputNullifiers[1];
         for (uint256 i = 0; i < GRANT_OUTPUTS; i++) {
             input[3 + i] = args.allowanceCommitments[i];
         }
-        input[11] = args.changeCommitment;
-        input[12] = args.totalCommitment;
-        input[13] = args.extDataHash;
+        input[3 + GRANT_OUTPUTS] = args.changeCommitment;
+        input[4 + GRANT_OUTPUTS] = args.totalCommitment;
+        input[5 + GRANT_OUTPUTS] = args.extDataHash;
         require(grantVerifier.verifyProof(proof.a, proof.b, proof.c, input), "invalid proof");
 
         _spendNullifier(args.inputNullifiers[0]);
@@ -260,6 +282,48 @@ contract StipendPool is MerkleTreeWithHistory, ReentrancyGuard {
             _insertWithMemo(args.payCommitment, ext.encryptedPayment);
         }
         emit NewReceipt(args.receipt);
+    }
+
+    // ------------------------------------------------------------------
+    // Delegation: an agent splits its allowance into sub-allowances under
+    // provably tighter policy, without the owner
+    // ------------------------------------------------------------------
+
+    event NewDelegation(uint256 indexed nullifier, uint32 firstIndex);
+
+    function delegate(Proof calldata proof, DelegateArgs calldata args, DelegateExtData calldata ext) external nonReentrant {
+        require(isKnownRoot(args.root), "unknown root");
+        require(args.extDataHash == _hash(abi.encode(ext)), "ext data");
+        require(
+            args.timestamp + NOW_LOOKBACK >= block.timestamp && args.timestamp <= block.timestamp + NOW_LOOKAHEAD,
+            "stale timestamp"
+        );
+        require(
+            delegateVerifier.verifyProof(
+                proof.a,
+                proof.b,
+                proof.c,
+                [
+                    args.root,
+                    args.nullifier,
+                    args.subCommitments[0],
+                    args.subCommitments[1],
+                    args.subCommitments[2],
+                    args.subCommitments[3],
+                    args.residualCommitment,
+                    args.timestamp,
+                    args.extDataHash
+                ]
+            ),
+            "invalid proof"
+        );
+        _spendNullifier(args.nullifier);
+        uint32 first = nextIndex;
+        for (uint256 i = 0; i < DELEGATE_OUTPUTS; i++) {
+            _insertWithMemo(args.subCommitments[i], ext.encryptedSubs[i]);
+        }
+        _insertWithMemo(args.residualCommitment, ext.encryptedResidual);
+        emit NewDelegation(args.nullifier, first);
     }
 
     // ------------------------------------------------------------------

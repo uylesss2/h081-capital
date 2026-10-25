@@ -56,7 +56,8 @@ template NoteCommitment() {
 
 // Policy: the programmable spending rules bound into an allowance.
 // Zero means "no limit" for windowCap, maxPerTx, expiry and recipientRoot.
-// P = Poseidon(DOM_POLICY, lifetimeCap, windowCap, windowLen, maxPerTx, expiry, recipientRoot, ownerPk)
+// Zero streamRate means no streaming; otherwise cumulative spend may not exceed streamRate * (now - streamStart).
+// P = Poseidon(DOM_POLICY, lifetimeCap, windowCap, windowLen, maxPerTx, expiry, recipientRoot, ownerPk, streamRate, streamStart)
 template PolicyHash() {
     signal input lifetimeCap;
     signal input windowCap;
@@ -65,8 +66,10 @@ template PolicyHash() {
     signal input expiry;
     signal input recipientRoot;
     signal input ownerPk;
+    signal input streamRate;
+    signal input streamStart;
     signal output out;
-    component h = Poseidon(8);
+    component h = Poseidon(10);
     h.inputs[0] <== DOM_POLICY();
     h.inputs[1] <== lifetimeCap;
     h.inputs[2] <== windowCap;
@@ -75,6 +78,8 @@ template PolicyHash() {
     h.inputs[5] <== expiry;
     h.inputs[6] <== recipientRoot;
     h.inputs[7] <== ownerPk;
+    h.inputs[8] <== streamRate;
+    h.inputs[9] <== streamStart;
     out <== h.out;
 }
 

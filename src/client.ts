@@ -11,7 +11,7 @@ import {
 } from './crypto.js';
 import { MerklePath, MerkleTree, recipientListRoot } from './merkle.js';
 import { ViewingKey, decodePayload, decryptMemo, encodePayload, encryptMemo, fromHex, toHex, viewingKeyFromSk } from './encryption.js';
-import { GRANT_OUTPUTS, LEVELS, RECIPIENT_LEVELS, dummyNoteInput, discloseInput, grantInput, spendInput, transactInput, DisclosureKind, NoteInput } from './inputs.js';
+import { DELEGATE_OUTPUTS, GRANT_OUTPUTS, LEVELS, RECIPIENT_LEVELS, delegateInput, dummyNoteInput, discloseInput, grantInput, spendInput, transactInput, DisclosureKind, NoteInput, SubGrant } from './inputs.js';
 import { Prover, ProofResult, SolidityProof } from './prover.js';
 
 const artifactsDir = resolve(import.meta.dirname, '..', 'build', 'artifacts', 'contracts');
@@ -27,7 +27,7 @@ export const POOL_ARTIFACT = 'StipendPool.sol/StipendPool.json';
 
 export interface Deployment {
   pool: Contract;
-  addresses: { pool: string; hasher: string; transact: string; grant: string; spend: string; disclose: string };
+  addresses: { pool: string; hasher: string; transact: string; grant: string; spend: string; disclose: string; delegate: string };
 }
 
 export async function deployPool(signer: Signer, levels = LEVELS): Promise<Deployment> {
@@ -39,17 +39,17 @@ export async function deployPool(signer: Signer, levels = LEVELS): Promise<Deplo
     await c.waitForDeployment();
     return c.getAddress();
   };
-  const [transact, grant, spend, disclose] = await Promise.all([
-    deployVerifier('Transact'), deployVerifier('Grant'), deployVerifier('Spend'), deployVerifier('Disclose'),
+  const [transact, grant, spend, disclose, delegate] = await Promise.all([
+    deployVerifier('Transact'), deployVerifier('Grant'), deployVerifier('Spend'), deployVerifier('Disclose'), deployVerifier('Delegate'),
   ]);
   const poolArtifact = artifact(POOL_ARTIFACT);
   const pool = await new ContractFactory(poolArtifact.abi, poolArtifact.bytecode, signer).deploy(
-    levels, await hasher.getAddress(), transact, grant, spend, disclose,
+    levels, await hasher.getAddress(), transact, grant, spend, disclose, delegate,
   );
   await pool.waitForDeployment();
   return {
     pool: pool as unknown as Contract,
-    addresses: { pool: await pool.getAddress(), hasher: await hasher.getAddress(), transact, grant, spend, disclose },
+    addresses: { pool: await pool.getAddress(), hasher: await hasher.getAddress(), transact, grant, spend, disclose, delegate },
   };
 }
 
@@ -124,6 +124,9 @@ export interface GrantRequest {
   maxPerTx?: bigint;
   expiry?: bigint;
   recipients?: Array<string | StipendAddress>;
+  /** release `streamRate` units per second from `streamStart` (defaults to now) */
+  streamRate?: bigint;
+  streamStart?: bigint;
 }
 
 export interface Relay { relayer?: string; fee?: bigint }
@@ -282,12 +285,14 @@ export class Wallet {
     const total = requests.reduce((s, r) => s + r.amount, 0n);
     const inputs = this.pickInputs(asset, total);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
+    const now = requests.some((r) => r.streamRate) ? await this.latestTimestamp() : 0n;
     const allowances: Allowance[] = requests.map((r) => ({
       asset, remaining: r.amount, agentPk: r.to.pk, windowId: 0n, windowSpent: 0n, rho: randomField(),
       policy: {
         lifetimeCap: r.amount, windowCap: r.windowCap ?? 0n, windowLen: r.windowLen ?? 86400n, maxPerTx: r.maxPerTx ?? 0n,
         expiry: r.expiry ?? 0n, recipientRoot: r.recipients?.length ? recipientListRoot(r.recipients.map(recipientKey), RECIPIENT_LEVELS).root : 0n,
         ownerPk: this.account.keys.pk,
+        streamRate: r.streamRate ?? 0n, streamStart: r.streamRate ? (r.streamStart ?? now) : 0n,
       },
     }));
     const change: Note = { asset, amount: sum - total, pk: this.account.keys.pk, blinding: randomField() };
@@ -298,7 +303,7 @@ export class Wallet {
       return req ? allowanceMemo(a, { owner: this.account.view.pub, agent: req.to.viewPub }) : new Uint8Array();
     });
     const ext = { encryptedAllowances: memos.map(toHex), encryptedChange: toHex(noteMemo(change, this.account.view.pub)) };
-    const extDataHash = hashExt(['tuple(bytes[8] encryptedAllowances,bytes encryptedChange)'], [ext]);
+    const extDataHash = hashExt([`tuple(bytes[${GRANT_OUTPUTS}] encryptedAllowances,bytes encryptedChange)`], [ext]);
     const rebuilt = grantInput({ root: this.tree.root, asset, owner: this.account.keys, inputs, allowances: built.allowances, change, totalSalt, extDataHash });
     const proof = await this.prover.prove('grant', rebuilt.input);
     const args = {
@@ -319,6 +324,45 @@ export class Wallet {
    */
   async pay(owned: OwnedAllowance, amount: bigint, to: string | StipendAddress, relay: Relay = {}): Promise<TxResult & { next: Allowance }> {
     return this.spend(owned, amount, to, relay);
+  }
+
+  /**
+   * Split an allowance this account holds as the agent into up to four
+   * sub-allowances for other agents, each under policy no looser than this
+   * one, keeping the rest. The owner is not involved and can still reclaim
+   * every note in the tree.
+   */
+  async delegate(owned: OwnedAllowance, subs: Array<{ to: StipendAddress } & Omit<SubGrant, 'agentPk'>>, opts: { residualWindowCap?: bigint; residualStreamRate?: bigint } = {}): Promise<TxResult & { subs: Allowance[]; residual: Allowance }> {
+    if (owned.allowance.agentPk !== this.account.keys.pk) throw new Error('only the agent can delegate');
+    if (subs.length === 0 || subs.length > DELEGATE_OUTPUTS) throw new Error(`1..${DELEGATE_OUTPUTS} subs per delegation`);
+    await this.sync();
+    const now = await this.latestTimestamp();
+    const base = {
+      root: this.tree.root, allowance: owned.allowance, path: this.tree.path(owned.index), agent: this.account.keys, now,
+      subs: subs.map((s) => ({ ...s, agentPk: s.to.pk })), ...opts,
+    };
+    const draft = delegateInput({ ...base, extDataHash: 0n });
+    const ext = {
+      encryptedSubs: draft.subs.map((a, i) => (subs[i] ? toHex(allowanceMemo(a, { owner: owned.views.owner, agent: subs[i].to.viewPub })) : '0x')),
+      encryptedResidual: toHex(allowanceMemo(draft.residual, owned.views)),
+    };
+    const extDataHash = hashExt(['tuple(bytes[4] encryptedSubs,bytes encryptedResidual)'], [ext]);
+    // rebuild with the same sub notes (rho and placeholders fixed) and the bound ext hash
+    const built = delegateInput({ ...base, extDataHash, subs: draft.subs.slice(0, subs.length).map((a) => ({
+      agentPk: a.agentPk, amount: a.remaining, windowCap: a.policy.windowCap, maxPerTx: a.policy.maxPerTx, expiry: a.policy.expiry, streamRate: a.policy.streamRate, streamStart: a.policy.streamStart,
+    })) });
+    // delegateInput draws fresh rho per call; pin the draft's notes so memos and commitments agree
+    built.subs.forEach((s, i) => { s.rho = draft.subs[i].rho; s.agentPk = draft.subs[i].agentPk; });
+    const input = { ...built.input, subRho: draft.subs.map((s) => s.rho), subAgentPk: draft.subs.map((s) => s.agentPk), subCommitment: draft.subCommitments };
+    const proof = await this.prover.prove('delegate', input);
+    const args = {
+      root: this.tree.root, nullifier: built.nullifier, subCommitments: draft.subCommitments, residualCommitment: built.residualCommitment,
+      timestamp: now, extDataHash,
+    };
+    const tx = await this.pool.delegate(solProof(proof.proof), args, ext);
+    const receipt = await tx.wait();
+    await this.sync();
+    return { receipt, proof, subs: draft.subs.slice(0, subs.length), residual: built.residual };
   }
 
   /** Owner takes back what is left of an allowance into their own treasury. */

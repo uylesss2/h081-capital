@@ -4,7 +4,7 @@ import * as snarkjs from 'snarkjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
-export type CircuitName = 'transact' | 'grant' | 'spend' | 'disclose';
+export type CircuitName = 'transact' | 'grant' | 'spend' | 'disclose' | 'delegate';
 
 export interface SolidityProof {
   a: [bigint, bigint];

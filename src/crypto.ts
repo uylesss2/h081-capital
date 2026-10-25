@@ -84,10 +84,29 @@ export interface Policy {
   expiry: bigint;        // unix seconds, 0 = never
   recipientRoot: bigint; // 0 = any recipient
   ownerPk: bigint;
+  streamRate: bigint;    // units per second released, 0 = no streaming
+  streamStart: bigint;   // unix seconds the stream starts
 }
 
 export function policyHash(p: Policy): bigint {
-  return poseidon([DOM.POLICY, p.lifetimeCap, p.windowCap, p.windowLen, p.maxPerTx, p.expiry, p.recipientRoot, p.ownerPk]);
+  return poseidon([DOM.POLICY, p.lifetimeCap, p.windowCap, p.windowLen, p.maxPerTx, p.expiry, p.recipientRoot, p.ownerPk, p.streamRate, p.streamStart]);
+}
+
+/** Units an allowance may still spend right now under its policy (lifetime, stream and window), ignoring per-tx caps. */
+export function availableNow(a: Allowance, now: bigint): bigint {
+  let avail = a.remaining;
+  const p = a.policy;
+  if (p.streamRate !== 0n) {
+    const allotted = now > p.streamStart ? p.streamRate * (now - p.streamStart) : 0n;
+    const spentSoFar = p.lifetimeCap - a.remaining;
+    avail = allotted > spentSoFar ? (allotted - spentSoFar < avail ? allotted - spentSoFar : avail) : 0n;
+  }
+  if (p.windowCap !== 0n) {
+    const carried = now / p.windowLen === a.windowId ? a.windowSpent : 0n;
+    const left = p.windowCap > carried ? p.windowCap - carried : 0n;
+    if (left < avail) avail = left;
+  }
+  return avail;
 }
 
 export interface Allowance {

@@ -41,6 +41,8 @@ template Spend(levels, recipientLevels) {
     signal input expiry;
     signal input recipientRoot;
     signal input ownerPk;
+    signal input streamRate;
+    signal input streamStart;
     // spender and membership
     signal input sk;
     signal input pathIndices[levels];
@@ -77,6 +79,8 @@ template Spend(levels, recipientLevels) {
     policy.expiry <== expiry;
     policy.recipientRoot <== recipientRoot;
     policy.ownerPk <== ownerPk;
+    policy.streamRate <== streamRate;
+    policy.streamStart <== streamStart;
 
     component note = AllowanceCommitment();
     note.asset <== asset;
@@ -175,6 +179,33 @@ template Spend(levels, recipientLevels) {
     okExp.a <== now;
     okExp.b <== expiry;
     (1 - okExp.out) * expEnforced === 0;
+
+    // --- streaming release (streamRate 0 = none): spentSoFar + amount <= rate * (now - start) ---
+    component rRate = Range(TIME_BITS());
+    rRate.in <== streamRate;
+    component rStart = Range(TIME_BITS());
+    rStart.in <== streamStart;
+    component hasStream = NonZero();
+    hasStream.in <== streamRate;
+    signal streamEnforced <== hasStream.out * enforce;
+    // elapsed must be non-negative when enforced; a start in the future makes it unprovable
+    component startOk = Leq(TIME_BITS());
+    startOk.a <== streamStart;
+    startOk.b <== now;
+    (1 - startOk.out) * streamEnforced === 0;
+    signal elapsed <== now - streamStart;
+    signal allotted <== streamRate * elapsed;
+    signal spentSoFar <== lifetimeCap - remaining;
+    component rLifetime = Range(AMOUNT_BITS());
+    rLifetime.in <== lifetimeCap;
+    component capOk = Leq(AMOUNT_BITS());
+    capOk.a <== remaining;
+    capOk.b <== lifetimeCap;
+    capOk.out === 1;
+    component streamOk = LeqWhen(130);
+    streamOk.a <== spentSoFar + amount;
+    streamOk.b <== allotted;
+    streamOk.when <== streamEnforced;
 
     // --- recipient ---
     component addrKey = AddressKey();
