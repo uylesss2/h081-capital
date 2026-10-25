@@ -1,0 +1,41 @@
+{
+  "name": "stipend-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private, programmable treasuries for AI agents: shielded multi-asset balances, circuit-enforced spending policies, batch distributions, and selective proofs of spend.",
+  "type": "module",
+  "scripts": {
+    "circuits:build": "node scripts/build-circuits.mjs",
+    "circuits:setup": "node scripts/setup-circuits.mjs",
+    "circuits:test": "vitest run test/circuits",
+    "contracts:compile": "hardhat compile",
+    "sdk:build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:circuits": "vitest run test/circuits",
+    "test:e2e": "vitest run test/e2e",
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "1.3.0",
+    "@noble/curves": "1.9.2",
+    "@noble/hashes": "1.8.0",
+    "circomlibjs": "0.1.7",
+    "ethers": "6.14.4",
+    "ffjavascript": "0.3.1",
+    "snarkjs": "0.7.5"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "3.1.0",
+    "@nomicfoundation/hardhat-network-helpers": "1.1.0",
+    "@openzeppelin/contracts": "5.3.0",
+    "chai": "4.5.0",
+    "circom2": "0.2.22",
+    "circomlib": "2.0.5",
+    "hardhat": "2.26.1",
+    "mocha": "11.7.1",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
