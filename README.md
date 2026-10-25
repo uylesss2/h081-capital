@@ -1,4 +1,4 @@
-# Stipend protocol
+# H0.81 Capital protocol (codename Stipend)
 
 Private, programmable treasuries for AI agents on a public chain. One shielded pool holds any ERC-20.
 Owners fund agents in batches; each agent's spending policy lives inside its note, so a payment that
