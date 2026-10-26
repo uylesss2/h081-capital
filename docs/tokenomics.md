@@ -32,11 +32,12 @@ token cannot touch any user's funds.
 
 The table above describes the testnet stand-in `StipendToken.sol`. **The mainnet token is the EVM launchpad
 creation**: 1,000,000,000 tokens fixed by the EVM launchpad clone, no mint, no burn, no votes, a 2% buy and 2% sell
-tax for 3 years from graduation, 90% of which goes to `StipendTaxReceiver` (an earlier launch plan
-section 3). Distribution is the bonding curve: there is no presale and no free allocation. The creator buys about
+tax for 3 years from graduation, 90% of which is paid in ETH straight to the creator wallet that deploys
+the token, with no restriction (an earlier launch plan section 3). Token name "H0 81 Capital", symbol `H081`,
+X https://x.com/H081CAP. Distribution is the bonding curve: there is no presale and no free allocation. The creator buys about
 2.6% at creation, at the curve price, with a 5% cap; those tokens go straight into a vesting wallet for
 the team Safe with a 1-year cliff and 3-year linear vesting (the launcher checks both). At graduation 200M tokens and 5 ETH seed a Uniswap V2
-pair whose LP is burned. Holders receive nothing from the tax; it funds relayers and audits. `CapacityStake` and `SafetyPool` take any ERC-20 address at construction, so
+pair whose LP is burned. Holders receive nothing from the tax; it is the team's income. `CapacityStake` and `SafetyPool` take any ERC-20 address at construction, so
 they work with either.
 
 ## 3. Capacity (`CapacityStake.sol`)
@@ -99,10 +100,9 @@ The protocol charges no fee. There is no fee switch, no treasury cut on spends, 
 who could add one. Relayer fees are paid in the spent asset to the relayer named in the proof, and only for
 operations with a public leg. H081 captures no protocol revenue.
 
-If the token launches through the EVM launchpad, the platform's 2% trading tax (see an earlier launch plan) flows to a
-`StipendTaxReceiver` whose sink is meant to fund relayer gas subsidies and audits, not holder payouts. That
-is a funding mechanism for infrastructure, not fee capture by the protocol, and it is a decision taken at
-launch, not here.
+The EVM launchpad launch pays the 90% beneficiary share of the 2% trading tax in ETH straight to the creator wallet
+(owner decision of 2026-10-26: no receiver, timelock or restriction). That is the team's income, not fee
+capture by the protocol and not a holder payout.
 
 ## 6. What is tested
 
