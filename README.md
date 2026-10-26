@@ -1,7 +1,7 @@
 # H0.81 Capital protocol (codename Stipend)
 
 Private, programmable treasuries for AI agents on Solana, and the first private cashflow a lender
-can lend against. One shielded pool holds any ERC-20. Owners fund up to sixteen agents per proof; each
+can lend against. One shielded pool holds any SPL Token or Token-2022 asset (USDG, xStocks). Owners fund up to sixteen agents per proof; each
 agent's spending policy lives inside its note, so a payment that breaks the policy has no valid proof.
 Agents delegate slices of their allowance to sub-agents under provably tighter policy, budgets stream at
 a rate per second, and an owner can pledge a streamed allowance to a lender: a fixed share of every spend
@@ -121,7 +121,7 @@ does not restate a live note it holds), `collect`, `settle`, `loan`, `shortfall`
 
 ## Phase 2 contracts (`contracts/token/`, built and tested, not deployed)
 
-- `StipendToken`: plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
+- `StipendToken` (EVM reference only; the real H081 is the launchpad coin on Solana): plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
   commitment), 18 decimals, whole supply minted once to the deployer. No mint, no owner.
 - `CapacityStake`: staked H081 buys capacity for relayers and hosted endpoints to honour:
   `deskCapacity = staked / 100e18`, `shieldCap = (staked / 100e18) * 10,000 USDG per 30 days`;
