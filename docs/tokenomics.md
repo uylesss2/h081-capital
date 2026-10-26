@@ -1,6 +1,10 @@
 # H081 tokenomics (Phase 2)
 
 Status 2026-10-26: **no token is launched, and nothing in this repository is deployed to any chain.**
+**Route decided: the main H081 token is an EVM launchpad token** (owner decision of 2026-10-25, the launch package
+in `launch/` and an earlier launch plan). Supply is the EVM launchpad's fixed 1,000,000,000-token clone.
+`contracts/token/StipendToken.sol` is a testnet and test stand-in with the same role; it is not deployed
+to any mainnet.
 The contracts described here (`contracts/token/`) are built and tested in-process (`test/e2e/token.test.ts`)
 and exist so that the economics are code, not a promise. The ticker `H081` is the working symbol of
 H0.81 Capital, not a commitment; the name, symbol and supply are confirmed only at launch. The binding
@@ -26,11 +30,13 @@ token cannot touch any user's funds.
 | Burn | none built in (holders may send to a dead address like any ERC-20) |
 | Governance | none; the token carries no votes |
 
-The repository does not pin a supply figure. The EVM launchpad launch plan (an earlier launch plan) assumes the
-platform's fixed 1,000,000,000-token clone; a deployment of `StipendToken.sol` itself must choose a number
-before any deployment. Two token routes exist and one must be chosen at launch: deploying
-`StipendToken.sol`, or an EVM launchpad token, which produces the EVM launchpad's own taxed token and would leave
-`StipendToken.sol` unused. `CapacityStake` and `SafetyPool` take any ERC-20 address at construction, so
+The table above describes the testnet stand-in `StipendToken.sol`. **The mainnet token is the EVM launchpad
+creation**: 1,000,000,000 tokens fixed by the EVM launchpad clone, no mint, no burn, no votes, a 2% buy and 2% sell
+tax for 3 years from graduation, 90% of which goes to `StipendTaxReceiver` (an earlier launch plan
+section 3). Distribution is the bonding curve: there is no presale and no free allocation. The creator buys about
+2.6% at creation, at the curve price, with a 5% cap; those tokens go straight into a vesting wallet for
+the team Safe with a 1-year cliff and 3-year linear vesting (the launcher checks both). At graduation 200M tokens and 5 ETH seed a Uniswap V2
+pair whose LP is burned. Holders receive nothing from the tax; it funds relayers and audits. `CapacityStake` and `SafetyPool` take any ERC-20 address at construction, so
 they work with either.
 
 ## 3. Capacity (`CapacityStake.sol`)
