@@ -1,0 +1,30 @@
+[package]
+name = "capacity_stake"
+version = "0.1.0"
+description = "Stipend Phase 2 (H0.81 Capital): staked H081 buys desk and shielding capacity. Permissionless per mint, no admin"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "capacity_stake"
+
+[features]
+default = []
+# Localnet-only test build with a separate program id and a 3-second cooldown. Never deployed.
+fast = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.1", features = ["init-if-needed"] }
+anchor-spl = { version = "=1.2.1", default-features = false, features = ["solana-v3", "token", "token_2022"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

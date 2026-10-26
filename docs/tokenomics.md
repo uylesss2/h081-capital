@@ -3,8 +3,8 @@
 Status 2026-10-26: **no token is launched, and nothing in this repository is deployed to any chain.**
 **Route decided: the main trading token H081 launches on Solana through the launchpad** (owner decision of
 2026-10-26; guide in the launch guide). It is a Token-2022 coin with a fixed 1,000,000,000 supply. The
-the EVM launchpad plan for Robinhood Chain is superseded. The bank product itself still targets Robinhood Chain; the two
-are independent because the pool never reads the token (section 1). `contracts/token/StipendToken.sol` is a
+the EVM launchpad plan for Robinhood Chain is superseded. The bank product itself now also moves to Solana (owner decision
+2026-10-26, `docs/SOLANA-PORT.md`); the two stay independent because the pool never reads the token (section 1). `contracts/token/StipendToken.sol` is a
 testnet and test stand-in only; it is not deployed to any mainnet.
 The contracts described here (`contracts/token/`) are built and tested in-process (`test/e2e/token.test.ts`)
 and exist so that the economics are code, not a promise. The ticker `H081` is the working symbol of
@@ -40,10 +40,11 @@ which the launchpad's program splits 75% to the launch vault, 15% to the launchp
 team, as sole backer). Holders receive nothing. At graduation the coin moves to a Raydium CPMM pool with
 locked liquidity. Details, rehearsal and risks: the launch guide.
 
-Phase 2 consequence: `CapacityStake` and `SafetyPool` are EVM contracts for Robinhood Chain and cannot hold a
-Solana token. Capacity needs no bridge, because relayers enforce it and can read H081 stakes on Solana
-directly. The safety pool pays lenders from Robinhood loan shortfalls, so with a Solana token it needs a
-bridge or a redesign before it can ship. Neither is built yet.
+Phase 2 consequence: with the bank on Solana, staking and the safety pool sit on the same chain as the
+token, so no bridge is needed. `CapacityStake.sol` and `SafetyPool.sol` stay in the repo as the EVM reference
+implementation; they are being ported as the Solana programs `capacity_stake` and `safety_pool` for the H081
+Token-2022 mint (`docs/SOLANA-PORT.md` section 3.3). Those programs are in build, not deployed to devnet or
+mainnet, and ship only after Phase 1 and an external audit.
 
 ## 3. Capacity (`CapacityStake.sol`)
 

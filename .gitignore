@@ -3,3 +3,7 @@ build/
 circuits/ptau/*.ptau
 .env
 *.zkey
+solana/keys/
+solana/target/
+solana/target-so/
+solana/test-ledger/

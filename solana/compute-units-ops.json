@@ -1,0 +1,16 @@
+{
+  "measured": "2026-10-26T19:08:02.536Z",
+  "rpc": "http://127.0.0.1:8999",
+  "computeUnits": {
+    "transact_deposit": 191077,
+    "transact_withdraw": 194100,
+    "grant": 560080,
+    "spend_public": 178461,
+    "spend_shielded": 169687,
+    "spend_reclaim": 169132,
+    "delegate": 241303,
+    "spend_pledged": 192906,
+    "spend_lender_claim": 178585,
+    "grant_16": 567233
+  }
+}

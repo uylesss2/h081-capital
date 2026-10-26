@@ -1,0 +1,31 @@
+[package]
+name = "safety_pool"
+version = "0.1.0"
+description = "Stipend Phase 2 (H0.81 Capital): H081 stakers insure stream-backed loans against shortfall. Permissionless per mint, no admin"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "safety_pool"
+
+[features]
+default = []
+# Localnet-only test build with a separate program id and a short cooldown and grace. Never deployed.
+fast = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.1", features = ["init-if-needed"] }
+anchor-spl = { version = "=1.2.1", default-features = false, features = ["solana-v3", "token", "token_2022"] }
+solana-sha256-hasher = "=3.1.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

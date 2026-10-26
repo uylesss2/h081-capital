@@ -14,12 +14,22 @@
     "test": "vitest run",
     "test:circuits": "vitest run test/circuits",
     "test:e2e": "vitest run test/e2e",
-    "deploy": "node scripts/deploy.mjs"
+    "deploy": "node scripts/deploy.mjs",
+    "test:solana": "node scripts/solana-test-all.mjs",
+    "test:staking": "node scripts/solana-staking-localnet.mjs restart && vitest run --config vitest.staking.config.ts",
+    "solana:vk": "node scripts/gen-solana-vk.mjs",
+    "solana:build": "node scripts/solana-localnet.mjs build",
+    "solana:localnet": "node scripts/solana-localnet.mjs",
+    "test:solana:loan": "node scripts/solana-loan-localnet.mjs restart && vitest run --config vitest.solana-loan.config.ts",
+    "solana:loan:build": "node scripts/solana-loan-localnet.mjs build",
+    "test:solana:pool": "node scripts/solana-localnet.mjs restart && vitest run --config vitest.solana.config.ts"
   },
   "dependencies": {
     "@noble/ciphers": "1.3.0",
     "@noble/curves": "1.9.2",
     "@noble/hashes": "1.8.0",
+    "@solana/spl-token": "0.4.13",
+    "@solana/web3.js": "1.98.4",
     "circomlibjs": "0.1.7",
     "ethers": "6.14.4",
     "ffjavascript": "0.3.1",

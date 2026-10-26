@@ -1,6 +1,6 @@
 # H0.81 Capital protocol (codename Stipend)
 
-Private, programmable treasuries for AI agents on a public chain, and the first private cashflow a lender
+Private, programmable treasuries for AI agents on Solana, and the first private cashflow a lender
 can lend against. One shielded pool holds any ERC-20. Owners fund up to sixteen agents per proof; each
 agent's spending policy lives inside its note, so a payment that breaks the policy has no valid proof.
 Agents delegate slices of their allowance to sub-agents under provably tighter policy, budgets stream at
@@ -9,10 +9,16 @@ is routed to the lender inside the spend proof, and the lender can pull its shar
 Owners, agents and lenders prove bounds on balances and rates without revealing amounts, counterparties
 or policies. There is no admin key, pause switch or upgrade path on any contract.
 
-Target chain: **Robinhood Chain** (4663, Arbitrum Orbit, Cancun). Assets: USDG and the tokenized stocks.
+Target chain: **Solana** (owner decision 2026-10-26), the same chain as the H081 token. Assets: USDG and
+tokenized stocks (xStocks; not available to US persons). The Solana programs (`solana/`: stipend_pool,
+stream_loan, capacity_stake, safety_pool) are built and tested on a local validator per
+`docs/SOLANA-PORT.md`; see "Solana programs" below and `solana/README.md`. The EVM contracts in
+`contracts/` were built for Robinhood Chain and are kept as the reference implementation. Robinhood Chain is
+no longer the target.
 **Nothing in this repository is deployed to any public chain and no token exists.** See "What is not
 deployed" below. The binding design for v2 is `docs/PRD-V2-DESIGN.md`; the token economics are in
-`docs/tokenomics.md`; the EVM launchpad launch plan (not executed) is in an earlier launch plan.
+`docs/tokenomics.md`; the EVM launchpad launch plan in an earlier launch plan is superseded (H081 launches on
+Solana via the launchpad, the launch guide).
 
 ## The six circuits
 
@@ -155,7 +161,12 @@ src/                 SDK: crypto (mirrors the circuits), merkle, encryption (x25
 test/circuits/       constraint tests: honest inputs accepted, every dishonest input rejected
 test/e2e/            full flow on an in-process EVM with real Groth16 proofs (pool, lending, token)
 test/sdk/            pure-model property test of the lender total bound
-scripts/             build-circuits, setup-circuits, deploy
+scripts/             build-circuits, setup-circuits, deploy, gen-solana-vk, Solana localnet and test runners
+solana/programs/     stipend_pool, stream_loan, capacity_stake, safety_pool (Anchor crates, cargo build-sbf)
+solana/scripts/      WSL build and private-validator scripts
+src/solana/          Solana SDK: fieldOf, PDAs, buffers, instruction builders, events, SolanaWallet,
+                     SolanaLenderWallet (wallet lender), loan.SolanaLoanLenderWallet (stream_loan), staking helpers
+test/solana/         e2e, pool, lending, staking (local validator), events and consistency (unit)
 ```
 
 ## Build and test
@@ -186,11 +197,55 @@ single dev contribution with a public ceremony. The circuits, the pipeline and t
 
 CI (`.github/workflows/ci.yml`) runs the same steps on Node 20 with the ptau cached.
 
+## Solana programs (`solana/`)
+
+| program | what it does | port of |
+|---|---|---|
+| `stipend_pool` | shielded pool: deposit, withdraw, transfer, 16-way grant, spend (agent, owner reclaim, lender claim), delegate, lender-share routing and escrow, on-chain Groth16 (alt_bn128) and Poseidon Merkle tree, disclosure and stream verification | `StipendPool.sol` |
+| `stream_loan` | slots, loans funded against a stream proof, repayment credited from the slot inbox, lender claims through the slot PDA, shortfall view | `StreamLoan.sol` |
+| `capacity_stake` | staked H081 buys desk and shielding capacity, 7-day unstake cooldown | `CapacityStake.sol` |
+| `safety_pool` | H081 stakers insure stream-backed loans; slash on shortfall, 14-day unbonding at risk | `SafetyPool.sol` |
+
+Circuits, zkeys and verifying keys are byte-identical to the EVM build. Solana pubkeys enter the circuits
+as `fieldOf(pubkey)` (first 160 bits of sha256). No program has an admin key, a pause or upgrade logic;
+every per-mint pool is created permissionlessly. Layout, PDAs, the buffer flow and the deploy steps
+(including removing the upgrade authority, only on the owner's explicit go) are in `solana/README.md`.
+
+Requirements: WSL Ubuntu with Rust 1.99, cargo-build-sbf 4.4.0 and the Solana CLI 4.3.2
+(`solana-test-validator`); Node on Windows. Anchor CLI is not needed.
+
+```
+npm run solana:build     # all programs (+ localnet-only probe/fast variants) -> solana/target-so (gitignored)
+npm run test:solana      # every Solana test file: three private validators (8999, 9099, 9199), started fresh
+                         # and stopped afterwards; a missing validator, program or a skipped test fails the run
+```
+
+Test results (2026-10-26, local only):
+
+| command | result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm test` (EVM reference + circuits) | 5 files, 92/92 |
+| `npm run test:solana` | 86/86: pool suite 52 (e2e, pool, events, consistency), loan 11, staking 23 |
+| `npm run solana:build` | all 4 programs and 3 localnet variants build |
+
+Measured compute units (local validator): deposit 191k, withdraw 188k, grant 565k (16-way 576k), public
+spend 180k, shielded spend 169k, pledged spend 198k, lender claim 181k, delegate 237k; Groth16 spend verify
+121k. All are asserted against budgets in the tests and written to `solana/target-so/compute-units*.json`.
+
 ## What is not deployed
 
-- No contract in this repository is deployed to Robinhood Chain, its testnet, or any other public chain.
+- No contract or program in this repository is deployed to Solana (devnet or mainnet), Robinhood Chain,
+  its testnet, or any other public chain. The Solana programs have only run on private local
+  `solana-test-validator` instances, loaded as immutable programs at localnet ids whose keypairs live in the
+  gitignored `solana/keys/` and must never be used for a public cluster.
+- No Solana program has been given an upgrade authority on any cluster, and none has been made final;
+  removing the upgrade authority (`solana program set-upgrade-authority <ID> --final`) is part of a future
+  deployment and happens only on the owner's explicit go (`solana/README.md`, "Deploying").
 - No token exists. `StipendToken.sol` is a contract in the repo, not a launch; the EVM launchpad plan in
-  an earlier launch plan is a plan only and runs solely on the owner's explicit go.
+  an earlier launch plan is superseded by the launchpad (Solana) route and runs solely on the owner's explicit go.
+- **Superseded for the protocol (2026-10-26):** the EVM deploy below targets Robinhood Chain and is kept
+  only for the reference implementation; the bank ships as Solana programs (`docs/SOLANA-PORT.md`).
 - `scripts/deploy.mjs` deploys the hasher, the six verifiers, the pool and the `StreamLoan` registry to
   the named network and writes `deployments/<network>.json`; mainnet additionally needs `STIPEND_ALLOW_MAINNET=1`.
   It does not deploy the Phase 2 contracts.
@@ -248,3 +303,5 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 - Per-asset caps inside one policy for mixed stock and stablecoin desks; more than four subs per delegation.
 - Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen.
 - Public trusted-setup ceremony and an external audit.
+- Solana: a relayer service and address lookup tables for the SDK; deploy scripts for a public cluster (the
+  steps are documented, nothing is automated); verifiable builds.
