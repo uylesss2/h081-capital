@@ -1,10 +1,11 @@
 # H081 tokenomics (Phase 2)
 
 Status 2026-10-26: **no token is launched, and nothing in this repository is deployed to any chain.**
-**Route decided: the main H081 token is an EVM launchpad token** (owner decision of 2026-10-25, the launch package
-in `launch/` and an earlier launch plan). Supply is the EVM launchpad's fixed 1,000,000,000-token clone.
-`contracts/token/StipendToken.sol` is a testnet and test stand-in with the same role; it is not deployed
-to any mainnet.
+**Route decided: the main trading token H081 launches on Solana through the launchpad** (owner decision of
+2026-10-26; guide in the launch guide). It is a Token-2022 coin with a fixed 1,000,000,000 supply. The
+the EVM launchpad plan for Robinhood Chain is superseded. The bank product itself still targets Robinhood Chain; the two
+are independent because the pool never reads the token (section 1). `contracts/token/StipendToken.sol` is a
+testnet and test stand-in only; it is not deployed to any mainnet.
 The contracts described here (`contracts/token/`) are built and tested in-process (`test/e2e/token.test.ts`)
 and exist so that the economics are code, not a promise. The ticker `H081` is the working symbol of
 H0.81 Capital, not a commitment; the name, symbol and supply are confirmed only at launch. The binding
@@ -30,15 +31,19 @@ token cannot touch any user's funds.
 | Burn | none built in (holders may send to a dead address like any ERC-20) |
 | Governance | none; the token carries no votes |
 
-The table above describes the testnet stand-in `StipendToken.sol`. **The mainnet token is the EVM launchpad
-creation**: 1,000,000,000 tokens fixed by the EVM launchpad clone, no mint, no burn, no votes, a 2% buy and 2% sell
-tax for 3 years from graduation, 90% of which is paid in ETH straight to the creator wallet that deploys
-the token, with no restriction (an earlier launch plan section 3). Token name "H0 81 Capital", symbol `H081`,
-X https://x.com/H081CAP. Distribution is the bonding curve: there is no presale and no free allocation. The creator buys about
-2.6% at creation, at the curve price, with a 5% cap; those tokens go straight into a vesting wallet for
-the team Safe with a 1-year cliff and 3-year linear vesting (the launcher checks both). At graduation 200M tokens and 5 ETH seed a Uniswap V2
-pair whose LP is burned. Holders receive nothing from the tax; it is the team's income. `CapacityStake` and `SafetyPool` take any ERC-20 address at construction, so
-they work with either.
+The table above describes the testnet stand-in `StipendToken.sol`. **The main trading token is the
+the launchpad coin on Solana**: name "H0 81 Capital", symbol `H081`, X https://x.com/H081CAP, Token-2022,
+1,000,000,000 supply, no transfer tax. The team alone funds the opening buy with 10 SOL (self-funded raise,
+whitelist = the creator's wallet), which buys about 22% of supply into the launchpad's launch vault; there is no
+presale and no free allocation. Curve trades pay 1.25%: 0.25% Raydium, 0.5% the launchpad, 0.5% creator fee,
+which the launchpad's program splits 75% to the launch vault, 15% to the launchpad's buyback and 10% to backers (the
+team, as sole backer). Holders receive nothing. At graduation the coin moves to a Raydium CPMM pool with
+locked liquidity. Details, rehearsal and risks: the launch guide.
+
+Phase 2 consequence: `CapacityStake` and `SafetyPool` are EVM contracts for Robinhood Chain and cannot hold a
+Solana token. Capacity needs no bridge, because relayers enforce it and can read H081 stakes on Solana
+directly. The safety pool pays lenders from Robinhood loan shortfalls, so with a Solana token it needs a
+bridge or a redesign before it can ship. Neither is built yet.
 
 ## 3. Capacity (`CapacityStake.sol`)
 
