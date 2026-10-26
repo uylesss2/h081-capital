@@ -13,6 +13,12 @@ include "circomlib/circuits/comparators.circom";
 // owner's policy. The owner can reclaim any note in the tree.
 //   fixed by the parent:  windowLen, recipientRoot, ownerPk, (residual) expiry
 //   tightened per sub:    windowCap, maxPerTx, expiry, streamRate, streamStart
+// Pledges: every sub and the residual carry the parent's lender and
+// pledgeBps unchanged. A pledge is immutable and only the owner creates one
+// (grant.circom), so an agent can neither re-point a lender nor lend to
+// itself to escape the owner's rules. The residual keeps the parent's
+// pledgePaid and may not shrink below what the lender has already been
+// advanced on; subs start at zero.
 template Delegate(levels, nSubs) {
     // public
     signal input root;
@@ -29,6 +35,7 @@ template Delegate(levels, nSubs) {
     signal input windowId;
     signal input windowSpent;
     signal input rho;
+    signal input pledgePaid;
     signal input lifetimeCap;
     signal input windowCap;
     signal input windowLen;
@@ -38,6 +45,11 @@ template Delegate(levels, nSubs) {
     signal input ownerPk;
     signal input streamRate;
     signal input streamStart;
+    signal input lender;
+    signal input pledgeBps;
+    // preimage of `lender`; both 0 when unpledged
+    signal input lenderAddr;
+    signal input loanRef;
     signal input sk;
     signal input pathIndices[levels];
     signal input pathElements[levels];
@@ -55,6 +67,9 @@ template Delegate(levels, nSubs) {
     // the residual's share of the window cap and stream
     signal input resWindowCap;
     signal input resStreamRate;
+    // witness: floor((lifetimeCap - sumAmount) * pledgeBps / 10000)
+    signal input resLifetimeShare;
+    signal input resLifetimeShareRem;
 
     // --- only the agent delegates ---
     component pk = PublicKey();
@@ -72,6 +87,8 @@ template Delegate(levels, nSubs) {
     policy.ownerPk <== ownerPk;
     policy.streamRate <== streamRate;
     policy.streamStart <== streamStart;
+    policy.lender <== lender;
+    policy.pledgeBps <== pledgeBps;
 
     component note = AllowanceCommitment();
     note.asset <== asset;
@@ -81,6 +98,7 @@ template Delegate(levels, nSubs) {
     note.windowId <== windowId;
     note.windowSpent <== windowSpent;
     note.rho <== rho;
+    note.pledgePaid <== pledgePaid;
 
     component tree = MerkleCheck(levels);
     tree.enabled <== 1;
@@ -111,6 +129,8 @@ template Delegate(levels, nSubs) {
     rNow.in <== now;
     component rLifetime = Range(AMOUNT_BITS());
     rLifetime.in <== lifetimeCap;
+    component rPaid = Range(AMOUNT_BITS());
+    rPaid.in <== pledgePaid;
 
     component hasCap = NonZero();
     hasCap.in <== windowCap;
@@ -120,6 +140,14 @@ template Delegate(levels, nSubs) {
     hasExp.in <== expiry;
     component hasRate = NonZero();
     hasRate.in <== streamRate;
+    // the parent's pledge is well formed; subs and the residual copy it as is
+    component bps = PledgeBps();
+    bps.bps <== pledgeBps;
+    component binding = LenderBinding();
+    binding.hasPledge <== bps.hasPledge;
+    binding.lender <== lender;
+    binding.lenderAddr <== lenderAddr;
+    binding.loanRef <== loanRef;
 
     // --- subs ---
     component subPolicy[nSubs];
@@ -193,6 +221,8 @@ template Delegate(levels, nSubs) {
         subPolicy[i].ownerPk <== ownerPk;
         subPolicy[i].streamRate <== subStreamRate[i];
         subPolicy[i].streamStart <== subStreamStart[i];
+        subPolicy[i].lender <== lender;
+        subPolicy[i].pledgeBps <== pledgeBps;
 
         sub[i] = AllowanceCommitment();
         sub[i].asset <== asset;
@@ -202,6 +232,7 @@ template Delegate(levels, nSubs) {
         sub[i].windowId <== windowId;
         sub[i].windowSpent <== 0;
         sub[i].rho <== subRho[i];
+        sub[i].pledgePaid <== 0;
         sub[i].out === subCommitment[i];
 
         sumAmount += subAmount[i];
@@ -217,12 +248,17 @@ template Delegate(levels, nSubs) {
     rResCap.in <== resWindowCap;
     component rResRate = Range(TIME_BITS());
     rResRate.in <== resStreamRate;
+    // a non-empty residual under a capped or streamed parent keeps a non-zero cap and rate; an empty one may drop them
+    component resNZ = NonZero();
+    resNZ.in <== residualRemaining;
     component resCapNZ = NonZero();
     resCapNZ.in <== resWindowCap;
-    (1 - resCapNZ.out) * hasCap.out === 0;
+    signal capNeeded <== hasCap.out * resNZ.out;
+    (1 - resCapNZ.out) * capNeeded === 0;
     component resRateNZ = NonZero();
     resRateNZ.in <== resStreamRate;
-    (1 - resRateNZ.out) * hasRate.out === 0;
+    signal rateNeeded <== hasRate.out * resNZ.out;
+    (1 - resRateNZ.out) * rateNeeded === 0;
     component capSum = LeqWhen(132);
     capSum.a <== resWindowCap + sumCap;
     capSum.b <== windowCap;
@@ -233,8 +269,23 @@ template Delegate(levels, nSubs) {
     rateSum.when <== hasRate.out;
 
     // --- the residual: same policy, shrunk ---
+    // Its lifetime share must still cover what the lender has been paid, so the
+    // lender's lifetime total over the whole tree stays at most floor(lifetimeCap * bps / 10000).
+    signal resLifetimeCap <== lifetimeCap - sumAmount;
+    component rResLifetime = Range(AMOUNT_BITS());
+    rResLifetime.in <== resLifetimeCap;
+    component resShare = ShareOf();
+    resShare.value <== resLifetimeCap;
+    resShare.bps <== pledgeBps;
+    resShare.q <== resLifetimeShare;
+    resShare.rem <== resLifetimeShareRem;
+    component resPaidOk = Leq(AMOUNT_BITS());
+    resPaidOk.a <== pledgePaid;
+    resPaidOk.b <== resLifetimeShare;
+    resPaidOk.out === 1;
+
     component resPolicy = PolicyHash();
-    resPolicy.lifetimeCap <== lifetimeCap - sumAmount;
+    resPolicy.lifetimeCap <== resLifetimeCap;
     resPolicy.windowCap <== resWindowCap;
     resPolicy.windowLen <== windowLen;
     resPolicy.maxPerTx <== maxPerTx;
@@ -243,6 +294,8 @@ template Delegate(levels, nSubs) {
     resPolicy.ownerPk <== ownerPk;
     resPolicy.streamRate <== resStreamRate;
     resPolicy.streamStart <== streamStart;
+    resPolicy.lender <== lender;
+    resPolicy.pledgeBps <== pledgeBps;
 
     component nextRho = NextRho();
     nextRho.rho <== rho;
@@ -254,6 +307,7 @@ template Delegate(levels, nSubs) {
     res.windowId <== windowId;
     res.windowSpent <== windowSpent;
     res.rho <== nextRho.out;
+    res.pledgePaid <== pledgePaid;
     res.out === residualCommitment;
 
     signal extDataSquare <== extDataHash * extDataHash;

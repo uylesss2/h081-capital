@@ -13,7 +13,7 @@ include "circomlib/circuits/comparators.circom";
 //   kind 2: windowSpent    <= bound          in window windowIdPub
 // `audience` is chosen by the verifier so the proof cannot be replayed.
 // agentPk is public so the verifier knows which agent the statement covers;
-// the asset, the policy and every amount stay private.
+// the asset, the policy (pledge included) and every amount stay private.
 template Disclose(levels) {
     signal input root;
     signal input kind;
@@ -27,6 +27,7 @@ template Disclose(levels) {
     signal input windowId;
     signal input windowSpent;
     signal input rho;
+    signal input pledgePaid;
     signal input lifetimeCap;
     signal input windowCap;
     signal input windowLen;
@@ -36,6 +37,8 @@ template Disclose(levels) {
     signal input ownerPk;
     signal input streamRate;
     signal input streamStart;
+    signal input lender;
+    signal input pledgeBps;
     signal input pathIndices[levels];
     signal input pathElements[levels];
 
@@ -52,6 +55,8 @@ template Disclose(levels) {
     policy.ownerPk <== ownerPk;
     policy.streamRate <== streamRate;
     policy.streamStart <== streamStart;
+    policy.lender <== lender;
+    policy.pledgeBps <== pledgeBps;
 
     component note = AllowanceCommitment();
     note.asset <== asset;
@@ -61,6 +66,7 @@ template Disclose(levels) {
     note.windowId <== windowId;
     note.windowSpent <== windowSpent;
     note.rho <== rho;
+    note.pledgePaid <== pledgePaid;
 
     component tree = MerkleCheck(levels);
     tree.enabled <== 1;

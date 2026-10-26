@@ -15,6 +15,7 @@ function DOM_RHO()    { return 8; }
 function DOM_TOTAL()  { return 9; }
 function DOM_RCPT()   { return 10; }
 function DOM_ADDR()   { return 11; }
+function DOM_LENDER() { return 12; }
 
 // pk = Poseidon(DOM_PK, sk)
 template PublicKey() {
@@ -57,7 +58,9 @@ template NoteCommitment() {
 // Policy: the programmable spending rules bound into an allowance.
 // Zero means "no limit" for windowCap, maxPerTx, expiry and recipientRoot.
 // Zero streamRate means no streaming; otherwise cumulative spend may not exceed streamRate * (now - streamStart).
-// P = Poseidon(DOM_POLICY, lifetimeCap, windowCap, windowLen, maxPerTx, expiry, recipientRoot, ownerPk, streamRate, streamStart)
+// pledgeBps (0..10000) routes that fraction of every spend to the lender;
+// lender = LenderKey(lenderAddr, loanRef), or 0 when pledgeBps is 0.
+// P = Poseidon(DOM_POLICY, lifetimeCap, windowCap, windowLen, maxPerTx, expiry, recipientRoot, ownerPk, streamRate, streamStart, lender, pledgeBps)
 template PolicyHash() {
     signal input lifetimeCap;
     signal input windowCap;
@@ -68,8 +71,10 @@ template PolicyHash() {
     signal input ownerPk;
     signal input streamRate;
     signal input streamStart;
+    signal input lender;
+    signal input pledgeBps;
     signal output out;
-    component h = Poseidon(10);
+    component h = Poseidon(12);
     h.inputs[0] <== DOM_POLICY();
     h.inputs[1] <== lifetimeCap;
     h.inputs[2] <== windowCap;
@@ -80,11 +85,28 @@ template PolicyHash() {
     h.inputs[7] <== ownerPk;
     h.inputs[8] <== streamRate;
     h.inputs[9] <== streamStart;
+    h.inputs[10] <== lender;
+    h.inputs[11] <== pledgeBps;
     out <== h.out;
 }
 
-// Allowance note: funds an agent may spend under a policy.
-// A = Poseidon(DOM_ALLOW, asset, remaining, agentPk, policyHash, windowId, windowSpent, rho)
+// The lender of a pledged allowance: an EVM address and a loan slot id,
+// hashed so the policy carries a single field.
+// L = Poseidon(DOM_LENDER, lenderAddr, loanRef)
+template LenderKey() {
+    signal input lenderAddr;
+    signal input loanRef;
+    signal output out;
+    component h = Poseidon(3);
+    h.inputs[0] <== DOM_LENDER();
+    h.inputs[1] <== lenderAddr;
+    h.inputs[2] <== loanRef;
+    out <== h.out;
+}
+
+// Allowance note: funds an agent may spend under a policy. pledgePaid is
+// the cumulative value this line has routed to its lender.
+// A = Poseidon(DOM_ALLOW, asset, remaining, agentPk, policyHash, windowId, windowSpent, rho, pledgePaid)
 template AllowanceCommitment() {
     signal input asset;
     signal input remaining;
@@ -93,8 +115,9 @@ template AllowanceCommitment() {
     signal input windowId;
     signal input windowSpent;
     signal input rho;
+    signal input pledgePaid;
     signal output out;
-    component h = Poseidon(8);
+    component h = Poseidon(9);
     h.inputs[0] <== DOM_ALLOW();
     h.inputs[1] <== asset;
     h.inputs[2] <== remaining;
@@ -103,6 +126,7 @@ template AllowanceCommitment() {
     h.inputs[5] <== windowId;
     h.inputs[6] <== windowSpent;
     h.inputs[7] <== rho;
+    h.inputs[8] <== pledgePaid;
     out <== h.out;
 }
 

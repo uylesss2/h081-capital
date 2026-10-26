@@ -1,0 +1,71 @@
+# Builds the six circuits, runs the dev Groth16 setup, compiles the contracts and runs every test.
+# The powers-of-tau file is not committed: it is generated with snarkjs on a cache miss, exactly as
+# scripts/setup-circuits.mjs expects it (circuits/ptau/pot17.ptau, phase 2 prepared).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # One dev contribution is enough for tests; the file only depends on the curve and the power.
+      - name: Cache powers of tau
+        id: ptau
+        uses: actions/cache@v4
+        with:
+          path: circuits/ptau/pot17.ptau
+          key: ptau-bn128-17-v1
+
+      - name: Generate pot17 (cache miss)
+        if: steps.ptau.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p circuits/ptau
+          npx snarkjs powersoftau new bn128 17 /tmp/pot17_0000.ptau
+          npx snarkjs powersoftau contribute /tmp/pot17_0000.ptau /tmp/pot17_0001.ptau -n="ci" -e="$(openssl rand -hex 32)"
+          npx snarkjs powersoftau prepare phase2 /tmp/pot17_0001.ptau circuits/ptau/pot17.ptau
+          rm -f /tmp/pot17_0000.ptau /tmp/pot17_0001.ptau
+
+      # Compiled circuits, proving keys and verifiers are reused while the circuit sources and the
+      # toolchain are unchanged. Builds and setups run one circuit at a time, never in parallel.
+      - name: Cache circuit builds
+        id: circuits
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/circuits
+            contracts/verifiers
+          key: circuits-${{ hashFiles('circuits/**/*.circom', 'scripts/build-circuits.mjs', 'scripts/setup-circuits.mjs', 'package-lock.json') }}
+
+      - name: Build circuits
+        if: steps.circuits.outputs.cache-hit != 'true'
+        run: npm run circuits:build
+
+      - name: Groth16 setup and verifiers
+        if: steps.circuits.outputs.cache-hit != 'true'
+        run: npm run circuits:setup
+
+      - run: npm run contracts:compile
+
+      - run: npm run typecheck
+
+      - run: npm test

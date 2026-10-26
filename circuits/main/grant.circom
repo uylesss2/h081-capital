@@ -9,6 +9,8 @@ include "lib/range.circom";
 // change note back to the treasury. The chain sees nOuts + 1 commitments
 // and a hash of the total; amounts, agents, policies and the asset stay
 // private. Unused slots carry amount 0 and a throwaway agent key.
+// An allowance may be granted pre-pledged (lender, pledgeBps); its
+// pledgePaid starts at 0.
 template Grant(levels, nIns, nOuts) {
     signal input root;
     signal input inputNullifier[nIns];
@@ -33,6 +35,10 @@ template Grant(levels, nIns, nOuts) {
     signal input recipientRoot[nOuts];
     signal input streamRate[nOuts];
     signal input streamStart[nOuts];
+    signal input lender[nOuts];
+    signal input pledgeBps[nOuts];
+    signal input lenderAddr[nOuts];
+    signal input loanRef[nOuts];
     signal input rho[nOuts];
 
     signal input changeAmount;
@@ -88,6 +94,8 @@ template Grant(levels, nIns, nOuts) {
     component lenNonZero[nOuts];
     component rateRange[nOuts];
     component startRange[nOuts];
+    component bps[nOuts];
+    component binding[nOuts];
     var sumOuts = 0;
     for (var i = 0; i < nOuts; i++) {
         aRange[i] = Range(AMOUNT_BITS());
@@ -109,6 +117,14 @@ template Grant(levels, nIns, nOuts) {
         rateRange[i].in <== streamRate[i];
         startRange[i] = Range(TIME_BITS());
         startRange[i].in <== streamStart[i];
+        // pledge: bps <= 10000 and the lender fields are consistent
+        bps[i] = PledgeBps();
+        bps[i].bps <== pledgeBps[i];
+        binding[i] = LenderBinding();
+        binding[i].hasPledge <== bps[i].hasPledge;
+        binding[i].lender <== lender[i];
+        binding[i].lenderAddr <== lenderAddr[i];
+        binding[i].loanRef <== loanRef[i];
 
         policy[i] = PolicyHash();
         policy[i].lifetimeCap <== amount[i];
@@ -120,6 +136,8 @@ template Grant(levels, nIns, nOuts) {
         policy[i].ownerPk <== ownerPk.pk;
         policy[i].streamRate <== streamRate[i];
         policy[i].streamStart <== streamStart[i];
+        policy[i].lender <== lender[i];
+        policy[i].pledgeBps <== pledgeBps[i];
 
         allow[i] = AllowanceCommitment();
         allow[i].asset <== asset;
@@ -129,6 +147,7 @@ template Grant(levels, nIns, nOuts) {
         allow[i].windowId <== 0;
         allow[i].windowSpent <== 0;
         allow[i].rho <== rho[i];
+        allow[i].pledgePaid <== 0;
         allow[i].out === allowanceCommitment[i];
 
         sumOuts += amount[i];

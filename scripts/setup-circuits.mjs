@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 
 const root = resolve(import.meta.dirname, '..');
 const ptau = process.env.PTAU || join(root, 'circuits', 'ptau', 'pot17.ptau');
-const names = process.argv.slice(2).length ? process.argv.slice(2) : ['transact', 'grant', 'spend', 'disclose', 'delegate'];
+const names = process.argv.slice(2).length ? process.argv.slice(2) : ['transact', 'grant', 'spend', 'disclose', 'delegate', 'stream'];
 const template = readFileSync(join(root, 'node_modules', 'snarkjs', 'templates', 'verifier_groth16.sol.ejs'), 'utf8');
 mkdirSync(join(root, 'contracts', 'verifiers'), { recursive: true });
 
