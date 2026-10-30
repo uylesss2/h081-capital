@@ -20,6 +20,7 @@ import {
   transactInput, DisclosureKind, NoteInput, SubGrant,
 } from './inputs.js';
 import { Prover, ProofResult, SolidityProof } from './prover.js';
+import { MAX_INPUTS, nextMerge, selectNotes } from './consolidate.js';
 
 const artifactsDir = resolve(import.meta.dirname, '..', 'build', 'artifacts', 'contracts');
 const abi = AbiCoder.defaultAbiCoder();
@@ -335,14 +336,32 @@ export class Wallet {
   // ---- treasury ----
 
   private pickInputs(asset: bigint, needed: bigint): [NoteInput, NoteInput] {
-    const avail = this.unspentNotes(asset);
-    const chosen: OwnedNote[] = [];
-    let sum = 0n;
-    for (const n of avail) { if (sum >= needed) break; chosen.push(n); sum += n.note.amount; }
-    if (sum < needed) throw new Error(`insufficient shielded balance: have ${sum}, need ${needed}`);
-    if (chosen.length > 2) throw new Error('consolidate notes first (more than two inputs needed)');
+    const chosen = selectNotes(this.unspentNotes(asset), (n) => n.note.amount, needed);
+    if (chosen.length > MAX_INPUTS) throw new Error('consolidate notes first (more than two inputs needed)');
     const toInput = (n: OwnedNote): NoteInput => ({ note: n.note, keys: this.account.keys, path: this.tree.path(n.index) });
     return [chosen[0] ? toInput(chosen[0]) : dummyNoteInput(asset, this.account.keys, this.tree), chosen[1] ? toInput(chosen[1]) : dummyNoteInput(asset, this.account.keys, this.tree)];
+  }
+
+  /**
+   * Merge notes until at most `maxInputs` (1 or 2) of them cover `needed` (default: the whole balance).
+   * Each merge is a fully shielded 2-in-2-out transfer to this account: the two smallest notes of the
+   * selection go in, their sum and a zero note come out. Returns one result per merge, none when nothing
+   * needed merging. transfer, withdraw and grant call it themselves; call it directly to tidy a wallet ahead
+   * of time, so the payment that follows is a single transaction.
+   */
+  async consolidate(asset: bigint, needed?: bigint, maxInputs = MAX_INPUTS): Promise<TxResult[]> {
+    await this.sync();
+    const target = needed ?? this.balance(asset);
+    const done: TxResult[] = [];
+    for (let pair = nextMerge(this.unspentNotes(asset), (n) => n.note.amount, target, maxInputs); pair; pair = nextMerge(this.unspentNotes(asset), (n) => n.note.amount, target, maxInputs)) {
+      const toInput = (n: OwnedNote): NoteInput => ({ note: n.note, keys: this.account.keys, path: this.tree.path(n.index) });
+      const outputs: [Note, Note] = [
+        { asset, amount: pair[0].note.amount + pair[1].note.amount, pk: this.account.keys.pk, blinding: randomField() },
+        { asset, amount: 0n, pk: this.account.keys.pk, blinding: randomField() },
+      ];
+      done.push(await this.transact(asset, [toInput(pair[0]), toInput(pair[1])], outputs, [this.account.view.pub, this.account.view.pub], 0n, {}));
+    }
+    return done;
   }
 
   private async transact(asset: bigint, inputs: [NoteInput, NoteInput], outputs: [Note, Note], outputViews: [Uint8Array, Uint8Array], extAmount: bigint, relay: Relay, recipient = ZERO_ADDRESS): Promise<TxResult> {
@@ -372,19 +391,23 @@ export class Wallet {
     return this.transact(asset, [dummy, dummyNoteInput(asset, this.account.keys, this.tree)], outputs, [this.account.view.pub, this.account.view.pub], amount, relay);
   }
 
-  /** Fully shielded transfer to another Stipend address. Nothing public changes except two commitments. */
+  /**
+   * Fully shielded transfer to another Stipend address. Nothing public changes except two commitments.
+   * If more than two notes are needed, merges run first (see `consolidate`).
+   */
   async transfer(asset: bigint, amount: bigint, to: StipendAddress): Promise<TxResult> {
-    await this.sync();
+    await this.consolidate(asset, amount);
     const inputs = this.pickInputs(asset, amount);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const outputs: [Note, Note] = [{ asset, amount, pk: to.pk, blinding: randomField() }, { asset, amount: sum - amount, pk: this.account.keys.pk, blinding: randomField() }];
     return this.transact(asset, inputs, outputs, [to.viewPub, this.account.view.pub], 0n, {});
   }
 
-  /** Unshield: `amount` leaves the pool, the recipient gets amount - fee. */
+  /** Unshield: `amount` leaves the pool, the recipient gets amount - fee. Merges notes first if more than two are needed. */
   async withdraw(asset: bigint, amount: bigint, recipient: string, relay: Relay = {}): Promise<TxResult> {
     await this.sync();
     const fee = relay.fee ?? 0n;
+    await this.consolidate(asset, amount);
     const inputs = this.pickInputs(asset, amount);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const outputs: [Note, Note] = [{ asset, amount: sum - amount, pk: this.account.keys.pk, blinding: randomField() }, { asset, amount: 0n, pk: this.account.keys.pk, blinding: randomField() }];
@@ -401,6 +424,7 @@ export class Wallet {
     if (requests.length === 0 || requests.length > GRANT_OUTPUTS) throw new Error(`1..${GRANT_OUTPUTS} grants per transaction`);
     await this.sync();
     const total = requests.reduce((s, r) => s + r.amount, 0n);
+    await this.consolidate(asset, total);
     const inputs = this.pickInputs(asset, total);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const now = requests.some((r) => r.streamRate) ? await latestTimestamp(this.provider) : 0n;

@@ -156,6 +156,22 @@ Details and caveats: `docs/tokenomics.md`.
   identical policy (zero residual); the mandate, and any pledge, travel with the note.
 - `Wallet.treasuryTree()`: the owner's nested view of every granted allowance and its sub-allowances.
 
+## Note consolidation
+
+`transact` and `grant` take two input notes. When covering an amount needs more than two notes, the wallet
+(`Wallet` and `SolanaWallet`) first merges notes with ordinary fully shielded `transact` calls to itself:
+the two smallest notes of the largest-first selection go in, their sum and a zero note come out, and this
+repeats until two notes cover the amount. `transfer`, `withdraw` and `grant` do this on their own;
+`consolidate(asset, needed?, maxInputs?)` runs it ahead of time (`maxInputs = 1` merges down to one note).
+A balance that is short is refused before any merge is sent. No circuit or contract changed.
+
+What it costs: each merge is one more transaction, and `k` selected notes take at most `k - 2` merges. A
+merge shows the chain what any shielded transfer shows (a root, two nullifiers, two commitments; no
+amount, asset or address), but the merges and the payment are submitted back to back by the same payer,
+so an observer can guess that they belong together and that the wallet held several small notes. Merging
+ahead of time, at a quiet moment, breaks that timing link. A merge has no public leg, so until fee notes
+exist it pays no relayer: the submitting account pays the gas (EVM) or the transaction fee (Solana).
+
 ## Disclosures
 
 Over an allowance note as of a known root: `remaining >= bound`, `spent <= bound`, or
@@ -173,11 +189,11 @@ contracts/lending/   StreamLoan registry, IPledgeSink
 contracts/token/     StipendToken, CapacityStake, SafetyPool (Phase 2)
 contracts/test/      TestERC20, BlockingERC20, GreedySink (test doubles only)
 src/                 SDK: crypto (mirrors the circuits), merkle, encryption (x25519 + XChaCha20),
-                     inputs (circuit input builders), prover (snarkjs), client (Wallet, deploy, scanning),
+                     inputs (circuit input builders), consolidate (note selection and merges), prover (snarkjs), client (Wallet, deploy, scanning),
                      lender (LenderWallet), token (Phase 2 deploy helpers and the capacity curve)
 test/circuits/       constraint tests: honest inputs accepted, every dishonest input rejected
 test/e2e/            full flow on an in-process EVM with real Groth16 proofs (pool, lending, token)
-test/sdk/            pure-model property test of the lender total bound
+test/sdk/            pure-model property test of the lender total bound, note selection and consolidation plans
 scripts/             build-circuits, setup-circuits, deploy, gen-solana-vk, Solana localnet and test runners
 solana/programs/     stipend_pool, stream_loan, capacity_stake, safety_pool (Anchor crates, cargo build-sbf)
 solana/scripts/      WSL build and private-validator scripts
@@ -317,7 +333,6 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 - Relayer service (the SDK already produces relayer-submittable calldata and pays fees in the asset).
 - x402 adapter and MCP server on top of `Wallet.pay` and `Wallet.prove`.
 - Relayer fees for fully shielded operations (fee notes). Today only operations with a public leg pay a fee.
-- Note consolidation when more than two inputs are needed.
 - Per-asset caps inside one policy for mixed stock and stablecoin desks; more than four subs per delegation.
 - Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen.
 - Public trusted-setup ceremony and an external audit.

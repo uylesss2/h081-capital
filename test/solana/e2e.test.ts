@@ -551,6 +551,30 @@ describe('ext data binding, account binding, replays and the time window (negati
   });
 });
 
+describe('note consolidation', () => {
+  it('a withdrawal that needs four notes merges twice first; each merge is a fully shielded transfer', async () => {
+    const w = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, w.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 40_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    for (let i = 0; i < 4; i++) await w.deposit(usd, 10_000n);
+    const vault = await pool.tokenBalance(vaultPda(pool.programId, usd));
+    const merges = await w.consolidate(usd, 35_000n);
+    expect(merges).toHaveLength(2);
+    for (const m of merges) {
+      const names = eventsOf(m.tx.signature).map((e) => e.name).sort();
+      expect(names).toEqual(['NewCommitment', 'NewCommitment', 'NewNullifier', 'NewNullifier']);
+    }
+    // the vault did not move: merges touch no token
+    expect(await pool.tokenBalance(vaultPda(pool.programId, usd))).toBe(vault);
+    const merchantBefore = await bal(usd, merchant.publicKey);
+    const before = await nextIndex();
+    await w.withdraw(usd, 35_000n, merchant.publicKey);
+    expect(await nextIndex()).toBe(before + 2);
+    expect(await bal(usd, merchant.publicKey)).toBe(merchantBefore + 35_000n);
+    expect(w.balance(usd)).toBe(5_000n);
+  });
+});
+
 describe('compute units', () => {
   it('every measured operation fits its budget (written to solana/target-so, not a tracked file)', () => {
     const budget: Record<string, number> = {

@@ -24,6 +24,7 @@ import {
 } from '../inputs.js';
 import { MerklePath, MerkleTree, recipientListRoot } from '../merkle.js';
 import { Prover, type ProofResult } from '../prover.js';
+import { MAX_INPUTS, nextMerge, selectNotes } from '../consolidate.js';
 import { type SentTx, closeBuffer, customErrorCode, send, simulate, uploadBuffer } from './buffer.js';
 import { PoolEventLog, type LocatedEvent } from './events.js';
 import { concatBytes, encodeProof, fieldOf } from './field.js';
@@ -490,14 +491,31 @@ export class SolanaWallet extends Scanner {
   // ---- treasury ----
 
   private pickInputs(asset: bigint, needed: bigint): [NoteInput, NoteInput] {
-    const avail = this.unspentNotes(asset);
-    const chosen: SolOwnedNote[] = [];
-    let sum = 0n;
-    for (const n of avail) { if (sum >= needed) break; chosen.push(n); sum += n.note.amount; }
-    if (sum < needed) throw new Error(`insufficient shielded balance: have ${sum}, need ${needed}`);
-    if (chosen.length > 2) throw new Error('consolidate notes first (more than two inputs needed)');
+    const chosen = selectNotes(this.unspentNotes(asset), (n) => n.note.amount, needed);
+    if (chosen.length > MAX_INPUTS) throw new Error('consolidate notes first (more than two inputs needed)');
     const toInput = (n: SolOwnedNote): NoteInput => ({ note: n.note, keys: this.account.keys, path: this.tree.path(n.index) });
     return [chosen[0] ? toInput(chosen[0]) : dummyNoteInput(asset, this.account.keys, this.tree), chosen[1] ? toInput(chosen[1]) : dummyNoteInput(asset, this.account.keys, this.tree)];
+  }
+
+  /**
+   * Merge notes until at most `maxInputs` (1 or 2) of them cover `needed` (default: the whole balance), with
+   * fully shielded 2-in-2-out transfers to this account (the two smallest selected notes in; their sum and a
+   * zero note out). Returns one result per merge. transfer, withdraw and grant call it themselves.
+   */
+  async consolidate(mint: PublicKey, needed?: bigint, maxInputs = MAX_INPUTS): Promise<SolTxResult[]> {
+    await this.sync();
+    const asset = this.registerMint(mint);
+    const target = needed ?? this.balance(asset);
+    const done: SolTxResult[] = [];
+    for (let pair = nextMerge(this.unspentNotes(asset), (n) => n.note.amount, target, maxInputs); pair; pair = nextMerge(this.unspentNotes(asset), (n) => n.note.amount, target, maxInputs)) {
+      const toInput = (n: SolOwnedNote): NoteInput => ({ note: n.note, keys: this.account.keys, path: this.tree.path(n.index) });
+      const outputs: [Note, Note] = [
+        { asset, amount: pair[0].note.amount + pair[1].note.amount, pk: this.account.keys.pk, blinding: randomField() },
+        { asset, amount: 0n, pk: this.account.keys.pk, blinding: randomField() },
+      ];
+      done.push(await this.transact(mint, [toInput(pair[0]), toInput(pair[1])], outputs, [this.account.view.pub, this.account.view.pub], 0n, {}));
+    }
+    return done;
   }
 
   private async feeToken(mint: PublicKey, relay: SolRelay): Promise<PublicKey | undefined> {
@@ -555,6 +573,7 @@ export class SolanaWallet extends Scanner {
   async transfer(mint: PublicKey, amount: bigint, to: StipendAddress): Promise<SolTxResult> {
     await this.sync();
     const asset = this.registerMint(mint);
+    await this.consolidate(mint, amount);
     const inputs = this.pickInputs(asset, amount);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const outputs: [Note, Note] = [{ asset, amount, pk: to.pk, blinding: randomField() }, { asset, amount: sum - amount, pk: this.account.keys.pk, blinding: randomField() }];
@@ -566,6 +585,7 @@ export class SolanaWallet extends Scanner {
     await this.sync();
     const asset = this.registerMint(mint);
     const fee = relay.fee ?? 0n;
+    await this.consolidate(mint, amount);
     const inputs = this.pickInputs(asset, amount);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const outputs: [Note, Note] = [{ asset, amount: sum - amount, pk: this.account.keys.pk, blinding: randomField() }, { asset, amount: 0n, pk: this.account.keys.pk, blinding: randomField() }];
@@ -581,6 +601,7 @@ export class SolanaWallet extends Scanner {
     await this.sync();
     const asset = this.registerMint(mint);
     const total = requests.reduce((s, r) => s + r.amount, 0n);
+    await this.consolidate(mint, total);
     const inputs = this.pickInputs(asset, total);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const now = requests.some((r) => r.streamRate) ? await this.pool.now() : 0n;
