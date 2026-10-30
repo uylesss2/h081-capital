@@ -9,3 +9,5 @@ export * from './client.js';
 export * from './lender.js';
 export * from './token.js';
 export * from './relayer-client.js';
+export * from './x402.js';
+export * from './mcp.js';

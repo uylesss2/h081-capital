@@ -141,6 +141,15 @@ export interface GrantRequest {
  */
 export interface Relay { relayer?: string; fee?: bigint; via?: RelayerClient }
 
+export interface PayOptions {
+  /**
+   * Bytes (0x-hex) written to the spend's `encryptedPayment` slot, which a public payout otherwise leaves empty.
+   * The slot is hashed into `extDataHash`, a public input of the spend proof, so the tag cannot be changed once
+   * the payment is proven. The x402 adapter uses it to bind a payout to one payment request (`src/x402.ts`).
+   */
+  paymentTag?: string;
+}
+
 export interface TxResult { receipt: ContractTransactionReceipt; proof: ProofResult }
 
 /** Public inputs of a stream proof as `StipendPool.verifyStream` takes them. */
@@ -474,8 +483,9 @@ export class Wallet {
    * On a pledged allowance the lender's share is routed and the chain also
    * sees the asset, the lender, the loan ref and the share.
    */
-  async pay(owned: OwnedAllowance, amount: bigint, to: string | StipendAddress, relay: Relay = {}): Promise<TxResult & { next: Allowance }> {
-    return this.spend(owned, amount, to, relay);
+  async pay(owned: OwnedAllowance, amount: bigint, to: string | StipendAddress, relay: Relay = {}, opts: PayOptions = {}): Promise<TxResult & { next: Allowance }> {
+    if (opts.paymentTag !== undefined && typeof to !== 'string') throw new Error('a payment tag binds a public payout only');
+    return this.spend(owned, amount, to, relay, opts.paymentTag);
   }
 
   /**
@@ -609,7 +619,7 @@ export class Wallet {
     return this.spend(owned, owned.allowance.remaining, this.account.address, {});
   }
 
-  private async spend(owned: OwnedAllowance, amount: bigint, to: string | StipendAddress, relay: Relay): Promise<TxResult & { next: Allowance }> {
+  private async spend(owned: OwnedAllowance, amount: bigint, to: string | StipendAddress, relay: Relay, paymentTag?: string): Promise<TxResult & { next: Allowance }> {
     await this.sync();
     const a = owned.allowance;
     if (a.policy.pledgeBps !== 0n && !owned.lender) throw new Error('pledged allowance without its lender info');
@@ -626,6 +636,8 @@ export class Wallet {
     };
     const draft = spendInput({ ...base, extDataHash: 0n });
     const ext = { relayer: relay.relayer ?? ZERO_ADDRESS, ...this.spendMemos(draft.next, draft.payNote, owned, to) };
+    // A public payout carries no payment memo; a tag in its place is hashed into the proof and read by the payee (x402).
+    if (paymentTag !== undefined) ext.encryptedPayment = paymentTag;
     const extDataHash = hashExt([SPEND_EXT_TYPE], [ext]);
     const built = spendInput({ ...base, extDataHash });
     const proof = await this.prover.prove('spend', built.input);
