@@ -318,5 +318,7 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 - Per-asset caps inside one policy for mixed stock and stablecoin desks.
 - Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen
   (design in `docs/LOAN-PRICING.md`, owner decisions pending).
+- Relayer (`relayer/`) and address lookup tables (`src/solana/alt.ts`) are MVPs: no persistence, retries,
+  dynamic fees, auth or metrics yet. See relayer/README.md.
 - The public trusted-setup ceremony and the external audit themselves. The tooling exists (`npm run ceremony`,
   verifiable builds, `npm run solana:preflight`); the audit scope is `docs/AUDIT-SCOPE.md`.

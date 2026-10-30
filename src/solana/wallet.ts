@@ -4,7 +4,7 @@
 // (crypto.ts, inputs.ts, prover.ts, encryption.ts), unchanged. Only addresses differ: every pubkey that
 // enters a circuit is fieldOf(pubkey) (docs/SOLANA-PORT.md section 2), assets are SPL mints.
 import {
-  Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, TransactionInstruction,
+  AddressLookupTableAccount, Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, TransactionInstruction,
 } from '@solana/web3.js';
 import {
   TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, unpackAccount,
@@ -25,6 +25,9 @@ import {
 import { MerklePath, MerkleTree, recipientListRoot } from '../merkle.js';
 import { Prover, type ProofResult } from '../prover.js';
 import { type SentTx, closeBuffer, customErrorCode, send, simulate, uploadBuffer } from './buffer.js';
+import { abandonPlan, planOperation, sendV0, simulateV0, stagePlan } from './alt.js';
+import { toB64 } from './relay.js';
+import type { RelayerClient, SolanaRelayBody } from '../relayer-client.js';
 import { PoolEventLog, type LocatedEvent } from './events.js';
 import { concatBytes, encodeProof, fieldOf } from './field.js';
 import {
@@ -92,6 +95,24 @@ export interface SolRelay {
   /** fee destination token account */
   feeRecipient?: PublicKey;
   fee?: bigint;
+  /**
+   * Hand the operation to this relayer service instead of sending it: the relayer stages the payload and
+   * pays for the transactions (RelayerClient.solanaTerms gives relayer, feeRecipient and the minimum fee).
+   * The wallet's signer then pays nothing: missing payout ATAs and vaults are created by the relayer.
+   */
+  via?: RelayerClient;
+}
+
+/** Fetches a confirmed transaction's compute units and logs (as `send` returns them). */
+async function sentOf(connection: Connection, signature: string): Promise<SentTx> {
+  const info = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+  return { signature, computeUnits: info?.meta?.computeUnitsConsumed ?? -1, logs: info?.meta?.logMessages ?? [] };
+}
+
+/** Sends a staged operation through a relayer and returns it as `send` would. */
+export async function relayThrough(connection: Connection, via: RelayerClient, body: Omit<SolanaRelayBody, 'payload'>, payload: Uint8Array): Promise<SentTx> {
+  const { signature } = await via.relaySolana({ ...body, payload: toB64(payload) });
+  return sentOf(connection, signature);
 }
 
 /** Shared access to one stipend_pool deployment: event log, token programs, vaults, buffers, clock. */
@@ -99,9 +120,21 @@ export class SolanaPool {
   readonly log: PoolEventLog;
   private tokenPrograms = new Map<string, PublicKey>();
   private vaults = new Set<string>();
+  /**
+   * Lookup tables for the v0 path (`useLookupTables`). Empty (the default): `run` takes the legacy path,
+   * unchanged. Set: `run` plans the staging so the last chunk rides with the operation and the static
+   * accounts come from the tables (alt.ts).
+   */
+  lookupTables: AddressLookupTableAccount[] = [];
 
   constructor(readonly connection: Connection, readonly programId: PublicKey = LOCALNET_POOL_PROGRAM_ID, readonly prover: Prover = new Prover()) {
     this.log = new PoolEventLog(connection, programId);
+  }
+
+  /** Switches `run` to v0 transactions against these lookup tables; an empty list switches back to legacy. */
+  useLookupTables(tables: AddressLookupTableAccount[]): this {
+    this.lookupTables = tables;
+    return this;
   }
 
   /** Creates the pool's Merkle state if it does not exist yet (permissionless). */
@@ -194,6 +227,7 @@ export class SolanaPool {
     payer: Keypair, payload: Uint8Array, mk: (buffer: PublicKey) => TransactionInstruction, signers: Keypair[] = [],
     fallbacks: Array<(buffer: PublicKey) => TransactionInstruction> = [],
   ): Promise<SentTx> {
+    if (this.lookupTables.length > 0) return this.runV0(payer, payload, mk, signers, fallbacks);
     const buf = await uploadBuffer(this.connection, this.programId, payer, payload);
     try {
       let chosen = mk;
@@ -205,6 +239,32 @@ export class SolanaPool {
       return await send(this.connection, payer, [chosen(buf.address)], { cuLimit: OP_CU_LIMIT, signers });
     } catch (e) {
       await closeBuffer(this.connection, this.programId, payer, buf.seed).catch(() => undefined);
+      throw e;
+    }
+  }
+
+  /**
+   * `run` over v0 transactions (alt.ts): open + head, grows, writes sized to the limit, then the last chunk
+   * and the operation in one transaction against `lookupTables`. A fallback reuses the same staging and
+   * swaps only the operation instruction of the final transaction.
+   */
+  private async runV0(
+    payer: Keypair, payload: Uint8Array, mk: (buffer: PublicKey) => TransactionInstruction, signers: Keypair[],
+    fallbacks: Array<(buffer: PublicKey) => TransactionInstruction>,
+  ): Promise<SentTx> {
+    const plan = planOperation({ programId: this.programId, authority: payer.publicKey, payload, op: mk, lookupTables: this.lookupTables, cuLimit: OP_CU_LIMIT });
+    try {
+      await stagePlan(this.connection, payer, plan);
+      let chosen = plan.final;
+      if (fallbacks.length > 0 && (await simulateV0(this.connection, payer, plan.final, this.lookupTables, signers)).err !== null) {
+        for (const alt of fallbacks) {
+          const candidate = [...plan.final.slice(0, -1), alt(plan.buffer)];
+          if ((await simulateV0(this.connection, payer, candidate, this.lookupTables, signers)).err === null) { chosen = candidate; break; }
+        }
+      }
+      return await sendV0(this.connection, payer, chosen, this.lookupTables, signers);
+    } catch (e) {
+      await abandonPlan(this.connection, this.programId, payer, plan);
       throw e;
     }
   }
@@ -280,6 +340,8 @@ export interface PreparedSpend {
   next: Allowance;
   proof: ProofResult;
   signers: Keypair[];
+  /** set when the spend goes through a relayer service */
+  via?: RelayerClient;
 }
 
 type SubRequest = { to: StipendAddress } & Omit<SubGrant, 'agentPk'>;
@@ -502,12 +564,16 @@ export class SolanaWallet extends Scanner {
 
   private async feeToken(mint: PublicKey, relay: SolRelay): Promise<PublicKey | undefined> {
     if (!relay.fee) return undefined;
+    if (relay.via && !relay.feeRecipient) {
+      if (!relay.relayer) throw new Error('relay.via needs relay.relayer (RelayerClient.solanaTerms)');
+      return this.pool.ata(mint, relay.relayer, await this.pool.tokenProgramOf(mint));
+    }
     return relay.feeRecipient ?? this.pool.ensureAta(this.signer, mint, relay.relayer ?? this.signer.publicKey);
   }
 
   private async transact(
     mint: PublicKey, inputs: [NoteInput, NoteInput], outputs: [Note, Note], views: [Uint8Array, Uint8Array], extAmount: bigint, relay: SolRelay,
-    recipientToken?: PublicKey,
+    recipientToken?: PublicKey, recipientOwner?: PublicKey,
   ): Promise<SolTxResult> {
     const asset = this.registerMint(mint);
     const fee = relay.fee ?? 0n;
@@ -529,6 +595,12 @@ export class SolanaWallet extends Scanner {
       extBytes,
     );
     const token = moves ? { mint, tokenProgram: await this.pool.tokenProgramOf(mint) } : undefined;
+    if (relay.via) {
+      if (extAmount > 0n) throw new Error('a deposit cannot be relayed: the depositor signs the token transfer');
+      const tx = await relayThrough(this.pool.connection, relay.via, { op: 'transact', mint: mint.toBase58(), recipientOwner: recipientOwner?.toBase58() }, payload);
+      await this.sync();
+      return { tx, proof };
+    }
     if (moves) await this.pool.ensureVault(this.signer, mint);
     const depositorToken = extAmount > 0n ? this.pool.ata(mint, this.signer.publicKey, token!.tokenProgram) : undefined;
     const tx = await this.pool.run(this.signer, payload, (buffer) => transactIx(this.pool.programId, {
@@ -569,8 +641,10 @@ export class SolanaWallet extends Scanner {
     const inputs = this.pickInputs(asset, amount);
     const sum = inputs[0].note.amount + inputs[1].note.amount;
     const outputs: [Note, Note] = [{ asset, amount: sum - amount, pk: this.account.keys.pk, blinding: randomField() }, { asset, amount: 0n, pk: this.account.keys.pk, blinding: randomField() }];
-    const recipientToken = await this.pool.ensureAta(this.signer, mint, recipient);
-    return this.transact(mint, inputs, outputs, [this.account.view.pub, this.account.view.pub], -(amount - fee), relay, recipientToken);
+    const recipientToken = relay.via
+      ? this.pool.ata(mint, recipient, await this.pool.tokenProgramOf(mint)) // the relayer creates it when missing
+      : await this.pool.ensureAta(this.signer, mint, recipient);
+    return this.transact(mint, inputs, outputs, [this.account.view.pub, this.account.view.pub], -(amount - fee), relay, recipientToken, recipient);
   }
 
   // ---- distribution ----
@@ -672,10 +746,10 @@ export class SolanaWallet extends Scanner {
     const accounts: Omit<SpendAccounts, 'buffer'> = { payer: this.signer.publicKey, nullifier: built.nullifier };
     if (built.publicAsset !== 0n) {
       accounts.token = { mint, tokenProgram };
-      await this.pool.ensureVault(this.signer, mint);
+      if (!relay.via) await this.pool.ensureVault(this.signer, mint);
     }
     if (isPublic && built.net > 0n) {
-      accounts.recipientToken = await this.pool.ensureAta(this.signer, mint, to);
+      accounts.recipientToken = relay.via ? this.pool.ata(mint, to, tokenProgram) : await this.pool.ensureAta(this.signer, mint, to);
       accounts.feeToken = feeToken;
     }
     if (built.lenderAmount > 0n) {
@@ -685,11 +759,16 @@ export class SolanaWallet extends Scanner {
       }
     }
     const payload = concatBytes(encodeProof(proof.proof), encodeSpendArgs(args), extBytes);
-    return { payload, accounts, args, next: built.next, proof, signers: [] };
+    return { payload, accounts, args, next: built.next, proof, signers: [], via: relay.via };
   }
 
   /** Sends a prepared spend. If the lender's account cannot take the share, the spend goes through with the share escrowed. */
   async submitSpend(p: PreparedSpend): Promise<SolTxResult & { next: Allowance }> {
+    if (p.via) {
+      const tx = await relayThrough(this.pool.connection, p.via, { op: 'spend', lenderToken: p.accounts.lenderToken?.toBase58() }, p.payload);
+      await this.sync();
+      return { tx, proof: p.proof, next: p.next };
+    }
     const fallbacks = p.accounts.lenderToken && !p.args.isLenderClaim
       ? [(buffer: PublicKey) => spendIx(this.pool.programId, { ...p.accounts, lenderToken: undefined, buffer })]
       : [];
