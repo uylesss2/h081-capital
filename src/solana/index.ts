@@ -10,3 +10,5 @@ export * from './wallet.js';
 // Namespaced: they carry their own program ids, PDAs and error tables.
 export * as loan from './lender.js';
 export * as staking from './token.js';
+// Read-only comparison of a local build with a deployed program (verifiable builds; no signing).
+export * as verify from './verify.js';

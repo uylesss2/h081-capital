@@ -22,7 +22,11 @@
     "solana:localnet": "node scripts/solana-localnet.mjs",
     "test:solana:loan": "node scripts/solana-loan-localnet.mjs restart && vitest run --config vitest.solana-loan.config.ts",
     "solana:loan:build": "node scripts/solana-loan-localnet.mjs build",
-    "test:solana:pool": "node scripts/solana-localnet.mjs restart && vitest run --config vitest.solana.config.ts"
+    "test:solana:pool": "node scripts/solana-localnet.mjs restart && vitest run --config vitest.solana.config.ts",
+    "solana:verifiable-build": "node scripts/solana-verifiable-build.mjs",
+    "solana:hash": "tsx scripts/solana-program-hash.mts",
+    "solana:preflight": "tsx scripts/solana-preflight.mts",
+    "ceremony": "node scripts/ceremony.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "1.3.0",

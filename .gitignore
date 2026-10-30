@@ -7,3 +7,4 @@ solana/keys/
 solana/target/
 solana/target-so/
 solana/test-ledger/
+solana/target-verifiable/
