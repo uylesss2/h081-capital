@@ -156,9 +156,13 @@ public trusted-setup ceremony.
    `npx vitest run --config vitest.solana.config.ts test/solana/consistency.test.ts` must pass.
 2. After the ceremony, regenerate the verifying keys (`npm run solana:vk`) from the final zkeys.
 3. Build the production programs only: `stipend_pool.so`, `stream_loan.so`, `capacity_stake.so`,
-   `safety_pool.so` (never `stipend_pool_probe.so` or the `*_fast.so` builds). Prefer a verifiable build.
-4. Deploy each: `solana program deploy --program-id <program-keypair.json> --upgrade-authority <deployer> <name>.so -u <cluster>`.
-5. Initialize (all permissionless): stipend_pool `initialize`, `create_vault` per mint; stream_loan
+   `safety_pool.so` (never `stipend_pool_probe.so` or the `*_fast.so` builds) with the verifiable build
+   (`npm run solana:verifiable-build`); `npm run solana:hash` compares a deployed program with the local build.
+   Run `npm run solana:preflight` (local only, sends nothing) before any deploy.
+4. Deploy: `solana/scripts/mainnet-deploy.sh` (refuses any cluster but mainnet and an underfunded deployer), or
+   per program `solana program deploy --program-id <program-keypair.json> --upgrade-authority <deployer> <name>.so -u <cluster>`.
+5. Initialize: `scripts/mainnet-init.mts` (pool, vault, loan registry, smoke test), or by hand: stipend_pool
+   `initialize` (sets the deposit caps and the config authority), `create_vault` per mint; stream_loan
    `initialize`; safety_pool `init_pool` and capacity_stake `init_config` per H081 mint.
 6. **Make every program immutable** by removing its upgrade authority, irreversibly:
    `solana program set-upgrade-authority <PROGRAM_ID> --final -u <cluster>`, then check that

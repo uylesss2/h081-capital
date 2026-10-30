@@ -314,12 +314,9 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 
 ## Not yet built
 
-- Relayer service (the SDK already produces relayer-submittable calldata and pays fees in the asset).
-- x402 adapter and MCP server on top of `Wallet.pay` and `Wallet.prove`.
 - Relayer fees for fully shielded operations (fee notes). Today only operations with a public leg pay a fee.
-- Note consolidation when more than two inputs are needed.
-- Per-asset caps inside one policy for mixed stock and stablecoin desks; more than four subs per delegation.
-- Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen.
-- Public trusted-setup ceremony and an external audit.
-- Solana: a relayer service and address lookup tables for the SDK; deploy scripts for a public cluster (the
-  steps are documented, nothing is automated); verifiable builds.
+- Per-asset caps inside one policy for mixed stock and stablecoin desks.
+- Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen
+  (design in `docs/LOAN-PRICING.md`, owner decisions pending).
+- The public trusted-setup ceremony and the external audit themselves. The tooling exists (`npm run ceremony`,
+  verifiable builds, `npm run solana:preflight`); the audit scope is `docs/AUDIT-SCOPE.md`.
