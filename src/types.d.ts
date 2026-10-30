@@ -17,4 +17,14 @@ declare module 'snarkjs' {
     exportVerificationKey(zkey: string): Promise<{ nPublic: number }>;
     exportSolidityVerifier(zkey: string, templates: { groth16: string }): Promise<string>;
   };
+  // phase 1, used by the ceremony test to make a small local ptau
+  export const powersOfTau: {
+    newAccumulator(curve: unknown, power: number, out: string): Promise<unknown>;
+    contribute(ptauIn: string, ptauOut: string, name: string, entropy: string): Promise<unknown>;
+    preparePhase2(ptauIn: string, ptauOut: string): Promise<unknown>;
+  };
+}
+
+declare module 'ffjavascript' {
+  export function getCurveFromName(name: string): Promise<{ terminate(): Promise<void> }>;
 }
