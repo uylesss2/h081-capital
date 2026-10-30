@@ -21,6 +21,7 @@ import {
 } from './inputs.js';
 import { Prover, ProofResult, SolidityProof } from './prover.js';
 import { MAX_INPUTS, nextMerge, selectNotes } from './consolidate.js';
+import { planDelegation } from './delegation.js';
 
 const artifactsDir = resolve(import.meta.dirname, '..', 'build', 'artifacts', 'contracts');
 const abi = AbiCoder.defaultAbiCoder();
@@ -473,14 +474,52 @@ export class Wallet {
   }
 
   /**
-   * Split an allowance this account holds as the agent into up to four
-   * sub-allowances for other agents, each under policy no looser than this
-   * one, keeping the rest. The owner is not involved and can still reclaim
-   * every note in the tree. A pledged allowance passes its pledge to every
-   * sub; an agent cannot create a pledge (only the owner can, at grant).
+   * Split an allowance this account holds as the agent into sub-allowances
+   * for other agents, each under policy no looser than this one, keeping the
+   * rest. The owner is not involved and can still reclaim every note in the
+   * tree. A pledged allowance passes its pledge to every sub; an agent cannot
+   * create a pledge (only the owner can, at grant).
+   *
+   * Up to four subs take one transaction. More subs are delegated in a chain:
+   * four per step, each step delegating from the previous step's residual
+   * (see src/delegation.ts). The whole chain is checked before the first
+   * transaction, but it is not atomic: if a step fails, the earlier steps
+   * stand and the residual holds the rest. `steps` has one result per step.
    */
-  async delegate(owned: OwnedAllowance, subs: SubRequest[], opts: { residualWindowCap?: bigint; residualStreamRate?: bigint } = {}): Promise<TxResult & { subs: Allowance[]; residual: Allowance }> {
+  async delegate(owned: OwnedAllowance, subs: SubRequest[], opts: { residualWindowCap?: bigint; residualStreamRate?: bigint } = {}): Promise<TxResult & { subs: Allowance[]; residual: Allowance; steps: TxResult[] }> {
     if (owned.allowance.agentPk !== this.account.keys.pk) throw new Error('only the agent can delegate');
+    if (subs.length === 0) throw new Error('at least one sub');
+    if (subs.length <= DELEGATE_OUTPUTS) {
+      const one = await this.delegateOnce(owned, subs, opts);
+      return { ...one, steps: [{ receipt: one.receipt, proof: one.proof }] };
+    }
+    if (owned.allowance.policy.pledgeBps !== 0n && !owned.lender) throw new Error('pledged allowance without its lender info');
+    await this.sync();
+    const now = await latestTimestamp(this.provider);
+    const plan = planDelegation(owned.allowance, subs.map((s) => ({ ...s, agentPk: s.to.pk })), {
+      ...opts, now, lender: owned.lender, agent: this.account.keys, path: this.tree.path(owned.index),
+    });
+    const steps: TxResult[] = [];
+    const made: Allowance[] = [];
+    let current = owned;
+    let at = 0;
+    let residual = owned.allowance;
+    for (const step of plan.steps) {
+      const chunk = subs.slice(at, at + step.subs.length).map((s, i) => ({ ...s, ...step.subs[i], to: s.to }));
+      at += step.subs.length;
+      const res = await this.delegateOnce(current, chunk, { residualWindowCap: step.residualWindowCap, residualStreamRate: step.residualStreamRate });
+      steps.push({ receipt: res.receipt, proof: res.proof });
+      made.push(...res.subs);
+      residual = res.residual;
+      const next = this.allowances.get(allowanceCommitment(res.residual));
+      if (!next) throw new Error('residual not found after sync');
+      current = next;
+    }
+    const lastStep = steps[steps.length - 1];
+    return { receipt: lastStep.receipt, proof: lastStep.proof, subs: made, residual, steps };
+  }
+
+  private async delegateOnce(owned: OwnedAllowance, subs: SubRequest[], opts: { residualWindowCap?: bigint; residualStreamRate?: bigint } = {}): Promise<TxResult & { subs: Allowance[]; residual: Allowance }> {
     if (subs.length === 0 || subs.length > DELEGATE_OUTPUTS) throw new Error(`1..${DELEGATE_OUTPUTS} subs per delegation`);
     const parentPledged = owned.allowance.policy.pledgeBps !== 0n;
     if (parentPledged && !owned.lender) throw new Error('pledged allowance without its lender info');

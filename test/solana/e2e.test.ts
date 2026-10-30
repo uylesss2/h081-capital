@@ -322,6 +322,32 @@ describe('hierarchical delegation and bearer notes', () => {
   });
 });
 
+describe('more than four subs per delegation', () => {
+  it('six subs take two delegate steps, the second from the first residual; every sub sees its allowance', async () => {
+    const boss = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, boss.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 20_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await boss.deposit(usd, 20_000n);
+    const lead = await wallet();
+    await boss.grant(usd, [{ to: lead.address, amount: 10_000n, windowCap: 9_000n }]);
+    await lead.sync();
+    const team = await Promise.all(Array.from({ length: 6 }, () => wallet()));
+    const before = await nextIndex();
+    const res = await lead.delegate(live(lead, usd), team.map((t) => ({ to: t.address, amount: 1_000n, windowCap: 1_000n })));
+    expect(res.steps).toHaveLength(2);
+    expect(await nextIndex()).toBe(before + 10);
+    expect(res.residual.remaining).toBe(4_000n);
+    expect(res.residual.policy.windowCap).toBe(9_000n - 6_000n - 2n);
+    for (const t of team) {
+      await t.sync();
+      expect(live(t, usd).allowance.remaining).toBe(1_000n);
+    }
+    await boss.sync();
+    const line = boss.treasuryTree().find((n) => n.granted.agentPk === lead.account.keys.pk)!;
+    expect(line.children).toHaveLength(6);
+  });
+});
+
 describe('pledges and the lender leg', () => {
   const lender = Keypair.generate();
   const lenderView = randomViewingKey();

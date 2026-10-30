@@ -25,6 +25,7 @@ import {
 import { MerklePath, MerkleTree, recipientListRoot } from '../merkle.js';
 import { Prover, type ProofResult } from '../prover.js';
 import { MAX_INPUTS, nextMerge, selectNotes } from '../consolidate.js';
+import { planDelegation } from '../delegation.js';
 import { type SentTx, closeBuffer, customErrorCode, send, simulate, uploadBuffer } from './buffer.js';
 import { PoolEventLog, type LocatedEvent } from './events.js';
 import { concatBytes, encodeProof, fieldOf } from './field.js';
@@ -736,11 +737,50 @@ export class SolanaWallet extends Scanner {
 
   // ---- delegation ----
 
-  /** Split an allowance held as the agent into up to four sub-allowances under no looser policy, keeping the rest. */
+  /**
+   * Split an allowance held as the agent into sub-allowances under no looser policy, keeping the rest. Up to
+   * four subs take one transaction; more are delegated in a chain of steps of four, each from the previous
+   * step's residual (src/delegation.ts). The chain is checked before the first transaction but is not atomic.
+   */
   async delegate(
     owned: SolOwnedAllowance, subs: SubRequest[], opts: { residualWindowCap?: bigint; residualStreamRate?: bigint; now?: bigint } = {},
-  ): Promise<SolTxResult & { subs: Allowance[]; residual: Allowance }> {
+  ): Promise<SolTxResult & { subs: Allowance[]; residual: Allowance; steps: SolTxResult[] }> {
     if (owned.allowance.agentPk !== this.account.keys.pk) throw new Error('only the agent can delegate');
+    if (subs.length === 0) throw new Error('at least one sub');
+    if (subs.length <= DELEGATE_OUTPUTS) {
+      const one = await this.delegateOnce(owned, subs, opts);
+      return { ...one, steps: [{ tx: one.tx, proof: one.proof }] };
+    }
+    if (owned.allowance.policy.pledgeBps !== 0n && !owned.lender) throw new Error('pledged allowance without its lender info');
+    await this.sync();
+    const { now: nowOpt, ...residualOpts } = opts;
+    const now = nowOpt ?? (await this.pool.now());
+    const plan = planDelegation(owned.allowance, subs.map((s) => ({ ...s, agentPk: s.to.pk })), {
+      ...residualOpts, now, lender: owned.lender as LenderRef | undefined, agent: this.account.keys, path: this.tree.path(owned.index),
+    });
+    const steps: SolTxResult[] = [];
+    const made: Allowance[] = [];
+    let current = owned;
+    let at = 0;
+    let residual = owned.allowance;
+    for (const step of plan.steps) {
+      const chunk = subs.slice(at, at + step.subs.length).map((s, i) => ({ ...s, ...step.subs[i], to: s.to }));
+      at += step.subs.length;
+      const res = await this.delegateOnce(current, chunk, { residualWindowCap: step.residualWindowCap, residualStreamRate: step.residualStreamRate, now: nowOpt });
+      steps.push({ tx: res.tx, proof: res.proof });
+      made.push(...res.subs);
+      residual = res.residual;
+      const next = this.allowances.get(allowanceCommitment(res.residual));
+      if (!next) throw new Error('residual not found after sync');
+      current = next;
+    }
+    const last = steps[steps.length - 1];
+    return { tx: last.tx, proof: last.proof, subs: made, residual, steps };
+  }
+
+  private async delegateOnce(
+    owned: SolOwnedAllowance, subs: SubRequest[], opts: { residualWindowCap?: bigint; residualStreamRate?: bigint; now?: bigint } = {},
+  ): Promise<SolTxResult & { subs: Allowance[]; residual: Allowance }> {
     if (subs.length === 0 || subs.length > DELEGATE_OUTPUTS) throw new Error(`1..${DELEGATE_OUTPUTS} subs per delegation`);
     const parentPledged = owned.allowance.policy.pledgeBps !== 0n;
     if (parentPledged && !owned.lender) throw new Error('pledged allowance without its lender info');
