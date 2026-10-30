@@ -320,6 +320,9 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 - Note consolidation when more than two inputs are needed.
 - Per-asset caps inside one policy for mixed stock and stablecoin desks; more than four subs per delegation.
 - Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen.
+  A design (cover fixed in H081 at insure from a TWAP of the DAMM v2 pool and Pyth SOL/USD, per-loan and
+  utilization caps, a premium floor curve, underwritten pools, exposure-aware unbonding) is in
+  `docs/LOAN-PRICING.md`; none of it is implemented, and it needs the owner's decisions listed there.
 - Public trusted-setup ceremony and an external audit.
 - Solana: a relayer service and address lookup tables for the SDK; deploy scripts for a public cluster (the
   steps are documented, nothing is automated); verifiable builds.

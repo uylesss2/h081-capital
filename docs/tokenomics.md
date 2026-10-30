@@ -102,7 +102,8 @@ Caveats the pricing work must address before any deployment:
 - With lender-chosen premiums and 1:1 valuation, a lender can fund a loan to itself, let it lapse past the
   grace period and slash the pool for the principal. Until premiums are priced (or cover is underwritten),
   only stakers who trust the set of insurable lenders should deposit.
-- The 1:1 valuation ignores the H081 price entirely. It is a placeholder for a priced design.
+- The 1:1 valuation ignores the H081 price entirely. It is a placeholder for a priced design; the proposed
+  design (not implemented) is `docs/LOAN-PRICING.md`.
 - A loan on an allowance that never expires has no due date and never reports a shortfall, so it cannot be
   insured (`insure` requires an expiry).
 
