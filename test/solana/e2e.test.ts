@@ -322,6 +322,32 @@ describe('hierarchical delegation and bearer notes', () => {
   });
 });
 
+describe('more than four subs per delegation', () => {
+  it('six subs take two delegate steps, the second from the first residual; every sub sees its allowance', async () => {
+    const boss = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, boss.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 20_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await boss.deposit(usd, 20_000n);
+    const lead = await wallet();
+    await boss.grant(usd, [{ to: lead.address, amount: 10_000n, windowCap: 9_000n }]);
+    await lead.sync();
+    const team = await Promise.all(Array.from({ length: 6 }, () => wallet()));
+    const before = await nextIndex();
+    const res = await lead.delegate(live(lead, usd), team.map((t) => ({ to: t.address, amount: 1_000n, windowCap: 1_000n })));
+    expect(res.steps).toHaveLength(2);
+    expect(await nextIndex()).toBe(before + 10);
+    expect(res.residual.remaining).toBe(4_000n);
+    expect(res.residual.policy.windowCap).toBe(9_000n - 6_000n - 2n);
+    for (const t of team) {
+      await t.sync();
+      expect(live(t, usd).allowance.remaining).toBe(1_000n);
+    }
+    await boss.sync();
+    const line = boss.treasuryTree().find((n) => n.granted.agentPk === lead.account.keys.pk)!;
+    expect(line.children).toHaveLength(6);
+  });
+});
+
 describe('pledges and the lender leg', () => {
   const lender = Keypair.generate();
   const lenderView = randomViewingKey();
@@ -548,6 +574,30 @@ describe('ext data binding, account binding, replays and the time window (negati
     await expectCode(replay(d), POOL_ERROR.AlreadySpent);
     await sub.sync();
     expect(live(sub, usd).allowance.remaining).toBe(500n);
+  });
+});
+
+describe('note consolidation', () => {
+  it('a withdrawal that needs four notes merges twice first; each merge is a fully shielded transfer', async () => {
+    const w = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, w.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 40_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    for (let i = 0; i < 4; i++) await w.deposit(usd, 10_000n);
+    const vault = await pool.tokenBalance(vaultPda(pool.programId, usd));
+    const merges = await w.consolidate(usd, 35_000n);
+    expect(merges).toHaveLength(2);
+    for (const m of merges) {
+      const names = eventsOf(m.tx.signature).map((e) => e.name).sort();
+      expect(names).toEqual(['NewCommitment', 'NewCommitment', 'NewNullifier', 'NewNullifier']);
+    }
+    // the vault did not move: merges touch no token
+    expect(await pool.tokenBalance(vaultPda(pool.programId, usd))).toBe(vault);
+    const merchantBefore = await bal(usd, merchant.publicKey);
+    const before = await nextIndex();
+    await w.withdraw(usd, 35_000n, merchant.publicKey);
+    expect(await nextIndex()).toBe(before + 2);
+    expect(await bal(usd, merchant.publicKey)).toBe(merchantBefore + 35_000n);
+    expect(w.balance(usd)).toBe(5_000n);
   });
 });
 

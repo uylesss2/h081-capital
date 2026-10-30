@@ -106,6 +106,24 @@ allow-list, owner and pledge carried over unchanged. The residual keeps the pare
 routed-so-far, so the tree as a whole still obeys the owner's policy, and the owner can reclaim any note
 in it. Only the owner creates a pledge; an agent can neither pledge, re-point nor drop one.
 
+### More than four subs (MVP)
+
+`delegate(owned, subs)` takes any number of subs (`Wallet` and `SolanaWallet`). Up to four take one proof.
+More are delegated as a chain: four subs per step, each step delegating from the previous step's residual,
+the caller's `residualWindowCap` / `residualStreamRate` applying to the final residual only. The pure planner
+(`planDelegation`, `src/delegation.ts`) dry-runs every step's input builder first, so a chain that does not
+fit (amounts, window caps, stream rates, a pledge the lender would lose by) is refused before the first
+transaction. Each step is an ordinary `delegate` proof, so by induction every sub is no looser than the
+original allowance. No circuit or contract changed. A step that is not the last and has four subs uses no
+placeholder slots, so only the last step spends one unit of window cap and stream rate per empty slot.
+
+What it costs: `ceil(n / 4)` transactions instead of one, and the chain is not atomic: if a later step
+fails, the earlier subs stand and the residual holds the rest (call `delegate` again on it). Linkability:
+each step's proof is unlinkable on its own (a nullifier and five commitments), but the steps go out back to
+back from the same submitter, each spending a note the previous step just created, so an observer can guess
+that they form one chain and, from the step count, roughly how many subs were made (between `4(k-1)+1` and
+`4k` for `k` steps). Not yet: atomic multi-step submission, spacing steps out over time, a wider circuit.
+
 ## Stream-backed lending (Phase 1)
 
 1. The lender opens a slot in the `StreamLoan` registry (`openSlot`, sequential `loanRef`).
@@ -156,6 +174,22 @@ Details and caveats: `docs/tokenomics.md`.
   identical policy (zero residual); the mandate, and any pledge, travel with the note.
 - `Wallet.treasuryTree()`: the owner's nested view of every granted allowance and its sub-allowances.
 
+## Note consolidation
+
+`transact` and `grant` take two input notes. When covering an amount needs more than two notes, the wallet
+(`Wallet` and `SolanaWallet`) first merges notes with ordinary fully shielded `transact` calls to itself:
+the two smallest notes of the largest-first selection go in, their sum and a zero note come out, and this
+repeats until two notes cover the amount. `transfer`, `withdraw` and `grant` do this on their own;
+`consolidate(asset, needed?, maxInputs?)` runs it ahead of time (`maxInputs = 1` merges down to one note).
+A balance that is short is refused before any merge is sent. No circuit or contract changed.
+
+What it costs: each merge is one more transaction, and `k` selected notes take at most `k - 2` merges. A
+merge shows the chain what any shielded transfer shows (a root, two nullifiers, two commitments; no
+amount, asset or address), but the merges and the payment are submitted back to back by the same payer,
+so an observer can guess that they belong together and that the wallet held several small notes. Merging
+ahead of time, at a quiet moment, breaks that timing link. A merge has no public leg, so until fee notes
+exist it pays no relayer: the submitting account pays the gas (EVM) or the transaction fee (Solana).
+
 ## Disclosures
 
 Over an allowance note as of a known root: `remaining >= bound`, `spent <= bound`, or
@@ -173,11 +207,12 @@ contracts/lending/   StreamLoan registry, IPledgeSink
 contracts/token/     StipendToken, CapacityStake, SafetyPool (Phase 2)
 contracts/test/      TestERC20, BlockingERC20, GreedySink (test doubles only)
 src/                 SDK: crypto (mirrors the circuits), merkle, encryption (x25519 + XChaCha20),
-                     inputs (circuit input builders), prover (snarkjs), client (Wallet, deploy, scanning),
+                     inputs (circuit input builders), consolidate (note selection and merges), delegation (chained delegation plans),
+                     prover (snarkjs), client (Wallet, deploy, scanning),
                      lender (LenderWallet), token (Phase 2 deploy helpers and the capacity curve)
 test/circuits/       constraint tests: honest inputs accepted, every dishonest input rejected
 test/e2e/            full flow on an in-process EVM with real Groth16 proofs (pool, lending, token)
-test/sdk/            pure-model property test of the lender total bound
+test/sdk/            pure-model property test of the lender total bound, note selection, consolidation and chained delegation plans
 scripts/             build-circuits, setup-circuits, deploy, gen-solana-vk, Solana localnet and test runners
 solana/programs/     stipend_pool, stream_loan, capacity_stake, safety_pool (Anchor crates, cargo build-sbf)
 solana/scripts/      WSL build and private-validator scripts
@@ -316,6 +351,8 @@ await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender'
 
 - Relayer fees for fully shielded operations (fee notes). Today only operations with a public leg pay a fee.
 - Per-asset caps inside one policy for mixed stock and stablecoin desks.
+- A wider `delegate` circuit. More than four subs per delegation is an MVP: a non-atomic chain of steps (see
+  Delegation).
 - Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen
   (design in `docs/LOAN-PRICING.md`, owner decisions pending).
 - Relayer (`relayer/`) and address lookup tables (`src/solana/alt.ts`) are MVPs: no persistence, retries,
