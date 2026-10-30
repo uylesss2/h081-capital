@@ -16,10 +16,7 @@ stream_loan, capacity_stake, safety_pool) are built and tested on a local valida
 `contracts/` were built for Robinhood Chain and are kept as the reference implementation. Robinhood Chain is
 no longer the target.
 **The H081 token is live on Solana (below). The protocol programs in this repository are not deployed to
-any public chain yet.** See "What is not deployed" below. The binding design for v2 is
-`docs/PRD-V2-DESIGN.md`; the token economics are in `docs/tokenomics.md`. The EVM launchpad (an earlier launch plan)
-and the launchpad (the launch guide) launch plans are superseded: H081 launched on Meteora's Dynamic
-Bonding Curve.
+any public chain yet.**
 
 ## H081 token: the official contract
 
