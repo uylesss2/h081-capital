@@ -22,6 +22,8 @@
     "solana:localnet": "node scripts/solana-localnet.mjs",
     "test:solana:loan": "node scripts/solana-loan-localnet.mjs restart && vitest run --config vitest.solana-loan.config.ts",
     "solana:loan:build": "node scripts/solana-loan-localnet.mjs build",
+    "relayer": "tsx relayer/main.ts",
+    "test:relayer": "vitest run test/relayer test/sdk/solana-alt.test.ts",
     "test:solana:pool": "node scripts/solana-localnet.mjs restart && vitest run --config vitest.solana.config.ts"
   },
   "dependencies": {

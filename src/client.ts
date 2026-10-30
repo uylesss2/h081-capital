@@ -2,7 +2,7 @@
 // (deposit, shielded transfer, withdraw, batch grant, policy-bound spend,
 // owner reclaim, delegation, pledge, stream proof, bearer transfer,
 // selective disclosure) end to end with real proofs.
-import { AbiCoder, Contract, ContractFactory, Signer, keccak256, Provider, type ContractTransactionReceipt, type InterfaceAbi } from 'ethers';
+import { AbiCoder, Contract, ContractFactory, ContractTransactionReceipt, Signer, keccak256, Provider, type InterfaceAbi } from 'ethers';
 import { poseidonContract } from 'circomlibjs';
 import { readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -20,6 +20,7 @@ import {
   transactInput, DisclosureKind, NoteInput, SubGrant,
 } from './inputs.js';
 import { Prover, ProofResult, SolidityProof } from './prover.js';
+import type { RelayerClient } from './relayer-client.js';
 
 const artifactsDir = resolve(import.meta.dirname, '..', 'build', 'artifacts', 'contracts');
 const abi = AbiCoder.defaultAbiCoder();
@@ -131,7 +132,12 @@ export interface GrantRequest {
   pledge?: PledgeTerms;
 }
 
-export interface Relay { relayer?: string; fee?: bigint }
+/**
+ * Who submits and is paid. `relayer` is bound into the proof (it receives `fee` in the asset). With `via`,
+ * the wallet hands the calldata to that relayer service instead of sending it from its own signer
+ * (RelayerClient.evmTerms gives the relayer's address and minimum fee). Without `via`, the wallet sends.
+ */
+export interface Relay { relayer?: string; fee?: bigint; via?: RelayerClient }
 
 export interface TxResult { receipt: ContractTransactionReceipt; proof: ProofResult }
 
@@ -357,8 +363,7 @@ export class Wallet {
       root: this.tree.root, publicAmount: built.publicAmount, publicAsset: fieldToAddress(built.publicAsset), extDataHash,
       inputNullifiers: built.inputNullifier, outputCommitments: built.outputCommitment,
     };
-    const tx = await this.pool.transact(solProof(proof.proof), args, ext);
-    const receipt = await tx.wait();
+    const receipt = await this.submit('transact', [solProof(proof.proof), args, ext], relay);
     await this.sync();
     return { receipt, proof };
   }
@@ -562,10 +567,23 @@ export class Wallet {
     const built = spendInput({ ...base, extDataHash });
     const proof = await this.prover.prove('spend', built.input);
     const args = spendArgs(built, now, extDataHash, isPublic ? to : undefined);
-    const tx = await this.pool.spend(solProof(proof.proof), args, ext);
-    const receipt = await tx.wait();
+    const receipt = await this.submit('spend', [solProof(proof.proof), args, ext], relay);
     await this.sync();
     return { receipt, proof, next: built.next };
+  }
+
+  /** Sends a pool call from this wallet's signer, or hands its calldata to `relay.via` and waits for the receipt. */
+  private async submit(fn: 'transact' | 'spend', args: unknown[], relay: Relay): Promise<ContractTransactionReceipt> {
+    if (!relay.via) {
+      const tx = await this.pool.getFunction(fn)(...args);
+      return (await tx.wait())!;
+    }
+    const to = await this.pool.getAddress();
+    const { hash } = await relay.via.relayEvm({ to, data: this.pool.interface.encodeFunctionData(fn, args) });
+    const receipt = await this.provider.waitForTransaction(hash);
+    if (!receipt) throw new Error(`relayed transaction ${hash} has no receipt`);
+    if (receipt.status !== 1) throw new Error(`relayed transaction ${hash} reverted`);
+    return new ContractTransactionReceipt(this.pool.interface, this.provider, receipt);
   }
 
   /** The memos of a spend: the successor for agent and owner, the payout note, and the lender's copy when pledged. */

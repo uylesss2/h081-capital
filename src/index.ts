@@ -6,3 +6,4 @@ export * from './prover.js';
 export * from './client.js';
 export * from './lender.js';
 export * from './token.js';
+export * from './relayer-client.js';
