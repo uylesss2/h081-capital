@@ -15,10 +15,30 @@ stream_loan, capacity_stake, safety_pool) are built and tested on a local valida
 `docs/SOLANA-PORT.md`; see "Solana programs" below and `solana/README.md`. The EVM contracts in
 `contracts/` were built for Robinhood Chain and are kept as the reference implementation. Robinhood Chain is
 no longer the target.
-**Nothing in this repository is deployed to any public chain and no token exists.** See "What is not
-deployed" below. The binding design for v2 is `docs/PRD-V2-DESIGN.md`; the token economics are in
-`docs/tokenomics.md`; the EVM launchpad launch plan in an earlier launch plan is superseded (H081 launches on
-Solana via the launchpad, the launch guide).
+**The H081 token is live on Solana (below). The protocol programs in this repository are not deployed to
+any public chain yet.** See "What is not deployed" below. The binding design for v2 is
+`docs/PRD-V2-DESIGN.md`; the token economics are in `docs/tokenomics.md`. The EVM launchpad (an earlier launch plan)
+and the launchpad (the launch guide) launch plans are superseded: H081 launched on Meteora's Dynamic
+Bonding Curve.
+
+## H081 token: the official contract
+
+| | |
+|---|---|
+| Contract (mint) | [`EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`](https://solscan.io/token/EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo) |
+| Name, ticker | H0 81 Capital, `H081` |
+| Chain, venue | Solana, Meteora Dynamic Bonding Curve (paired with SOL), graduates to a Meteora DAMM v2 pool |
+| Supply | 1,000,000,000, fixed: no mint authority, no freeze authority, metadata immutable |
+| Fee | flat 2% on every buy and sell, in SOL: 0.4% to Meteora, 1.6% to the creator |
+| Allocation | no presale, no free allocation, no dev buy |
+| Website | https://h081.xyz (facts and risks: https://h081.xyz/token) |
+| X | https://x.com/H081CAP |
+| Trade | https://jup.ag/tokens/EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo |
+
+This is the only official H081 contract. Any other token named H081 or "H0 81 Capital" is not ours.
+The token's on-chain metadata carries only its name and ticker, so this README and https://h081.xyz/token
+are where the contract is published. Today H081 is a trading token; the staking and insurance uses
+described under "Phase 2" need the Solana programs to be deployed first.
 
 ## The six circuits
 
@@ -121,7 +141,7 @@ does not restate a live note it holds), `collect`, `settle`, `loan`, `shortfall`
 
 ## Phase 2 contracts (`contracts/token/`, built and tested, not deployed)
 
-- `StipendToken` (EVM reference only; the real H081 is the launchpad coin on Solana): plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
+- `StipendToken` (EVM reference only; the real H081 is the Solana token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`): plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
   commitment), 18 decimals, whole supply minted once to the deployer. No mint, no owner.
 - `CapacityStake`: staked H081 buys capacity for relayers and hosted endpoints to honour:
   `deskCapacity = staked / 100e18`, `shieldCap = (staked / 100e18) * 10,000 USDG per 30 days`;
@@ -242,8 +262,9 @@ spend 180k, shielded spend 169k, pledged spend 198k, lender claim 181k, delegate
 - No Solana program has been given an upgrade authority on any cluster, and none has been made final;
   removing the upgrade authority (`solana program set-upgrade-authority <ID> --final`) is part of a future
   deployment and happens only on the owner's explicit go (`solana/README.md`, "Deploying").
-- No token exists. `StipendToken.sol` is a contract in the repo, not a launch; the EVM launchpad plan in
-  an earlier launch plan is superseded by the launchpad (Solana) route and runs solely on the owner's explicit go.
+- The H081 token is the one deployed piece: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` on Solana
+  (see "H081 token" above). `StipendToken.sol` is an EVM reference contract in the repo, not the token; the
+  the EVM launchpad and the launchpad launch plans are superseded.
 - **Superseded for the protocol (2026-10-26):** the EVM deploy below targets Robinhood Chain and is kept
   only for the reference implementation; the bank ships as Solana programs (`docs/SOLANA-PORT.md`).
 - `scripts/deploy.mjs` deploys the hasher, the six verifiers, the pool and the `StreamLoan` registry to

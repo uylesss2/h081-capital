@@ -1,5 +1,11 @@
 # H081 tokenomics (Phase 2)
 
+> **Update 2026-10-31:** H081 is live on Solana, launched on Meteora's Dynamic Bonding Curve, not the launchpad.
+> Official contract: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (SPL token, 1,000,000,000 fixed supply, no mint or
+> freeze authority, flat 2% trade fee: 0.4% Meteora, 1.6% creator; no presale, no dev buy). Website https://h081.xyz,
+> X https://x.com/H081CAP. The launchpad route, fee split and vault described below are superseded; the Phase 2
+> staking and insurance design still stands and is not deployed.
+
 Status 2026-10-26: **no token is launched, and nothing in this repository is deployed to any chain.**
 **Route decided: the main trading token H081 launches on Solana through the launchpad** (owner decision of
 2026-10-26; guide in the launch guide). It is a Token-2022 coin with a fixed 1,000,000,000 supply. The
