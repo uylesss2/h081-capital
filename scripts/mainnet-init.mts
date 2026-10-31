@@ -1,6 +1,6 @@
 // One-time mainnet setup after the programs are deployed, then a free smoke test:
 //  1. stipend_pool initialize (the pool's Merkle tree), 2. create_vault for USDG (Token-2022),
-//  3. stream_loan initialize (loan registry). All permissionless; skipped if already done.
+//  3. stream_loan initialize (loan registry), only when stream_loan is deployed. All permissionless; skipped if already done.
 //  4. A real disclose proof is uploaded to a buffer and checked by verify_proof through simulateTransaction
 //     (no state change), a tampered copy must fail, then the buffer is closed (rent refunded).
 // H081 staking (capacity_stake init_config, safety_pool init_pool) waits for the H081 mint to exist.
@@ -25,9 +25,10 @@ const conn = new Connection(RPC, 'confirmed');
 const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(process.env.DEPLOYER_KEY!, 'utf8'))));
 
 if ((await conn.getGenesisHash()) !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d' && process.env.REHEARSE_LOCAL !== '1') throw new Error('not mainnet-beta');
-for (const [n, id] of [['stipend_pool', POOL], ['stream_loan', LOAN]] as const) {
-  if (!(await conn.getAccountInfo(id))?.executable) throw new Error(`${n} ${id.toBase58()} is not deployed`);
-}
+if (!(await conn.getAccountInfo(POOL))?.executable) throw new Error(`stipend_pool ${POOL.toBase58()} is not deployed`);
+// stream_loan is optional (the first mainnet release ships stipend_pool only; loans come later)
+const loanDeployed = !!(await conn.getAccountInfo(LOAN))?.executable;
+if (!loanDeployed) console.log(`stream_loan ${LOAN.toBase58()} is not deployed: skipping the loan registry`);
 const step = async (label: string, exists: PublicKey, run: () => Promise<unknown>) => {
   if (await conn.getAccountInfo(exists)) return console.log(`${label}: already done (${exists.toBase58()})`);
   await run();
@@ -44,7 +45,7 @@ console.log(`deposit guard: authority ${guard.authority.toBase58()}, max total $
 await step('pool initialize', poolPda(POOL), () => send(conn, payer, [initializeIx(POOL, payer.publicKey, guard)]));
 await step('USDG vault', vaultPda(POOL, USDG), () => send(conn, payer, [createVaultIx(POOL, payer.publicKey, USDG, TOKEN_2022)]));
 const registry = registryPda(LOAN);
-await step('loan registry initialize', registry, () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));
+if (loanDeployed) await step('loan registry initialize', registry, () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));
 
 // Smoke test: real proof checked by the live program, without changing any state.
 await initCrypto();
