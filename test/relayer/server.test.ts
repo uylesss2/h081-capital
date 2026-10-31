@@ -53,3 +53,27 @@ describe('relayer HTTP server', () => {
     await expect(client.relaySolana({ op: 'transact', payload: '' })).rejects.toBeInstanceOf(RelayerError);
   });
 });
+
+describe('relayer CORS', () => {
+  let server: Server;
+  let url: string;
+  const site = 'https://www.h081.xyz';
+  beforeAll(async () => {
+    server = createRelayerServer({ solana: { info: () => ({}), relay: async () => ({}) }, limiter: new RateLimiter({ perMinute: 60, burst: 5 }), corsOrigins: [site] });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+
+  it('answers preflight and tags responses only for the allowed origin', async () => {
+    const pre = await fetch(`${url}/v1/solana/relay`, { method: 'OPTIONS', headers: { origin: site } });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get('access-control-allow-origin')).toBe(site);
+    expect(pre.headers.get('access-control-allow-headers')).toBe('content-type');
+    expect((await fetch(`${url}/v1/info`, { headers: { origin: site } })).headers.get('access-control-allow-origin')).toBe(site);
+    const other = await fetch(`${url}/v1/solana/relay`, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
+    expect(other.status).toBe(403);
+    expect(other.headers.get('access-control-allow-origin')).toBeNull();
+    expect((await fetch(`${url}/v1/info`, { headers: { origin: 'https://evil.example' } })).headers.get('access-control-allow-origin')).toBeNull();
+  });
+});

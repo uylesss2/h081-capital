@@ -5,7 +5,7 @@
 //   POST /v1/solana/relay      { op, payload, mint?, recipientOwner?, lenderToken? } -> { signature, computeUnits, op, fee }
 // Errors: { error: { code, message } } with 400 (malformed), 402 (fee not acceptable), 404, 409 (stale or
 // already spent), 413 (body too large), 422 (simulation failed), 429 (rate limited, Retry-After), 5xx.
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { RelayError, toRelayError } from './errors.js';
 import { RateLimiter } from './ratelimit.js';
 
@@ -24,6 +24,8 @@ export interface RelayerServerOptions {
   trustProxy?: boolean;
   /** one line per relay request; default: none */
   log?: (line: string) => void;
+  /** browser origins allowed to call the API (CORS); default: none */
+  corsOrigins?: string[];
 }
 
 const json = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -67,11 +69,23 @@ export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
   return req.socket.remoteAddress ?? 'unknown';
 }
 
-export function createRelayerServer(opts: RelayerServerOptions): Server {
+/** The request handler alone, for hosts that bring their own HTTP server (e.g. a serverless function). */
+export function createRelayerHandler(opts: RelayerServerOptions): RequestListener {
   const max = opts.maxBodyBytes ?? 256 * 1024;
-  return createServer(async (req, res) => {
+  const cors = new Set(opts.corsOrigins ?? []);
+  return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://relayer');
     const path = url.pathname.replace(/\/+$/, '');
+    const origin = req.headers.origin;
+    if (origin && cors.has(origin)) {
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') {
+      if (!origin || !cors.has(origin)) return fail(res, new RelayError(403, 'origin', 'origin not allowed'));
+      res.writeHead(204, { 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'content-type', 'access-control-max-age': '600' });
+      return res.end();
+    }
     try {
       if (req.method === 'GET' && path === '/v1/health') return json(res, 200, { ok: true });
       if (req.method === 'GET' && path === '/v1/info') {
@@ -98,5 +112,9 @@ export function createRelayerServer(opts: RelayerServerOptions): Server {
     } catch (e) {
       return fail(res, toRelayError(e));
     }
-  });
+  };
+}
+
+export function createRelayerServer(opts: RelayerServerOptions): Server {
+  return createServer(createRelayerHandler(opts));
 }

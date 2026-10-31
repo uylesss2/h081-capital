@@ -123,6 +123,15 @@ describe('treasury configuration', () => {
     expect(() => loadConfig(env({ RELAYER_SOLANA_TREASURY: 'nope' }))).toThrow(ConfigError);
   });
 
+  it('takes the hot key as a path or as JSON (exactly one), and CORS origins', () => {
+    expect(loadConfig(env({ RELAYER_SOLANA_KEYPAIR: '', RELAYER_SOLANA_KEYPAIR_JSON: '[1,2]' })).solana).toMatchObject({ keypairJson: '[1,2]', keypairPath: undefined });
+    expect(() => loadConfig(env({ RELAYER_SOLANA_KEYPAIR_JSON: '[1,2]' }))).toThrow(/exactly one/);
+    expect(() => loadConfig(env({ RELAYER_SOLANA_KEYPAIR: '' }))).toThrow(/exactly one/);
+    expect(loadConfig(env({ RELAYER_CORS_ORIGINS: 'https://www.h081.xyz, https://h081.xyz' })).corsOrigins).toEqual(['https://www.h081.xyz', 'https://h081.xyz']);
+    expect(() => loadConfig(env({ RELAYER_CORS_ORIGINS: 'https://h081.xyz/app' }))).toThrow(/not an origin/);
+    expect(() => loadConfig(env({ RELAYER_CORS_ORIGINS: '*' }))).toThrow(/not an origin/);
+  });
+
   it('refuses every H081 launch wallet as the treasury at startup', () => {
     expect(LAUNCH_WALLET_DENYLIST.size).toBe(3);
     for (const w of ['2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', 'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ', '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw']) {

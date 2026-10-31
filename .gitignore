@@ -8,3 +8,5 @@ solana/target/
 solana/target-so/
 solana/test-ledger/
 solana/target-verifiable/
+deploy/relayer-vercel/api/
+deploy/relayer-vercel/.vercel/

@@ -1,0 +1,8 @@
+{
+  "name": "h081-relayer",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  }
+}

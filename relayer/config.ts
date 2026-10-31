@@ -13,9 +13,11 @@ export interface RelayerConfig {
   burst: number;
   trustProxy: boolean;
   allowUnpaid: boolean;
+  /** browser origins allowed to call the API (RELAYER_CORS_ORIGINS, comma-separated) */
+  corsOrigins: string[];
   evm?: { rpc: string; pool: string; key: string; minFees: Map<string, bigint>; maxGas: bigint };
   solana?: {
-    rpc: string; programId?: string; keypairPath: string; minFees: Map<string, bigint>; lookupTables: string[]; minLamports: number; maxInFlight: number;
+    rpc: string; programId?: string; keypairPath?: string; keypairJson?: string; minFees: Map<string, bigint>; lookupTables: string[]; minLamports: number; maxInFlight: number;
     /** platform fee rate on the public amount, basis points: required fee = max(minFee, feeBps * amount / 10_000) */
     feeBps: number;
     /** owner (base58) of the fee token accounts: the platform treasury, never a launch wallet */
@@ -78,7 +80,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     burst: int(env, 'RELAYER_BURST', 10, 1),
     trustProxy: flag(env.RELAYER_TRUST_PROXY),
     allowUnpaid: flag(env.RELAYER_ALLOW_UNPAID),
+    corsOrigins: (env.RELAYER_CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   };
+  for (const o of cfg.corsOrigins) {
+    let ok = false;
+    try { ok = new URL(o).origin === o; } catch { /* not a URL */ }
+    if (!ok) throw new ConfigError(`RELAYER_CORS_ORIGINS: ${o} is not an origin (scheme://host[:port])`);
+  }
   if (env.RELAYER_EVM_RPC) {
     const { RELAYER_EVM_POOL: pool, RELAYER_EVM_KEY: key } = env;
     if (!pool || !key) throw new ConfigError('EVM relaying needs RELAYER_EVM_POOL and RELAYER_EVM_KEY');
@@ -90,8 +98,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     cfg.evm = { rpc: env.RELAYER_EVM_RPC, pool: poolAddr, key, minFees, maxGas: BigInt(int(env, 'RELAYER_EVM_MAX_GAS', 8_000_000, 21_000)) };
   }
   if (env.RELAYER_SOLANA_RPC) {
-    const keypairPath = env.RELAYER_SOLANA_KEYPAIR;
-    if (!keypairPath) throw new ConfigError('Solana relaying needs RELAYER_SOLANA_KEYPAIR (path to a keypair JSON file)');
+    // A path, or (for hosts without a file for secrets) the keypair JSON itself in RELAYER_SOLANA_KEYPAIR_JSON.
+    const keypairPath = env.RELAYER_SOLANA_KEYPAIR || undefined;
+    const keypairJson = env.RELAYER_SOLANA_KEYPAIR_JSON || undefined;
+    if (!keypairPath === !keypairJson) throw new ConfigError('Solana relaying needs exactly one of RELAYER_SOLANA_KEYPAIR (path to a keypair JSON file) or RELAYER_SOLANA_KEYPAIR_JSON');
     const minFees = parseFees('RELAYER_SOLANA_MIN_FEES', env.RELAYER_SOLANA_MIN_FEES, (k) => new PublicKey(k).toBase58());
     if (minFees.size === 0 && !cfg.allowUnpaid) throw new ConfigError('RELAYER_SOLANA_MIN_FEES is empty: no operation would be accepted');
     const lookupTables = (env.RELAYER_SOLANA_LOOKUP_TABLES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -128,7 +138,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       };
     }
     cfg.solana = {
-      rpc: env.RELAYER_SOLANA_RPC, programId: env.RELAYER_SOLANA_PROGRAM_ID || undefined, keypairPath, minFees, lookupTables,
+      rpc: env.RELAYER_SOLANA_RPC, programId: env.RELAYER_SOLANA_PROGRAM_ID || undefined, keypairPath, keypairJson, minFees, lookupTables,
       minLamports: int(env, 'RELAYER_SOLANA_MIN_LAMPORTS', 50_000_000), maxInFlight: int(env, 'RELAYER_SOLANA_MAX_IN_FLIGHT', 4, 1),
       feeBps, treasury, capacity,
     };

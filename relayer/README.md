@@ -5,8 +5,11 @@ operation does not have to pay gas or reveal its own address. The relayer is pai
 and the relayer's address are bound into the proof (`extDataHash`), so the relayer can only choose to
 submit or not; it cannot change the fee or the destination.
 
-**Status: MVP.** Exercised by in-process unit tests only (`npm run test:relayer`). It has not run against a
-public cluster, has not been load-tested and has not been audited. Not deployed anywhere.
+**Status: MVP, hosted for mainnet** as the Vercel project `h081-relayer` (serverless, `relayer/vercel.ts`; bundle with
+`node scripts/relayer-vercel.mjs`, then `vercel deploy --prod` in `deploy/relayer-vercel/`). Hot wallet
+`DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA` (pays transaction fees only); fees go to the treasury
+`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`; minimum fee 0.05 USDG, 0.20% above that; capacity_stake on.
+Unit tests (`npm run test:relayer`) and the localnet suites; not load-tested, not audited.
 
 ## Run
 
@@ -21,9 +24,11 @@ Configuration comes from environment variables set by the operator (nothing read
 | `RELAYER_HOST`, `RELAYER_PORT` | listen address (default `127.0.0.1:8787`) |
 | `RELAYER_RATE_PER_MIN`, `RELAYER_BURST` | token-bucket rate limit per client (default 30/min, burst 10) |
 | `RELAYER_TRUST_PROXY` | `1` to key the rate limit on the first `X-Forwarded-For` hop |
+| `RELAYER_CORS_ORIGINS` | comma-separated browser origins allowed to call the API (e.g. `https://www.h081.xyz`); default none |
 | `RELAYER_ALLOW_UNPAID` | `1` to also relay operations that pay no fee (grant, delegate, shielded transfer) |
 | `RELAYER_SOLANA_RPC` | enables Solana relaying |
 | `RELAYER_SOLANA_KEYPAIR` | path to the relayer's keypair JSON (pays transaction fees; relay fees go to the treasury, not here) |
+| `RELAYER_SOLANA_KEYPAIR_JSON` | the keypair JSON itself, instead of a path (serverless hosts); set exactly one of the two |
 | `RELAYER_SOLANA_TREASURY` | required: owner of the fee token accounts (the platform treasury multisig vault); never an H081 launch wallet |
 | `RELAYER_FEE_BPS` | platform fee on the public amount (withdrawal, or a spend's public amount plus lender share), basis points (default 20 = 0.20%); the fee is max(minimum, this) |
 | `RELAYER_SOLANA_PROGRAM_ID` | stipend_pool program id (default: the localnet id) |

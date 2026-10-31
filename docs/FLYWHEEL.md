@@ -78,6 +78,8 @@ Notes:
 ## 4. Treasury
 
 - A Squads multisig, threshold 2 of 3. Its members are owner-held keys that are not any launch wallet.
+  (Live: multisig `G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6`, vault `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`. Its first
+  three members are interim keys held on one machine; they are to be replaced by separately held keys.)
 - It holds the platform-fee token accounts (one associated token account per fee asset) and pays for the
   buyback transactions.
 - It signs nothing alone: `scripts/flywheel/buyback.mts` builds a Squads proposal; two members approve and
