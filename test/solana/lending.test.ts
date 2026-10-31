@@ -10,10 +10,29 @@ import {
   simulate, spendIx, type PreparedSpend, type SolOwnedAllowance, type SpendArgs,
 } from '../../src/solana/index.js';
 import {
-  ASSOCIATED_TOKEN_PROGRAM_ID, GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, SolanaLoanLenderWallet, associatedTokenAddress, claimIx,
-  decodeRegistry, decodeSlot, collectIx, decodeLedger, fundIx, ledgerPda, loanInitializeIx, openSlotIx, registryPda, settleIx, shortfallIx, slotEscrow,
-  slotInbox, slotPda, syncIx,
+  ASSOCIATED_TOKEN_PROGRAM_ID, GRACE, LOAN_ERROR, LOAN_TREASURY, LOCALNET_LOAN_PROGRAM_ID, ORIGINATION_FEE_BPS, SPL_TOKEN_PROGRAM_ID, SolanaLoanLenderWallet,
+  associatedTokenAddress, claimIx, decodeRegistry, decodeSlot, collectIx, decodeLedger, fundIx, ledgerPda, loanFundedEvents, loanInitializeIx,
+  loanTreasuryAccount, openSlotIx, originationFee, registryPda, settleIx, shortfallIx, slotEscrow, slotInbox, slotPda, syncIx,
 } from '../../src/solana/lender.js';
+import { TOKEN22_PROGRAM_ID } from '../../src/solana/token.js';
+
+// The H081 launch wallets hold the token's trading creator fees (the team's); the loan fee never goes there.
+const LAUNCH_WALLETS = ['2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', 'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ', '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw'];
+
+describe('origination fee (platform fee, no validator)', () => {
+  it('is 0.25% of the principal, rounded down; loans under 400 base units pay none', () => {
+    expect(ORIGINATION_FEE_BPS).toBe(25n);
+    expect(originationFee(0n)).toBe(0n);
+    expect(originationFee(399n)).toBe(0n);
+    expect(originationFee(400n)).toBe(1n);
+    expect(originationFee(300_000_000n)).toBe(750_000n);
+    expect(originationFee(2n ** 64n - 1n)).toBe((2n ** 64n - 1n) / 400n);
+  });
+  it('goes to the treasury, never to a launch (creator-fee) wallet', () => {
+    expect(LAUNCH_WALLETS).not.toContain(LOAN_TREASURY.toBase58());
+    expect(loanTreasuryAccount(PublicKey.default).equals(associatedTokenAddress(LOAN_TREASURY, PublicKey.default))).toBe(true);
+  });
+});
 
 const RPC = process.env.STIPEND_LOAN_RPC;
 const LOAN = LOCALNET_LOAN_PROGRAM_ID;
@@ -79,12 +98,12 @@ async function sideAccount(payerKp: Keypair, mint: PublicKey, owner: PublicKey):
 function freezeIx(account: PublicKey, mint: PublicKey, authority: PublicKey, thaw = false, tp = SPL_TOKEN_PROGRAM_ID) {
   return new TransactionInstruction({ programId: tp, keys: [{ pubkey: account, isSigner: false, isWritable: true }, { pubkey: mint, isSigner: false, isWritable: false }, { pubkey: authority, isSigner: true, isWritable: false }], data: Buffer.from([thaw ? 11 : 10]) });
 }
-async function createMint(authority: Keypair, decimals = 6): Promise<PublicKey> {
+async function createMint(authority: Keypair, decimals = 6, tp = SPL_TOKEN_PROGRAM_ID): Promise<PublicKey> {
   const mint = Keypair.generate();
   const lamports = await connection.getMinimumBalanceForRentExemption(MINT_LEN);
   await send(connection, authority, [
-    SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: mint.publicKey, lamports, space: MINT_LEN, programId: SPL_TOKEN_PROGRAM_ID }),
-    initMint2Ix(mint.publicKey, decimals, authority.publicKey, authority.publicKey),
+    SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: mint.publicKey, lamports, space: MINT_LEN, programId: tp }),
+    initMint2Ix(mint.publicKey, decimals, authority.publicKey, authority.publicKey, tp),
   ], { signers: [mint] });
   return mint.publicKey;
 }
@@ -323,14 +342,37 @@ suite('stream-backed lending through stream_loan', () => {
     await expectCode(lender.fundUnchecked(ref, { proof: stream.proof, args: { ...stream.args, pledgeBps: 5000 } }, mint, principal, payout), POOL_ERROR.InvalidProof);
     // another asset
     await expectCode(lender.fundUnchecked(ref, stream, otherMint, principal, payout), LOAN_ERROR.WrongAsset);
+    // the fee only goes to the treasury's associated token account of the loan asset
+    await expectCode(lender.fundUnchecked(ref, stream, mint, principal, payout, { treasury: lenderAta }), LOAN_ERROR.BadTreasury);
+    await expectCode(lender.fundUnchecked(ref, stream, mint, principal, payout, { treasury: loanTreasuryAccount(otherMint) }), LOAN_ERROR.BadTreasury);
+    // a token account owned by the treasury that is not its associated account
+    const treasurySide = await sideAccount(strangerKp, mint, LOAN_TREASURY);
+    await expectCode(lender.fundUnchecked(ref, stream, mint, principal, payout, { treasury: treasurySide }), LOAN_ERROR.BadTreasury);
+    for (const w of LAUNCH_WALLETS) {
+      await expectCode(lender.fundUnchecked(ref, stream, mint, principal, payout, { treasury: associatedTokenAddress(new PublicKey(w), mint) }), LOAN_ERROR.BadTreasury);
+    }
 
+    const treasury = loanTreasuryAccount(mint);
+    const fee = originationFee(principal);
+    expect(fee).toBe(750_000n); // 0.25% of 300 tokens
     const before = await bal(payout);
     const lenderBefore = await bal(lenderAta);
-    await lender.fund(ref, stream, mint, principal, payout);
-    expect(await bal(payout)).toBe(before + principal);
+    const treasuryBefore = await bal(treasury);
+    const tx = await lender.fund(ref, stream, mint, principal, payout);
+    // the borrower gets principal - fee, the treasury the fee; the lender pays the principal
+    expect(await bal(payout)).toBe(before + principal - fee);
+    expect(await bal(treasury)).toBe(treasuryBefore + fee);
     expect(await bal(lenderAta)).toBe(lenderBefore - principal);
+    expect(await bal(treasurySide)).toBe(0n);
+    const [ev] = loanFundedEvents(tx.logs);
+    expect(ev).toBeDefined();
+    expect(ev.loanRef).toBe(ref);
+    expect(ev.principal).toBe(principal);
+    expect(ev.fee).toBe(fee);
+    expect(ev.payoutTo.equals(payout)).toBe(true);
     const loan = await lender.loan(ref);
     expect(loan.funded).toBe(true);
+    // the loan owes the full principal, not principal - fee
     expect(loan.principal).toBe(principal);
     expect(loan.repaid).toBe(0n);
     expect(loan.pledgeBps).toBe(BPS);
@@ -467,10 +509,13 @@ suite('stream-backed lending through stream_loan', () => {
     // tokens that reach the inbox before funding are not repayment (StreamLoan.onPledge credits only while funded)
     const early = 1_000n;
     await send(connection, authority, [createAtaIx(authority.publicKey, slotPda(refC), mint), mintToIx(mint, slotInbox(refC, mint), authority.publicKey, early)]);
+    const payoutBefore = await bal(payout);
     await lender.fund(refC, stream, mint, principalC, payout);
+    expect(await bal(payout)).toBe(payoutBefore + principalC - originationFee(principalC));
     expect((await lender.loan(refC)).expiry).toBe(expiry);
     expect((await lender.loan(refC)).repaid).toBe(0n);
     expect((await lender.ledger(refC, mint))!.held).toBe(early);
+    // the borrower received principal - fee, but the shortfall (and so repayment) is on the full principal
     expect(await lender.shortfall(refC)).toBe(principalC);
     // loan `ref` has not expired: no shortfall
     expect(await lender.shortfall(ref)).toBe(0n);
@@ -525,13 +570,97 @@ suite('stream-backed lending through stream_loan', () => {
     const escrow = slotEscrow(refE, mint);
     expect(await bal(escrow)).toBe(share);
     await expectCode(lender.fundUnchecked(refE, stream, mint, 1n * U, payout, { pullEscrow: false }), LOAN_ERROR.EscrowNotEmpty);
+    const payoutBefore = await bal(payout);
     await lender.fundUnchecked(refE, stream, mint, 1n * U, payout);
+    expect(await bal(payout)).toBe(payoutBefore + 1n * U - 2_500n);
     expect(await bal(escrow)).toBe(0n);
     expect(await bal(slotInbox(refE, mint))).toBe(share);
     const loan = await lender.loan(refE);
     expect(loan.funded).toBe(true);
     expect(loan.repaid).toBe(0n);
     expect((await lender.ledger(refE, mint))!.held).toBe(share);
+  });
+
+  it('a tiny loan pays no origination fee (rounds down to 0); the treasury account is still address-checked', async () => {
+    const refT = await lender.openSlot();
+    const t = new SolanaWallet(Account.random(), pool, agentKp);
+    const now = await pool.now();
+    const res = await owner.grant(mint, [{ to: t.address, amount: 10n * U, streamRate: 1n * U, streamStart: now - 1_000n, expiry: now + 86400n, pledge: lender.terms(refT, BPS) }]);
+    lender.ingest(res.lenderPayloads[0]!);
+    await t.sync();
+    const stream = await t.proveStream(current(t), { minRemaining: 10n * U, minRate: 1n * U, audience: 4n });
+    const tiny = 399n;
+    expect(originationFee(tiny)).toBe(0n);
+    await expectCode(lender.fundUnchecked(refT, stream, mint, tiny, payout, { treasury: lenderAta }), LOAN_ERROR.BadTreasury);
+    const treasury = loanTreasuryAccount(mint);
+    const [payoutBefore, treasuryBefore, lenderBefore] = [await bal(payout), await bal(treasury), await bal(lenderAta)];
+    const tx = await lender.fund(refT, stream, mint, tiny, payout);
+    expect(await bal(payout)).toBe(payoutBefore + tiny);
+    expect(await bal(treasury)).toBe(treasuryBefore);
+    expect(await bal(lenderAta)).toBe(lenderBefore - tiny);
+    expect(loanFundedEvents(tx.logs)[0].fee).toBe(0n);
+    expect((await lender.loan(refT)).principal).toBe(tiny);
+  });
+
+  /** A fresh slot with a started stream on `m` pledged to it, ready to fund. */
+  async function streamFor(m: PublicKey) {
+    const refN = await lender.openSlot();
+    const t = new SolanaWallet(Account.random(), pool, agentKp);
+    const now = await pool.now();
+    const res = await owner.grant(m, [{ to: t.address, amount: 10n * U, streamRate: 1n * U, streamStart: now - 1_000n, expiry: now + 86400n, pledge: lender.terms(refN, BPS) }]);
+    lender.ingest(res.lenderPayloads[0]!);
+    await t.sync();
+    const live = t.agentAllowances(m).filter((a) => a.allowance.remaining > 0n);
+    expect(live).toHaveLength(1);
+    return { refN, stream: await t.proveStream(live[0], { minRemaining: 10n * U, minRate: 1n * U, audience: 4n }) };
+  }
+
+  it('a frozen treasury account never blocks lending: the loan is funded with no fee', async () => {
+    const { refN, stream } = await streamFor(mint);
+    const principalF = 40n * U;
+    await send(connection, authority, [mintToIx(mint, lenderAta, authority.publicKey, principalF)]);
+    const treasury = loanTreasuryAccount(mint);
+    expect(originationFee(principalF)).toBe(100_000n);
+    await send(connection, authority, [freezeIx(treasury, mint, authority.publicKey)]);
+    try {
+      const [payoutBefore, treasuryBefore, lenderBefore] = [await bal(payout), await bal(treasury), await bal(lenderAta)];
+      const tx = await lender.fund(refN, stream, mint, principalF, payout);
+      expect(await bal(payout)).toBe(payoutBefore + principalF);
+      expect(await bal(treasury)).toBe(treasuryBefore);
+      expect(await bal(lenderAta)).toBe(lenderBefore - principalF);
+      expect(loanFundedEvents(tx.logs)[0].fee).toBe(0n);
+      expect((await lender.loan(refN)).principal).toBe(principalF);
+    } finally {
+      await send(connection, authority, [freezeIx(treasury, mint, authority.publicKey, true)]);
+    }
+  });
+
+  it('Token-2022 asset: the fee goes to the treasury ATA derived under Token-2022; the SPL-derived account is refused', async () => {
+    const T22 = TOKEN22_PROGRAM_ID;
+    const m22 = await createMint(authority, 6, T22);
+    await send(connection, authority, [ownerKp, lenderKp, borrowerKp].map((k) => createAtaIx(authority.publicKey, k.publicKey, m22, T22)));
+    const lenderAta22 = associatedTokenAddress(lenderKp.publicKey, m22, T22);
+    const payout22 = associatedTokenAddress(borrowerKp.publicKey, m22, T22);
+    await send(connection, authority, [
+      mintToIx(m22, associatedTokenAddress(ownerKp.publicKey, m22, T22), authority.publicKey, 1_000n * U, T22),
+      mintToIx(m22, lenderAta22, authority.publicKey, 1_000n * U, T22),
+    ]);
+    await owner.deposit(m22, 500n * U);
+    const { refN, stream } = await streamFor(m22);
+    const principal22 = 100n * U;
+    const fee = originationFee(principal22);
+    expect(fee).toBe(250_000n);
+    const treasury22 = loanTreasuryAccount(m22, T22);
+    expect(treasury22.equals(loanTreasuryAccount(m22))).toBe(false);
+    // the treasury's SPL-Token-derived address is not its account for a Token-2022 asset
+    await expectCode(lender.fundUnchecked(refN, stream, m22, principal22, payout22, { treasury: loanTreasuryAccount(m22) }), LOAN_ERROR.BadTreasury);
+    const [payoutBefore, treasuryBefore, lenderBefore] = [await bal(payout22), await bal(treasury22), await bal(lenderAta22)];
+    const tx = await lender.fund(refN, stream, m22, principal22, payout22);
+    expect(await bal(payout22)).toBe(payoutBefore + principal22 - fee);
+    expect(await bal(treasury22)).toBe(treasuryBefore + fee);
+    expect(await bal(lenderAta22)).toBe(lenderBefore - principal22);
+    expect(loanFundedEvents(tx.logs)[0].fee).toBe(fee);
+    expect((await lender.loan(refN)).principal).toBe(principal22);
   });
 
   it('fund instruction is refused for an unknown pool program', async () => {

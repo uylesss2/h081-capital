@@ -40,4 +40,6 @@ pub enum LoanError {
     BadEscrow,
     #[msg("the pool holds an escrowed share for this slot: pull_lender_share it to the inbox before funding")]
     EscrowNotEmpty,
+    #[msg("treasury account is not the treasury's associated token account of the loan asset")]
+    BadTreasury,
 }
