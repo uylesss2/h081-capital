@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Keypair, PublicKey, type AccountInfo } from '@solana/web3.js';
-import { MAINNET_GENESIS, resolvePoolProgramId, resolvePoolTarget } from '../../src/solana/deploy-target.js';
+import { MAINNET_GENESIS, resolvePoolProgramId, resolvePoolTarget, resolveProgramTarget, soContainsKey } from '../../src/solana/deploy-target.js';
 import { LOCALNET_POOL_PROGRAM_ID, programDataAddress } from '../../src/solana/index.js';
 import { BPF_LOADER_2_ID, BPF_LOADER_UPGRADEABLE_ID } from '../../src/solana/verify.js';
 
@@ -84,5 +84,31 @@ describe('deployed stipend_pool checks (before anything is signed)', () => {
   it('refuses a non-upgradeable loader (initialize reads the ProgramData)', async () => {
     const legacy = { async getAccountInfo(k: PublicKey) { return k.equals(id) ? info(BPF_LOADER_2_ID, so, true) : null; } };
     await expect(resolvePoolTarget(legacy, { keysDir: dir, genesis: LOCAL_GENESIS, payer })).rejects.toThrow(/upgradeable loader/);
+  });
+});
+
+describe('deployed phase-2 program checks (stream_loan, safety_pool, capacity_stake init)', () => {
+  const payer = Keypair.generate().publicKey;
+  const id = Keypair.generate().publicKey;
+  const pool = Keypair.generate().publicKey;
+  const localnet = Keypair.generate().publicKey;
+  const code = cat(so, id.toBytes(), pool.toBytes());
+  const base = { name: 'stream_loan', programId: id, genesis: MAINNET_GENESIS, payer, expectSo: code, soMustContain: [pool] };
+
+  it('accepts the reviewed .so carrying its id and the pool id, signed by the upgrade authority', async () => {
+    const t = await resolveProgramTarget(chain(id, payer, code), base);
+    expect(t.upgradeAuthority!.equals(payer)).toBe(true);
+    expect(soContainsKey(code, pool)).toBe(true);
+  });
+
+  it('refuses another signer, another .so, a missing address, a localnet id, a final program and a missing .so on mainnet', async () => {
+    await expect(resolveProgramTarget(chain(id, Keypair.generate().publicKey, code), base)).rejects.toThrow(/not the upgrade authority/);
+    await expect(resolveProgramTarget(chain(id, payer, code), { ...base, expectSo: cat(code, Uint8Array.of(1)) })).rejects.toThrow(/differs/);
+    await expect(resolveProgramTarget(chain(id, payer, code), { ...base, soMustContain: [Keypair.generate().publicKey] })).rejects.toThrow(/does not carry/);
+    await expect(resolveProgramTarget(chain(id, payer, code), { ...base, soMustNotContain: [pool] })).rejects.toThrow(/localnet id/);
+    await expect(resolveProgramTarget(chain(localnet, payer, code), { ...base, programId: localnet, localnetIds: [localnet] })).rejects.toThrow(/localnet id/);
+    await expect(resolveProgramTarget(chain(id, null, code), base)).rejects.toThrow(/final/);
+    await expect(resolveProgramTarget(chain(id, payer, code), { ...base, expectSo: undefined })).rejects.toThrow(/mainnet: give/);
+    await expect(resolveProgramTarget(chain(Keypair.generate().publicKey, payer, code), base)).rejects.toThrow(/not deployed/);
   });
 });

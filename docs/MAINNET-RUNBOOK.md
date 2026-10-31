@@ -1,7 +1,8 @@
 # Mainnet runbook: core-only release (stipend_pool)
 
 The first mainnet release deploys **one program, `stipend_pool`** (the private bank). `stream_loan`,
-`capacity_stake` and `safety_pool` are **not** deployed; the site shows loans as "coming soon".
+`capacity_stake` and `safety_pool` are **not** deployed; the site shows loans as "coming soon". Their mainnet
+preparation (builds, exact cost, checked inits, rehearsal, commands) is in "Phase 2" at the end of this file.
 
 Nothing in this file has been run against mainnet. Every step that sends a transaction needs the owner's
 explicit go, and the SOL figure in step 2 must be stated to the owner and approved **before** it is sent.
@@ -346,3 +347,164 @@ solana program close E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM \
 - [ ] 8 config authority 0.002 SOL; deployer swept to the fee wallet
 - [ ] 9 site synced (`--live`), built, deployed; `/app` and `/proof` checked
 - [ ] HANDOFF.md updated with the signatures and the final balances
+
+---
+
+# Phase 2: stream_loan, safety_pool, capacity_stake (prepared 2026-10-31, NOT deployed)
+
+Nothing below has been sent to mainnet. Every MAINNET TX step needs the owner's explicit go on the exact SOL
+figure first (owner cap for all four programs: **7.5 SOL peak in the deployer**).
+
+## P0. Fixed values
+
+| What | Value |
+|---|---|
+| Program source | `feat/mainnet` @ `44b17f5`, snapshot `../h081-deploy-staging/snap-44b17f5.tar` (stipend_pool source unchanged since `540faa7`, so these programs talk to the deployed `E16DK…` binary) |
+| stream_loan | `8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`, `stream_loan.so` 242,384 B, sha256 `d8cfbca52d22b231e0c9e376a613847157676c275bb9852ee02a2f7d7205d3c0` |
+| safety_pool | `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`, `safety_pool.so` 300,312 B, sha256 `6415fd13484703f1e31950abfcd17c1edf6edf8a5c9ff95646ca2df0ae10bce7` |
+| capacity_stake | `CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`, `capacity_stake.so` 219,344 B, sha256 `bbe8b1a2450dc6275b0229954d6b2f1fdb706cb27ab643697aa5f6b22a1082f2` |
+| Upgrade authority = init signer | deployer `5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1` (hot key, as for stipend_pool: `--allow-hot-upgrade-authority`) |
+| Config authority (caps, pause, underwriter) | `4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2` |
+| stipend_pool compiled in | `E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM` (stream_loan, safety_pool; feature `mainnet`) |
+| stream_loan id compiled into safety_pool | `8JBd7…` |
+| Loan fee treasury (`fee::TREASURY`) | `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq` = Squads v4 vault 0 of multisig `G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6`, create key `solana/keys/mainnet/treasury_squads_create_key-keypair.json` (`4ir9vPVqWZ28ja6eTZs75LqBduhL1R8AQ9irxBu16kAd`). docs/FLYWHEEL.md requires the treasury to be the Squads vault, so it is not the config authority. The multisig is NOT created yet (owner go; members and threshold are chosen then): only that create key can create it at this address, and the 0.25% fees collect in the vault's USDG ATA until then. Another treasury = rebuild stream_loan with another `TREASURY=` (same size) before the deploy, or an upgrade after |
+| H081 mint (staking asset) | `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (SPL Token, 6 decimals) |
+| Loan asset | USDG `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH` (stream_loan accepts any asset; loans are pledged allowances inside the bank, bounded by its 1,000 / 10,000 USDG caps) |
+| H081 caps (both programs) | 100,000 H081 per deposit / stake, 1,000,000 H081 total (0.1% of supply); safety_pool insures nothing until the config authority calls `set_underwriting` |
+| Keys (gitignored, back up offline) | `solana/keys/mainnet/{stream_loan,safety_pool,capacity_stake,treasury_squads_create_key}-keypair.json` (new) |
+
+Rebuild (only if the source changes; then every figure below must be recomputed):
+
+```bash
+git archive -o ../h081-deploy-staging/snap-$(git rev-parse --short HEAD).tar HEAD
+# WSL, absolute paths
+W=/mnt/c/Users/Joseph/documents/websites
+TREASURY=EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq bash $W/stipend-protocol/solana/scripts/build-phase2-mainnet.sh \
+  $W/h081-deploy-staging/snap-44b17f5.tar $W/stipend-protocol/solana/keys/mainnet $W/h081-deploy-staging/so-mainnet
+# per program: own id, E16DK, stream_loan id (safety_pool), treasury (stream_loan), no localnet id, size, sha256; BUILD_OK
+```
+
+It never writes `so-mainnet/stipend_pool.so`. Log of the 2026-10-31 build: `../h081-deploy-staging/build-phase2-mainnet.log`.
+
+## P1. Rehearsal (private local validator, nothing public)
+
+```bash
+npx tsx scripts/mainnet-rehearsal-phase2-localnet.mts      # 99/99 on 2026-10-31
+```
+
+The four exact `.so` files (stipend_pool's included) as upgradeable programs, mainnet feature set, byte copies of
+USDG (Token-2022 extensions) and H081. It runs the real `mainnet-init.mts STEPS=loan` and `mainnet-init-h081.mts`
+(and their refusals: wrong signer, wrong `.so`, wrong treasury), unauthorized inits (refused 6020 / 6007 / 6020);
+loans: fund (0.25% fee into the treasury ATA), routed repayment, sync, lender claim, default (shortfall = full
+principal); safety_pool: deposit, per-deposit and total caps, top_up (refused from a launch wallet), pause blocks
+deposits but not unbond/withdraw, underwriting, insure, settle + release_cover, slash of the defaulted loan;
+capacity_stake: stake, capacity view, caps, pause blocks stake but not request_unstake/unstake. Withdraw/unstake
+after the 14/30-day cooldown and the slashed loan's Cover come from genesis fixtures (the local clock cannot be
+moved); the instructions run are the real mainnet programs. Output `solana/target-so/mainnet-rehearsal-phase2.json`.
+
+Compute units (limit): grant 630,165 (1.4M); stream_loan claim 257,717 (1.4M); spend with lender share 240,066;
+fund 228,280; slash 42,409 (200k); insure 34,691; init_config 34,563; safety deposit 34,587; capacity stake 32,017;
+sync 29,144; init_pool 26,801; safety withdraw 23,844; unstake 21,157; release_cover 18,370; top_up 17,799;
+request_unstake 13,096; request_unbond 11,565; settle 7,711; admin setters 6,767-7,641. All with >= 25% headroom.
+
+## P2. Cost (read-only RPC, mainnet rent 2026-10-31: 5,080 lamports per byte incl. the 128-byte overhead)
+
+| | lamports |
+|---|---|
+| program data (`.so`+45 B): stream_loan / safety_pool / capacity_stake | 1,232,189,560 / 1,526,463,800 / 1,115,146,360 |
+| program accounts (36 B) x3 | 2,499,360 |
+| **locked program rent** | **3,876,299,080** |
+| inits: registry 17 B 736,600; treasury USDG ATA 187 B 1,600,200; capacity config 188 B 1,605,280 + vault 165 B 1,488,440; safety config 246 B 1,899,920 + vault 165 B 1,488,440 | 8,818,880 |
+| upload buffer (`.so`+37 B, refunded after each deploy): largest safety_pool / first in order capacity_stake | 1,526,423,160 / 1,115,105,720 |
+| fees (flat 0.05 SOL per program, generous) | 150,000,000 |
+
+- **Locked for good: 3.8851 SOL** (3.8763 programs + 0.0088 inits).
+- **Peak in the deployer: 5.5615 SOL** counting the largest buffer (conservative); 5.1503 SOL in the order
+  `deploy-cluster.mjs` uses (smallest first: capacity_stake, stream_loan, safety_pool).
+- The deployer holds 1.6075 SOL (2026-10-31): a top-up of **3.954 SOL** brings it to the conservative peak.
+- With stipend_pool's 1.9565 SOL already locked, all four programs lock about 5.84 SOL; the 7.5 SOL cap holds.
+
+`deploy-cluster.mjs --dry-run` (P4) prints the same figures from live rent; it is read-only.
+
+## P3. Fund the deployer (MAINNET TX, owner approves the exact figure)
+
+```bash
+solana balance 5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1 --url $URL
+solana transfer --from "$FEEKEY" --fee-payer "$FEEKEY" 5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1 <TOPUP> \
+  --allow-unfunded-recipient --with-compute-unit-price $PRICE --url $URL     # TOPUP = 5.5615 - balance
+```
+
+## P4. Deploy (MAINNET TXS)
+
+Dry run first. It refuses on any `.so` gate (sha256, own id, E16DK, stream_loan id, treasury, localnet ids):
+
+```bash
+node ../h081-deploy-staging/deploy-cluster.mjs --cluster mainnet --programs stream_loan,safety_pool,capacity_stake \
+  --keys-dir C:/Users/Joseph/documents/websites/stipend-protocol/solana/keys/mainnet \
+  --so-dir C:/Users/Joseph/documents/websites/h081-deploy-staging/so-mainnet \
+  --asset-mint 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH --h081-mint EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo \
+  --loan-treasury EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq \
+  --expect-sha256 stream_loan=d8cfbca52d22b231e0c9e376a613847157676c275bb9852ee02a2f7d7205d3c0 \
+  --expect-sha256 safety_pool=6415fd13484703f1e31950abfcd17c1edf6edf8a5c9ff95646ca2df0ae10bce7 \
+  --expect-sha256 capacity_stake=bbe8b1a2450dc6275b0229954d6b2f1fdb706cb27ab643697aa5f6b22a1082f2 \
+  --maxlen-factor 1 --allow-hot-upgrade-authority --rpc $RPC --i-understand-mainnet --dry-run
+```
+
+Expect `[gate] .so checks passed`, `peak with the largest buffer 5.5615 SOL, with this order 5.1502 SOL`,
+`dry run: stopping before any transaction` (checked read-only on 2026-10-31). Then the same command without
+`--dry-run`. On mainnet the script only deploys (smallest first) and prints the two checked init commands of P5.
+If it stops midway, re-run it (deployed programs are skipped); stray buffers:
+`solana program close --buffers --keypair $K/deployer-keypair.json --url $URL --bypass-warning`. Then:
+
+```bash
+for p in stream_loan:8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4 safety_pool:HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt capacity_stake:CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU; do
+  npx tsx scripts/solana-program-hash.mts --program ${p#*:} --cluster mainnet-beta --so ../h081-deploy-staging/so-mainnet/${p%%:*}.so || echo "MISMATCH ${p%%:*}"
+done
+```
+
+## P5. Initialize (MAINNET TXS, right after P4)
+
+Both scripts check before signing: mainnet genesis, ids not localnet, upgradeable loader, upgrade authority =
+`DEPLOYER_KEY`, deployed executable = the `.so`, and that the `.so` carries the pool id (+ treasury / stream_loan
+id). Re-running is safe ("already done"; the read-back checks still run). Only the upgrade authority can init
+(refused 6020 / 6007 / 6020 otherwise), so nobody can take the configs first.
+
+```bash
+# stream_loan: registry + the treasury's USDG account (fund refuses a fee-paying loan without it). The pool is only checked.
+DEPLOYER_KEY=solana/keys/mainnet/deployer-keypair.json KEYS_DIR=solana/keys/mainnet \
+POOL_SO=../h081-deploy-staging/so-mainnet/stipend_pool.so STEPS=loan \
+LOAN_PROGRAM_ID=8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4 LOAN_SO=../h081-deploy-staging/so-mainnet/stream_loan.so \
+LOAN_TREASURY=EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq \
+npx tsx scripts/mainnet-init.mts
+
+# capacity_stake config + safety_pool pool for H081 (config authority 4eyS..., caps 1,000,000 / 100,000 H081)
+DEPLOYER_KEY=solana/keys/mainnet/deployer-keypair.json H081_MINT=EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo \
+CAPACITY_PROGRAM_ID=CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU SAFETY_PROGRAM_ID=HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt \
+LOAN_PROGRAM_ID=8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4 \
+CAPACITY_SO=../h081-deploy-staging/so-mainnet/capacity_stake.so SAFETY_SO=../h081-deploy-staging/so-mainnet/safety_pool.so \
+CONFIG_AUTHORITY=4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2 \
+npx tsx scripts/mainnet-init-h081.mts        # must print "OK   capacity_stake config" and "OK   safety_pool config"
+```
+
+Underwriting stays off (nothing insurable) until the owner decides. Cover is paid in H081 valued 1:1 in base
+units against a USDG shortfall (docs/tokenomics.md caveat): size `max_cover` / `max_exposure` accordingly.
+
+## P6. Sweep (MAINNET TX)
+
+Leftover deployer SOL back to the fee wallet (section 8 commands). The deployer stays the upgrade authority of
+all four programs.
+
+## Phase-2 emergency
+
+The config authority `4eyS…` signs (SDK builders in `src/solana/token.ts`): `setStakingPausedIx`, `setStakeCapsIx`
+(capacity_stake; unstaking is never paused) and `safetySetDepositsPausedIx`, `safetySetDepositCapsIx`,
+`safetySetUnderwritingIx` with `loanAsset` = default (safety_pool; unbonding, withdrawals and slashes are never
+paused). stream_loan has no admin; only its upgrade authority can replace it (and so change the treasury).
+
+## Phase-2 checklist
+
+- [ ] P1 rehearsal 99/99 on the exact `.so` files (sha256 above)
+- [ ] P2 figure stated to the owner: top-up ______ SOL (peak 5.5615 with the largest buffer), OK given
+- [ ] P4 dry-run gates pass; deploy; the three hashes match
+- [ ] P5 both init scripts exit 0 with read-back OK
+- [ ] P6 sweep; HANDOFF.md updated (signatures, balances); creating the Squads treasury is a separate owner go

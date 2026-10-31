@@ -3,9 +3,14 @@
 # no-log-ix-name) from a git-archive snapshot of the protocol repo (never the working tree), then checks the
 # program ids compiled into each .so before anything is deployed.
 #
-# Usage (WSL): bash build-phase2-mainnet.sh <snapshot.tar> <mainnet_keys_dir> <out_dir> [program ...]
+# Usage (WSL): TREASURY=<pubkey> bash build-phase2-mainnet.sh <snapshot.tar> <mainnet_keys_dir> <out_dir> [program ...]
 #   <mainnet_keys_dir> holds stream_loan-keypair.json, safety_pool-keypair.json, capacity_stake-keypair.json
 #   (only their PUBLIC keys are read, with solana-keygen pubkey).
+#   TREASURY (required when stream_loan is built): owner of the token accounts that receive the 0.25% loan
+#   origination fee (fee::TREASURY). docs/FLYWHEEL.md: the treasury Squads multisig vault. It is patched into
+#   fee.rs here (the source keeps the placeholder, which every non-localnet build refuses); it must not be the
+#   placeholder or an H081 launch (creator-fee) wallet (fee.rs also asserts that at compile time) and must
+#   appear in the built .so.
 #
 # What the `mainnet` feature does (and why this script exists; security review 2026-10-31):
 #   - stream_loan and safety_pool talk to the mainnet stipend_pool E16DKmtr... (cfg-selected constant, no sed);
@@ -35,6 +40,17 @@ for p in "${PROGS[@]}"; do
   grep -q "^declare_id!(\"${NEW[$p]}\");" "programs/$p/src/lib.rs" || { echo "$p: declare_id not patched"; exit 1; }
   echo "$p declare_id ${LOCAL[$p]} -> ${NEW[$p]}"
 done
+PLACEHOLDER=TreasuryP1aceho1derSetMeBeforeMainnet111111
+LAUNCH_WALLETS=(2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ 5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw)
+if printf '%s\n' "${PROGS[@]}" | grep -qx stream_loan; then
+  T=${TREASURY:-}
+  [[ "$T" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "stream_loan needs TREASURY=<base58 pubkey> (the treasury Squads vault)"; exit 1; }
+  [ "$T" != "$PLACEHOLDER" ] && [ "$T" != 11111111111111111111111111111111 ] || { echo "TREASURY is the placeholder or the default key"; exit 1; }
+  for w in "${LAUNCH_WALLETS[@]}"; do [ "$T" != "$w" ] || { echo "TREASURY $T is an H081 launch (creator-fee) wallet: refused"; exit 1; }; done
+  sed -i "s/^pub const TREASURY: Pubkey = pubkey!(\"$PLACEHOLDER\");/pub const TREASURY: Pubkey = pubkey!(\"$T\");/" programs/stream_loan/src/fee.rs
+  grep -q "^pub const TREASURY: Pubkey = pubkey!(\"$T\");" programs/stream_loan/src/fee.rs || { echo "stream_loan: TREASURY not patched"; exit 1; }
+  echo "stream_loan fee::TREASURY -> $T"
+fi
 if printf '%s\n' "${PROGS[@]}" | grep -qx safety_pool; then
   [ -n "${NEW[stream_loan]:-}" ] || { echo "safety_pool needs the mainnet stream_loan key"; exit 1; }
   sed -i "s/^pub const STREAM_LOAN_ID: Pubkey = pubkey!(\"${LOCAL[stream_loan]}\");/pub const STREAM_LOAN_ID: Pubkey = pubkey!(\"${NEW[stream_loan]}\");/" programs/safety_pool/src/stream_loan_view.rs
@@ -70,6 +86,9 @@ for p in "${PROGS[@]}"; do
   so_has "$so" "${NEW[$p]}" && echo "  ok: own id ${NEW[$p]}" || { echo "  FAIL: own id ${NEW[$p]} missing"; fail=1; }
   if [ "$p" != capacity_stake ]; then
     so_has "$so" "$POOL" && echo "  ok: mainnet stipend_pool $POOL" || { echo "  FAIL: mainnet stipend_pool id missing"; fail=1; }
+  fi
+  if [ "$p" = stream_loan ]; then
+    so_has "$so" "$TREASURY" && echo "  ok: treasury $TREASURY" || { echo "  FAIL: treasury $TREASURY missing"; fail=1; }
   fi
   if [ "$p" = safety_pool ]; then
     so_has "$so" "${NEW[stream_loan]}" && echo "  ok: stream_loan ${NEW[stream_loan]}" || { echo "  FAIL: mainnet stream_loan id missing"; fail=1; }

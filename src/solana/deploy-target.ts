@@ -72,3 +72,62 @@ export async function resolvePoolTarget(conn: AccountReader, opts: PoolTargetOpt
   }
   return deployed;
 }
+
+/** The 32 raw bytes of `key` occur in `elf` (a program id or address constant compiled into a .so). */
+export function soContainsKey(elf: Uint8Array, key: PublicKey): boolean {
+  return Buffer.from(elf).includes(key.toBuffer());
+}
+
+export interface ProgramTargetOptions {
+  /** Label used in messages (e.g. "stream_loan"). */
+  name: string;
+  /** The deployed program id (given explicitly; never a localnet default on mainnet). */
+  programId: PublicKey;
+  /** Localnet ids this program must not be on mainnet (the SDK's LOCALNET_* id for it). */
+  localnetIds?: PublicKey[];
+  genesis: string;
+  /** The signer of the one-time init: must be the program's upgrade authority. */
+  payer: PublicKey;
+  /** The .so that was deployed; its executable hash must match the chain. Required on mainnet. */
+  expectSo?: Uint8Array;
+  /** Addresses the .so must carry (its own id is always checked): e.g. the stipend_pool id, the treasury. */
+  soMustContain?: PublicKey[];
+  /** Addresses the .so must not carry (localnet ids of the programs it talks to). */
+  soMustNotContain?: PublicKey[];
+}
+
+/**
+ * Checks a deployed upgradeable program before its one-time init is signed: not a localnet id on mainnet,
+ * upgradeable loader, upgrade authority = payer, and (required on mainnet) deployed executable = the reviewed
+ * .so, which carries its own id and the given addresses. Read-only.
+ */
+export async function resolveProgramTarget(conn: AccountReader, opts: ProgramTargetOptions): Promise<DeployedProgram> {
+  const { name, programId: id } = opts;
+  if (opts.genesis === MAINNET_GENESIS && (opts.localnetIds ?? []).some((l) => l.equals(id))) {
+    throw new Error(`${name} ${id.toBase58()} is a localnet id; mainnet needs the id the mainnet build was patched with`);
+  }
+  let deployed: DeployedProgram;
+  try {
+    deployed = await fetchDeployedProgram(conn, id);
+  } catch (e) {
+    throw new Error(`${name} ${id.toBase58()} is not deployed on this cluster (${(e as Error).message})`);
+  }
+  if (deployed.loader !== 'upgradeable') throw new Error(`${name} ${id.toBase58()} uses loader ${deployed.loader}; its init needs the upgradeable loader`);
+  if (!deployed.upgradeAuthority) throw new Error(`${name} ${id.toBase58()} is final (no upgrade authority): its init can never succeed`);
+  if (!deployed.upgradeAuthority.equals(opts.payer)) {
+    throw new Error(`the signer ${opts.payer.toBase58()} is not the upgrade authority of ${name} (${deployed.upgradeAuthority.toBase58()})`);
+  }
+  if (opts.expectSo) {
+    const local = executableHash(opts.expectSo);
+    if (local !== deployed.executableHash) throw new Error(`deployed ${name} ${deployed.executableHash} differs from the expected .so ${local}`);
+    for (const k of [id, ...(opts.soMustContain ?? [])]) {
+      if (!soContainsKey(opts.expectSo, k)) throw new Error(`${name} .so does not carry ${k.toBase58()}`);
+    }
+    for (const k of opts.soMustNotContain ?? []) {
+      if (soContainsKey(opts.expectSo, k)) throw new Error(`${name} .so carries the localnet id ${k.toBase58()}`);
+    }
+  } else if (opts.genesis === MAINNET_GENESIS) {
+    throw new Error(`mainnet: give the deployed ${name}.so so its hash is checked against the chain`);
+  }
+  return deployed;
+}
