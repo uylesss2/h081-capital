@@ -1,7 +1,7 @@
 # Solana port: binding design
 
-Owner decision 2026-10-26: **the bank moves to Solana**, the same chain as the H081 trading token
-(the launchpad). Robinhood Chain is no longer the target. This document is binding for the port; where it is
+Owner decision 2026-10-26: **the bank moves to Solana**, the same chain as the H081 trading token.
+Robinhood Chain is no longer the target. This document is binding for the port; where it is
 silent, follow `docs/PRD-V2-DESIGN.md` and the existing Solidity behaviour in `contracts/`.
 
 Non-negotiables: no upgrade path in program logic, no admin key or pause except the deposit guards (caps and a
@@ -134,8 +134,7 @@ upload, instruction builders, a `SolanaWallet` with the same surface as `Wallet`
 `emit_cpi` events), `SolanaLenderWallet`, and capacity/safety helpers. Reuse `src/crypto.ts`,
 `src/inputs.ts`, `src/prover.ts` and `src/encryption.ts` unchanged.
 
-Tests: a local `solana-test-validator` in WSL (Ubuntu; Solana CLI 4.3.2; the existing script pattern in
-`solana/scripts/start-validator.sh`, but loading our `.so` files with `--bpf-program` (stipend_pool: `--upgradeable-program`, see 4b), on its own ports,
+Tests: a local `solana-test-validator` in WSL (Ubuntu; Solana CLI 4.3.2; `solana/scripts/start-validator.sh`, loading our `.so` files with `--bpf-program` (stipend_pool: `--upgradeable-program`, see 4b), on its own ports,
 never touching other validators already running) driven from Windows Node with vitest
 (`test/solana/*.test.ts`, `npm run test:solana`). Mints are created locally (SPL Token and Token-2022). No
 mainnet mint is hard-coded in programs; the SDK takes mints as parameters.

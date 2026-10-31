@@ -1,21 +1,15 @@
 # H081 tokenomics (Phase 2)
 
-> **Update 2026-10-31:** H081 is live on Solana, launched on Meteora's Dynamic Bonding Curve, not the launchpad.
-> Official contract: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (SPL token, 1,000,000,000 fixed supply, no mint or
-> freeze authority, flat 2% trade fee: 0.4% Meteora, 1.6% creator; no presale, no dev buy). Website https://h081.xyz,
-> X https://x.com/H081CAP. The launchpad route, fee split and vault described below are superseded; the Phase 2
-> staking (capacity_stake `CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`) and safety pool (safety_pool
-> `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`) are live on Solana mainnet since 2026-10-31.
-
-Status 2026-10-26 (historical; superseded by the note above): no token was launched and nothing was deployed at that date.
-**Route decided: the main trading token H081 launches on Solana through the launchpad** (owner decision of
-2026-10-26; guide in the launch guide). It is a Token-2022 coin with a fixed 1,000,000,000 supply. The
-the EVM launchpad plan for Robinhood Chain is superseded. The bank product itself now also moves to Solana (owner decision
-2026-10-26, `docs/SOLANA-PORT.md`); the two stay independent because the pool never reads the token (section 1). `contracts/token/StipendToken.sol` is a
-testnet and test stand-in only; it is not deployed to any mainnet.
+H081 is live on Solana. It launched on Meteora's Dynamic Bonding Curve and graduates to a Meteora DAMM v2
+pool. Official contract: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (SPL token, 1,000,000,000 fixed supply, no
+mint or freeze authority, flat 2% trade fee: 0.4% Meteora, 1.6% creator; no presale, no dev buy). Website
+https://h081.xyz, X https://x.com/H081CAP. Phase 2 staking (capacity_stake
+`CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`) and the safety pool (safety_pool
+`HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`) are live on Solana mainnet since 2026-10-31. The pool never reads
+the token (section 1). `contracts/token/StipendToken.sol` is a testnet and test stand-in only; it is not deployed
+to any mainnet.
 The contracts described here (`contracts/token/`) are built and tested in-process (`test/e2e/token.test.ts`)
-and exist so that the economics are code, not a promise. The ticker `H081` is the working symbol of
-H0.81 Capital, not a commitment; the name, symbol and supply are confirmed only at launch. The binding
+and exist so that the economics are code, not a promise. The binding
 design is `docs/PRD-V2-DESIGN.md` section 6.3.
 
 ## 1. The invariant: the pool never reads the token
@@ -38,20 +32,15 @@ token cannot touch any user's funds.
 | Burn | none built in (holders may send to a dead address like any ERC-20) |
 | Governance | none; the token carries no votes |
 
-The table above describes the testnet stand-in `StipendToken.sol`. **The main trading token is the
-the launchpad coin on Solana**: name "H0 81 Capital", symbol `H081`, X https://x.com/H081CAP, Token-2022,
-1,000,000,000 supply, no transfer tax. The team alone funds the opening buy with 10 SOL (self-funded raise,
-whitelist = the creator's wallet), which buys about 22% of supply into the launchpad's launch vault; there is no
-presale and no free allocation. Curve trades pay 1.25%: 0.25% Raydium, 0.5% the launchpad, 0.5% creator fee,
-which the launchpad's program splits 75% to the launch vault, 15% to the launchpad's buyback and 10% to backers (the
-team, as sole backer). Holders receive nothing. At graduation the coin moves to a Raydium CPMM pool with
-locked liquidity. Details, rehearsal and risks: the launch guide.
+The table above describes the testnet stand-in `StipendToken.sol`. **The main trading token is H081 on
+Solana**: name "H0 81 Capital", symbol `H081`, contract `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`, launched on
+Meteora's Dynamic Bonding Curve, 1,000,000,000 fixed supply, no presale, no free allocation, no dev buy. Every buy
+and sell pays a flat 2% in SOL: 0.4% to Meteora, 1.6% to the creator.
 
-Phase 2 consequence: with the bank on Solana, staking and the safety pool sit on the same chain as the
-token, so no bridge is needed. `CapacityStake.sol` and `SafetyPool.sol` stay in the repo as the EVM reference
-implementation; they are being ported as the Solana programs `capacity_stake` and `safety_pool` for the H081
-Token-2022 mint (`docs/SOLANA-PORT.md` section 3.3). Those programs are in build, not deployed to devnet or
-mainnet, and ship only after Phase 1 and an external audit.
+Phase 2 consequence: staking and the safety pool sit on the same chain as the token, so no bridge is needed.
+`CapacityStake.sol` and `SafetyPool.sol` stay in the repo as the EVM reference implementation; the Solana
+programs `capacity_stake` and `safety_pool` (`docs/SOLANA-PORT.md` section 3.3) are live on Solana mainnet.
+They have not had an external audit yet; an audit is planned.
 
 ## 3. Capacity (`CapacityStake.sol`)
 

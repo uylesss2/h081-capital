@@ -1,5 +1,5 @@
 // Phase 2 staking on a private solana-test-validator (WSL, rpc 127.0.0.1:9199): capacity_stake and
-// safety_pool for a Token-2022 mint with 6 decimals (like H081 on the launchpad), plus Token-2022 with a
+// safety_pool for a Token-2022 mint with 6 decimals (like the H081 test mint), plus Token-2022 with a
 // transfer fee and classic SPL Token. safety_pool reads stream_loan Slot/Ledger/inbox accounts that the
 // validator loads as fixtures owned by the stream_loan program id (test/solana/staking-fixtures.ts);
 // when stream_loan.so is loaded too, its own `shortfall` view is compared with safety_pool's.

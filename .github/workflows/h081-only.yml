@@ -1,0 +1,24 @@
+# Fails if the repo mentions any token launch other than H081.
+# H081's only launch is Meteora's Dynamic Bonding Curve, contract EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo.
+# The blocked names are stored base64-encoded so this file does not mention them itself.
+name: h081-only
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: No other launches mentioned
+        run: |
+          set -u
+          PATTERN=$(echo 'b3duaWZ5fG93bnRheHJlY2VpdmVyfFxiZmxhcFxifGJhY2tzdG9ja3xzdG9ua2Z1bnxwdW1wXC4/ZnVufGxhdW5jaGxhYnxsZXRzYm9ua3xib25rXC5mdW58Zm91clwubWVtZQ==' | base64 -d)
+          if git grep -nIiE "$PATTERN" -- . ':!package-lock.json'; then
+            echo "::error::Found mentions of a launch other than H081 (lines above). Remove them."
+            exit 1
+          fi
+          echo "Clean: only H081."
