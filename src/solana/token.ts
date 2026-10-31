@@ -46,7 +46,7 @@ export const CAPACITY_ERROR = { Amount: 6000, MoreThanStaked: 6001, NothingPendi
 export const SAFETY_ERROR = {
   Amount: 6000, TooSmall: 6001, Shares: 6002, MoreThanHeld: 6003, NothingUnbonding: 6004, Cooldown: 6005, NotTheLender: 6006,
   NoLoan: 6007, Settled: 6008, NoDueDate: 6009, Expired: 6010, AlreadyPaid: 6011, NoShortfall: 6012, PoolEmpty: 6013,
-  BadLoanAccount: 6014, WrongPool: 6015, NotEmpty: 6016, Overflow: 6017,
+  BadLoanAccount: 6014, WrongPool: 6015, NotEmpty: 6016, Overflow: 6017, NoShares: 6018, LaunchWallet: 6019,
 } as const;
 
 // ------------------------------------------------------------- encoding helpers
@@ -282,6 +282,14 @@ export function insureIx(programId: PublicKey, lender: PublicKey, mint: PublicKe
   ], u64le(loanRef), u64le(premium));
 }
 
+/** Anyone but a launch wallet: adds what the vault receives of `amount` to the pool's assets without minting shares
+ * (raises every share's value). Refused while the pool has no shares. The flywheel funds it from platform fees only. */
+export function safetyTopUpIx(programId: PublicKey, funder: PublicKey, mint: PublicKey, from: PublicKey, amount: bigint, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
+  return anchorIx(programId, 'top_up', [
+    w(safetyConfigPda(programId, mint)), r(mint), w(safetyVaultPda(programId, mint)), w(from), r(funder, true), r(tokenProgram),
+  ], u64le(amount));
+}
+
 /** The loan's accounts slash/shortfall read: the slot, its inbox ATA for the loan asset, its ledger, and the pool escrow of the slot. */
 export interface LoanAccounts { slot: PublicKey; inbox: PublicKey; ledger: PublicKey; escrow: PublicKey }
 export function loanAccounts(loanRef: bigint, asset: PublicKey, assetTokenProgram: PublicKey, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID, poolProgram = SAFETY_POOL_ESCROW_PROGRAM_ID): LoanAccounts {
@@ -309,7 +317,7 @@ export function closePositionIx(programId: PublicKey, owner: PublicKey, mint: Pu
   return anchorIx(programId, 'close_position', [r(safetyConfigPda(programId, mint)), w(positionPda(programId, mint, owner)), w(owner, true)]);
 }
 
-/** `assets`: the pool's accounted balance (deposits + premiums - withdrawals - slashes); shares are priced on it. */
+/** `assets`: the pool's accounted balance (deposits + premiums + top-ups - withdrawals - slashes); shares are priced on it. */
 export interface SafetyConfig {
   mint: PublicKey; tokenProgram: PublicKey; vault: PublicKey; decimals: number; totalShares: bigint; generation: bigint; bump: number; vaultBump: number; assets: bigint;
 }
