@@ -23,11 +23,16 @@ Configuration comes from environment variables set by the operator (nothing read
 | `RELAYER_TRUST_PROXY` | `1` to key the rate limit on the first `X-Forwarded-For` hop |
 | `RELAYER_ALLOW_UNPAID` | `1` to also relay operations that pay no fee (grant, delegate, shielded transfer) |
 | `RELAYER_SOLANA_RPC` | enables Solana relaying |
-| `RELAYER_SOLANA_KEYPAIR` | path to the relayer's keypair JSON (pays transaction fees, receives relay fees) |
+| `RELAYER_SOLANA_KEYPAIR` | path to the relayer's keypair JSON (pays transaction fees; relay fees go to the treasury, not here) |
+| `RELAYER_SOLANA_TREASURY` | required: owner of the fee token accounts (the platform treasury multisig vault); never an H081 launch wallet |
+| `RELAYER_FEE_BPS` | platform fee on the public amount (withdrawal, or a spend's public amount plus lender share), basis points (default 20 = 0.20%); the fee is max(minimum, this) |
 | `RELAYER_SOLANA_PROGRAM_ID` | stipend_pool program id (default: the localnet id) |
 | `RELAYER_SOLANA_MIN_FEES` | `mint=amount,...` minimum fee per mint, base units |
 | `RELAYER_SOLANA_LOOKUP_TABLES` | comma-separated lookup tables to build v0 transactions against |
 | `RELAYER_SOLANA_MIN_LAMPORTS`, `RELAYER_SOLANA_MAX_IN_FLIGHT` | refuse when underfunded / busy |
+| `RELAYER_SOLANA_CAPACITY_MINT` | enables capacity_stake enforcement for this staked mint (H081) |
+| `RELAYER_SOLANA_CAPACITY_ASSETS` | required with the above: comma-separated 6-decimal (USDG) mints whose amounts count against capacity (other decimals are refused at startup) |
+| `RELAYER_SOLANA_CAPACITY_FREE_TIER`, `RELAYER_SOLANA_CAPACITY_PROGRAM_ID` | anonymous free tier in base units (default 100 USDG); capacity_stake program id (default: localnet id) |
 | `RELAYER_EVM_RPC`, `RELAYER_EVM_POOL`, `RELAYER_EVM_KEY` | enables EVM relaying (key: 0x hex) |
 | `RELAYER_EVM_MIN_FEES` | `asset=amount,...` minimum fee per ERC-20 |
 | `RELAYER_EVM_MAX_GAS` | refuse calls estimated above this (default 8,000,000) |
@@ -45,7 +50,7 @@ Errors are `{ error: { code, message } }`: 400 malformed, 402 fee not acceptable
 nullifier, 413 body too large, 422 simulation failed, 429 rate limited, 503 chain disabled or busy.
 
 Solana flow: decode `borsh(Proof, Args, ext)` for the named op, check the fee (mint listed, amount at least
-the minimum, paid to this relayer's fee account), check root/nullifiers/timestamp, stage the payload in a
+the minimum, paid to the treasury's fee account), check root/nullifiers/timestamp, stage the payload in a
 buffer the relayer owns, simulate the final transaction, then send. Deposits and lender claims are never
 relayed (the depositor or lender must sign).
 
