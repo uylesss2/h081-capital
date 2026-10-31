@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Private solana-test-validator for the stream_loan tests. Loads stipend_pool.so (latest from
-# solana/target-so) as an UPGRADEABLE program (`initialize` requires the upgrade authority) and stream_loan.so
-# as an immutable program, plus nothing else.
+# Private solana-test-validator for the stream_loan tests. Loads stipend_pool.so and stream_loan.so (latest from
+# solana/target-so) as UPGRADEABLE programs (both `initialize`s require the upgrade authority), plus nothing else.
 #   rpc 9099, faucet 9913, gossip 8092, dynamic 8300-8400, ledger ~/stipend-loan-ledger
 # Never touches other validators (8899/8900 belong to another project; 8999 is the pool suite's).
 set -euo pipefail
@@ -19,4 +18,4 @@ exec solana-test-validator \
   --ledger "$LEDGER" --reset --quiet \
   --rpc-port 9099 --faucet-port 9913 --gossip-port 8092 --dynamic-port-range 8300-8400 \
   --upgradeable-program "$POOL_ID" "$HOME/stipend-loan-so/stipend_pool.so" "$UPGRADE_AUTHORITY" \
-  --bpf-program "$LOAN_ID" "$HOME/stipend-loan-so/stream_loan.so"
+  --upgradeable-program "$LOAN_ID" "$HOME/stipend-loan-so/stream_loan.so" "$UPGRADE_AUTHORITY"

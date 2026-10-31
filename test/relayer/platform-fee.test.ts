@@ -142,6 +142,12 @@ describe('treasury configuration', () => {
     // no default asset set: the fee mints may include non-6-decimal assets (SOL)
     expect(() => loadConfig(env({ RELAYER_SOLANA_CAPACITY_MINT: h081 }))).toThrow(/RELAYER_SOLANA_CAPACITY_ASSETS/);
     expect(() => loadConfig(env({ RELAYER_SOLANA_CAPACITY_MINT: h081, ...assets, RELAYER_SOLANA_CAPACITY_FREE_TIER: '1.5' }))).toThrow(ConfigError);
+    // off localnet (explicit pool id) the capacity program must be named, and never the localnet id
+    const pool = { RELAYER_SOLANA_PROGRAM_ID: 'E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM' };
+    expect(() => loadConfig(env({ ...pool, RELAYER_SOLANA_CAPACITY_MINT: h081, ...assets }))).toThrow(/RELAYER_SOLANA_CAPACITY_PROGRAM_ID/);
+    expect(() => loadConfig(env({ ...pool, RELAYER_SOLANA_CAPACITY_MINT: h081, ...assets, RELAYER_SOLANA_CAPACITY_PROGRAM_ID: '6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3' }))).toThrow(/localnet/);
+    const real = Keypair.generate().publicKey.toBase58();
+    expect(loadConfig(env({ ...pool, RELAYER_SOLANA_CAPACITY_MINT: h081, ...assets, RELAYER_SOLANA_CAPACITY_PROGRAM_ID: real })).solana?.capacity?.programId).toBe(real);
   });
 
   it('main wiring: the configured treasury, fee rate and capacity reach the relayer (no hot-wallet fallback)', async () => {

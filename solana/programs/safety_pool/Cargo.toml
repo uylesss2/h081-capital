@@ -1,7 +1,7 @@
 [package]
 name = "safety_pool"
 version = "0.1.0"
-description = "Stipend Phase 2 (H0.81 Capital): H081 stakers insure stream-backed loans against shortfall. Permissionless per mint, no admin"
+description = "Stipend Phase 2 (H0.81 Capital): H081 stakers insure stream-backed loans against shortfall. Per-mint pools created by the upgrade authority; deposit caps, deposit-only pause and an underwriter"
 edition = "2021"
 license = "MIT"
 
@@ -13,6 +13,8 @@ name = "safety_pool"
 default = []
 # Localnet-only test build with a separate program id and a short cooldown and grace. Never deployed.
 fast = []
+# Mainnet build: reads the mainnet stipend_pool escrows and refuses localnet program ids (see build-phase2-mainnet.sh).
+mainnet = []
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []

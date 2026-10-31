@@ -1,5 +1,11 @@
-// After H081 exists on the launchpad: create the capacity-staking config and the safety pool for its mint on
-// mainnet (both permissionless, no admin). Idempotent: an existing account is reported as already done.
+// After H081 exists: create the capacity-staking config and the safety pool for its mint on mainnet. Both
+// init instructions accept ONLY the program's upgrade authority (DEPLOYER_KEY must be it; the programs read
+// their ProgramData account). They name a config authority (CONFIG_AUTHORITY, default the deployer) that can
+// cap and pause deposits/staking (never withdrawals or unstaking) and is the safety pool's underwriter;
+// nothing is insurable until it calls set_underwriting. Idempotent: an existing account is reported as done.
+// Caps (base units, H081 has 6 decimals; start small):
+//   STAKE_MAX_TOTAL / STAKE_MAX_PER     capacity_stake (default 1,000,000 / 100,000 H081)
+//   SAFETY_MAX_TOTAL / SAFETY_MAX_PER   safety_pool deposits (default 1,000,000 / 100,000 H081)
 // Program ids are given explicitly (the mainnet builds have their own ids patched in; never the LOCALNET_* ones).
 // Usage (Windows): H081_MINT=<mint> CAPACITY_PROGRAM_ID=<id> SAFETY_PROGRAM_ID=<id> DEPLOYER_KEY=<deployer.json> npx tsx scripts/mainnet-init-h081.mts
 import { readFileSync } from 'node:fs';
@@ -32,9 +38,15 @@ const info = await conn.getAccountInfo(mint);
 if (!info) throw new Error(`mint ${mint.toBase58()} not found`);
 const tokenProgram = info.owner;
 console.log(`H081 mint ${mint.toBase58()} (token program ${tokenProgram.toBase58()})`);
+const authority = process.env.CONFIG_AUTHORITY ? new PublicKey(process.env.CONFIG_AUTHORITY) : payer.publicKey;
+const big = (name: string, dflt: bigint) => (process.env[name] ? BigInt(process.env[name]!) : dflt);
+const H = 1_000_000n;
+const stakeCaps = { authority, maxTotal: big('STAKE_MAX_TOTAL', 1_000_000n * H), maxPerStake: big('STAKE_MAX_PER', 100_000n * H) };
+const safetyCaps = { authority, maxTotal: big('SAFETY_MAX_TOTAL', 1_000_000n * H), maxPerDeposit: big('SAFETY_MAX_PER', 100_000n * H) };
+console.log(`config authority ${authority.toBase58()}; staking caps ${stakeCaps.maxTotal}/${stakeCaps.maxPerStake}; safety caps ${safetyCaps.maxTotal}/${safetyCaps.maxPerDeposit}`);
 for (const [label, account, ixFor] of [
-  ['capacity_stake config', capacityConfigPda(CAPACITY, mint), () => capacityInitConfigIx(CAPACITY, payer.publicKey, mint, tokenProgram)],
-  ['safety_pool pool', safetyConfigPda(SAFETY, mint), () => safetyInitPoolIx(SAFETY, payer.publicKey, mint, tokenProgram)],
+  ['capacity_stake config', capacityConfigPda(CAPACITY, mint), () => capacityInitConfigIx(CAPACITY, payer.publicKey, mint, stakeCaps, tokenProgram)],
+  ['safety_pool pool', safetyConfigPda(SAFETY, mint), () => safetyInitPoolIx(SAFETY, payer.publicKey, mint, safetyCaps, tokenProgram)],
 ] as const) {
   if (await conn.getAccountInfo(account)) { console.log(`${label}: already done (${account.toBase58()})`); continue; }
   try {

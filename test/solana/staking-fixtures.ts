@@ -14,11 +14,11 @@ import {
 
 export const FIXTURE_DIR = resolve(import.meta.dirname, '..', '..', 'solana', 'target-so', 'staking-fixtures');
 /** Live loans expire this long after T0 (insure must land before; slash after expiry + grace). */
-export const LIVE_SECONDS = 150n;
+export const LIVE_SECONDS = 200n;
 
 export const REF = {
   live: 1001n, unfunded: 1002n, noExpiry: 1003n, expired: 1004n, settled: 1005n, pending: 1006n, huge: 1007n, wrongOwner: 1008n,
-  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n,
+  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n, long: 1014n, repaid: 1015n, dust: 1016n,
 } as const;
 
 export interface StakingMeta {
@@ -97,6 +97,12 @@ export function writeFixtures(t0: bigint): StakingMeta {
   slot('overdue', { principal: 7_000_000n, repaid: 2_000_000n, expiry: t0 - 8n * 86400n }, { amount: 1_500_000n, held: 500_000n });
   // shares the pool escrowed for the slot (lender account left out of the spends) count as paid
   slot('escrowed', { principal: 3_000_000n, repaid: 500_000n }, undefined, SAFETY_STREAM_LOAN_PROGRAM_ID, 1_200_000n);
+  // expires in 8 days: the only loan the production build (14-day cooldown, 7-day grace) can insure
+  slot('long', { principal: 5_000_000n, expiry: t0 + 8n * 86400n });
+  // repaid in full once the unsynced inbox value is counted: its cover can be released
+  slot('repaid', { principal: 2_000_000n, repaid: 1_500_000n }, { amount: 600_000n, held: 100_000n });
+  // a shortfall of 2M tokens minus one base unit: slashing a 2M-token pool for it leaves dust
+  slot('dust', { principal: 2_000_000_000_000n - 1n });
 
   const meta: StakingMeta = { t0: Number(t0), liveExpiry: Number(liveExpiry), lenderSecret: Array.from(lender.secretKey), asset: asset.toBase58(), loans };
   writeFileSync(resolve(FIXTURE_DIR, 'meta.json'), JSON.stringify(meta, null, 2));

@@ -4,8 +4,10 @@ Owner decision 2026-10-26: **the bank moves to Solana**, the same chain as the H
 (the launchpad). Robinhood Chain is no longer the target. This document is binding for the port; where it is
 silent, follow `docs/PRD-V2-DESIGN.md` and the existing Solidity behaviour in `contracts/`.
 
-Non-negotiables: no upgrade path in program logic, no admin key or pause except stipend_pool's deposit guard
-(per-asset caps and a pause of deposits only, set by a config authority; withdrawals can never be blocked); programs are made
+Non-negotiables: no upgrade path in program logic, no admin key or pause except the deposit guards (caps and a
+pause of deposits only, set by a config authority; withdrawals can never be blocked) of stipend_pool, safety_pool
+and capacity_stake, plus safety_pool's underwriter (security review 2026-10-31); every init/config instruction
+accepts only the program's upgrade authority (ProgramData check); programs are made
 immutable (upgrade authority set to none) at deployment; nothing is deployed to devnet or mainnet by this
 work; no token is launched.
 
@@ -100,18 +102,29 @@ loanRef, asset, streamStart <= now; records the loan; transfers principal from t
 `sync` (permissionless: credits `repaid` from the slot's token account balance increase, forwards to the
 slot lender, escrows if the forward fails), `claim` (slot lender submits a lender-claim spend through the
 pool with the slot PDA as signer via CPI), `settle`, `shortfall` (view; 0 when expiry == 0), GRACE 7 days.
+Security review 2026-10-31: `fund` requires the stream proof's `audience` = fieldOf(payout_to) (the borrower names
+where the principal goes), caps the principal at min_remaining * pledge_bps / 10,000 and refuses a payout to the
+lender, its source account, the slot PDA or the inbox; nothing leaves an unfunded slot's inbox (it counts as
+repayment once funded); `held` is reconciled down to the inbox balance (Token-2022 permanent delegate).
 
 ### 3.3 `capacity_stake` and `safety_pool` (Phase 2, for the H081 Token-2022 mint)
 
-`capacity_stake`: config PDA `["config", mint]` created permissionlessly per mint (no admin). Same rules as
-`CapacityStake.sol`: stake, request_unstake (7-day cooldown), unstake; capacity read off the stake account.
+`capacity_stake`: config PDA `["config", mint]` created per mint by the upgrade authority, naming a config
+authority with staking caps and a stake-only pause. Same rules as `CapacityStake.sol`: stake, request_unstake
+(30-day cooldown since 2026-10-31: one full relayer capacity window, so one stake cannot buy several windows),
+unstake; capacity read off the stake account.
 Units follow the mint's decimals: DESK_UNIT = SHIELD_UNIT = 100 whole tokens, SHIELD_PER_UNIT = 10,000 USDG
 (6 decimals). Relayers enforce capacity off-chain; the pool never reads this program.
 
 `safety_pool`: port of `SafetyPool.sol` (shares, 14-day unbonding at risk, insure by the slot lender before
 expiry, permissionless slash when `stream_loan` reports a shortfall, pool-empty revert, generation reset).
 It reads `stream_loan` accounts directly (same chain now). The self-lend and 1:1 valuation caveats from
-`docs/tokenomics.md` still apply and must be restated.
+`docs/tokenomics.md` still apply and must be restated. Since 2026-10-31: pools are created by the upgrade
+authority; the config authority caps and pauses deposits and underwrites (co-signs every `insure`, names the one
+insurable loan asset, per-cover and total cover limits and a premium floor); a cover pays at most its limit;
+`release_cover` frees the exposure of a repaid loan; a loan must stay unslashable for a full cooldown after
+it is insured; virtual offset 10^9 shares / 10^6 assets; a slash leaving > 10^9 shares per base unit retires
+the generation; a top-up is capped at the pool's assets.
 
 ## 4. SDK and tests
 

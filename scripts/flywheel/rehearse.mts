@@ -30,6 +30,11 @@ import { BaseFeeMode, CpAmm, MAX_SQRT_PRICE, MIN_SQRT_PRICE, getBaseFeeParams } 
 import { LOCALNET_SAFETY_POOL_PROGRAM_ID, decodeSafetyConfig, safetyConfigPda, safetyDepositIx, safetyInitPoolIx, safetyVaultPda } from '../../src/solana/token.js';
 import { DENY_LIST, ROOT, isLocalRpc, readLedger, MAINNET_GENESIS, fmt } from './common.mjs';
 import type { Proposal } from './buyback.mjs';
+import { sha256 } from '@noble/hashes/sha2';
+
+// Localnet-only upgrade authority (public seed; test/solana/config-authority.ts): the validator loads safety_pool
+// upgradeable with it, and init_pool accepts only the upgrade authority. Never use it off a local validator.
+const LOCALNET_UPGRADE_AUTHORITY = Keypair.fromSeed(sha256(new TextEncoder().encode('h081 localnet stipend_pool upgrade authority')));
 
 const { values: args } = parseArgs({ options: { 'with-safety-pool': { type: 'boolean', default: false }, keep: { type: 'boolean', default: false }, 'no-start': { type: 'boolean', default: false } } });
 const RPC = 'http://127.0.0.1:9299';
@@ -67,7 +72,7 @@ L="$HOME/stipend-flywheel-ledger"; P="$HOME/stipend-flywheel-programs"; mkdir -p
 # Meteora's cp-amm program, dumped once from mainnet (a read; nothing is sent there).
 [ -s "$P/cp_amm.so" ] || solana program dump -u https://api.mainnet-beta.solana.com ${CP_AMM} "$P/cp_amm.so" >/dev/null
 progs=(--bpf-program ${CP_AMM} "$P/cp_amm.so")
-${withSafety ? `cp "${so}" "$P/safety_pool.so"; progs+=(--bpf-program ${LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58()} "$P/safety_pool.so")` : ''}
+${withSafety ? `cp "${so}" "$P/safety_pool.so"; progs+=(--upgradeable-program ${LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58()} "$P/safety_pool.so" ${LOCALNET_UPGRADE_AUTHORITY.publicKey.toBase58()})` : ''}
 pids=$(pgrep -f "${LEDGER_MATCH}" || true); [ -n "$pids" ] && kill $pids && sleep 2
 setsid nohup solana-test-validator --ledger "$L" --reset --quiet --rpc-port 9299 --faucet-port 9915 --gossip-port 8094 --dynamic-port-range 8700-8800 "\${progs[@]}" > /tmp/stipend-flywheel-validator.log 2>&1 < /dev/null &
 for i in $(seq 1 120); do
@@ -153,7 +158,9 @@ async function rehearse() {
 
   // Safety pool (optional): created and staked so the 50/50 split applies.
   if (withSafety) {
-    await send([safetyInitPoolIx(LOCALNET_SAFETY_POOL_PROGRAM_ID, payer.publicKey, mint, TOKEN_PROGRAM_ID)], [payer]);
+    // init_pool accepts only the upgrade authority the validator loaded safety_pool with (localnet-only public seed)
+    await send([SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: LOCALNET_UPGRADE_AUTHORITY.publicKey, lamports: LAMPORTS_PER_SOL })], [payer]);
+    await send([safetyInitPoolIx(LOCALNET_SAFETY_POOL_PROGRAM_ID, LOCALNET_UPGRADE_AUTHORITY.publicKey, mint, { authority: payer.publicKey, maxTotal: 10n ** 18n, maxPerDeposit: 10n ** 18n }, TOKEN_PROGRAM_ID)], [LOCALNET_UPGRADE_AUTHORITY]);
     await send([safetyDepositIx(LOCALNET_SAFETY_POOL_PROGRAM_ID, staker.publicKey, mint, stakerAta, 1_000_000n * 1_000_000n, TOKEN_PROGRAM_ID)], [staker]);
     out('safety pool created, 1M H081 staked');
   }

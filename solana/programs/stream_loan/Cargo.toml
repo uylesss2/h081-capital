@@ -22,6 +22,8 @@ custom-panic = []
 # localnet/test builds only: allows fee::TREASURY to be the placeholder. Without it (every production build)
 # the crate refuses to compile while TREASURY is the placeholder.
 localnet-treasury = []
+# Mainnet build: talks to the mainnet stipend_pool (E16DK...) and refuses the localnet program id.
+mainnet = []
 
 [dependencies]
 # Same anchor-lang as stipend_pool. No anchor-spl: token accounts are read and transfer_checked is

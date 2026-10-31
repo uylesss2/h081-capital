@@ -42,4 +42,10 @@ pub enum LoanError {
     EscrowNotEmpty,
     #[msg("treasury account is not the treasury's associated token account of the loan asset")]
     BadTreasury,
+    #[msg("signer is not the program's upgrade authority")]
+    UpgradeAuthority,
+    #[msg("the stream proof's audience is not fieldOf(payout_to)")]
+    PayoutNotProven,
+    #[msg("principal is zero or above what the pledge can repay (min_remaining * pledge_bps / 10,000)")]
+    PrincipalTooLarge,
 }

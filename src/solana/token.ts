@@ -37,17 +37,27 @@ export const DESK_WHOLE_TOKENS = 100n;
 export const SHIELD_WHOLE_TOKENS = 100n;
 /** USDG base units (6 decimals) per 30 days per shielding unit: 10,000 USDG. */
 export const SHIELD_PER_UNIT = 10_000_000_000n;
-export const CAPACITY_COOLDOWN = 7n * 86400n;
+/** capacity_stake COOLDOWN: one full relayer capacity window (30 days). */
+export const CAPACITY_COOLDOWN = 30n * 86400n;
 export const SAFETY_COOLDOWN = 14n * 86400n;
 export const STREAM_GRACE = 7n * 86400n;
 
 /** Anchor error codes (6000 + variant index). */
-export const CAPACITY_ERROR = { Amount: 6000, MoreThanStaked: 6001, NothingPending: 6002, Cooldown: 6003, NotEmpty: 6004, Decimals: 6005, Overflow: 6006 } as const;
+export const CAPACITY_ERROR = {
+  Amount: 6000, MoreThanStaked: 6001, NothingPending: 6002, Cooldown: 6003, NotEmpty: 6004, Decimals: 6005, Overflow: 6006,
+  UpgradeAuthority: 6007, ConfigAuthority: 6008, StakingPaused: 6009, StakeCap: 6010,
+} as const;
 export const SAFETY_ERROR = {
   Amount: 6000, TooSmall: 6001, Shares: 6002, MoreThanHeld: 6003, NothingUnbonding: 6004, Cooldown: 6005, NotTheLender: 6006,
   NoLoan: 6007, Settled: 6008, NoDueDate: 6009, Expired: 6010, AlreadyPaid: 6011, NoShortfall: 6012, PoolEmpty: 6013,
   BadLoanAccount: 6014, WrongPool: 6015, NotEmpty: 6016, Overflow: 6017, NoShares: 6018, LaunchWallet: 6019,
+  UpgradeAuthority: 6020, ConfigAuthority: 6021, DepositsPaused: 6022, DepositCap: 6023, NotInsurable: 6024, CoverTooLarge: 6025,
+  PremiumTooLow: 6026, ExposureCap: 6027, TooShort: 6028, Released: 6029, NotReleasable: 6030, TopUpTooLarge: 6031,
 } as const;
+
+/** The BPF upgradeable loader's ProgramData address of a program (init instructions check its upgrade authority). */
+export const programDataPda = (programId: PublicKey) =>
+  PublicKey.findProgramAddressSync([programId.toBytes()], new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111'))[0];
 
 // ------------------------------------------------------------- encoding helpers
 
@@ -164,10 +174,30 @@ export const capacityVaultPda = (programId: PublicKey, mint: PublicKey) => pda(p
 /** One owner's stake: ["stake", mint, owner]. */
 export const stakePda = (programId: PublicKey, mint: PublicKey, owner: PublicKey) => pda(programId, enc('stake'), mint.toBytes(), owner.toBytes());
 
-export function capacityInitConfigIx(programId: PublicKey, payer: PublicKey, mint: PublicKey, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
+/** Staking caps of a new config: total staked and per stake (base units of the mint). */
+export interface StakeCaps { authority: PublicKey; maxTotal: bigint; maxPerStake: bigint }
+
+/** Only the program's upgrade authority may sign as `payer`; it names the config authority and the staking caps. */
+export function capacityInitConfigIx(programId: PublicKey, payer: PublicKey, mint: PublicKey, caps: StakeCaps, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
   return anchorIx(programId, 'init_config', [
     w(capacityConfigPda(programId, mint)), r(mint), w(capacityVaultPda(programId, mint)), w(payer, true), r(tokenProgram), r(SystemProgram.programId),
-  ]);
+    r(programDataPda(programId)),
+  ], caps.authority.toBytes(), u64le(caps.maxTotal), u64le(caps.maxPerStake));
+}
+
+/** Config authority: staking caps. */
+export function setStakeCapsIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, maxTotal: bigint, maxPerStake: bigint): TransactionInstruction {
+  return anchorIx(programId, 'set_stake_caps', [w(capacityConfigPda(programId, mint)), r(authority, true)], u64le(maxTotal), u64le(maxPerStake));
+}
+
+/** Config authority: pause or resume staking (never unstaking). */
+export function setStakingPausedIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, paused: boolean): TransactionInstruction {
+  return anchorIx(programId, 'set_staking_paused', [w(capacityConfigPda(programId, mint)), r(authority, true)], Uint8Array.of(paused ? 1 : 0));
+}
+
+/** Config authority: hand the capacity_stake config authority over. */
+export function capacitySetConfigAuthorityIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, next: PublicKey): TransactionInstruction {
+  return anchorIx(programId, 'set_config_authority', [w(capacityConfigPda(programId, mint)), r(authority, true)], next.toBytes());
 }
 
 export function stakeIx(programId: PublicKey, owner: PublicKey, mint: PublicKey, from: PublicKey, amount: bigint, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
@@ -199,12 +229,14 @@ export function capacityViewIx(programId: PublicKey, mint: PublicKey, owner: Pub
 export interface CapacityConfig {
   mint: PublicKey; tokenProgram: PublicKey; vault: PublicKey; decimals: number; deskUnit: bigint; shieldUnit: bigint;
   totalStaked: bigint; totalPending: bigint; bump: number; vaultBump: number;
+  authority: PublicKey; stakingPaused: boolean; maxTotal: bigint; maxPerStake: bigint;
 }
 export function decodeCapacityConfig(data: Uint8Array): CapacityConfig {
   const rd = new Reader(data, 'Config');
   return {
     mint: rd.key(), tokenProgram: rd.key(), vault: rd.key(), decimals: rd.u8(), deskUnit: rd.u64(), shieldUnit: rd.u64(),
     totalStaked: rd.u64(), totalPending: rd.u64(), bump: rd.u8(), vaultBump: rd.u8(),
+    authority: rd.key(), stakingPaused: rd.bool(), maxTotal: rd.u64(), maxPerStake: rd.u64(),
   };
 }
 
@@ -252,11 +284,42 @@ export const streamLedgerPda = (loanRef: bigint, mint: PublicKey, streamLoan = S
 export const streamEscrowPda = (loanRef: bigint, mint: PublicKey, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID, poolProgram = SAFETY_POOL_ESCROW_PROGRAM_ID) =>
   pda(poolProgram, enc('owed'), mint.toBytes(), be32(fieldOf(streamSlotPda(loanRef, streamLoan))), u64le(loanRef));
 
-export function safetyInitPoolIx(programId: PublicKey, payer: PublicKey, mint: PublicKey, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
+/** Deposit caps of a new pool: accounted assets after a deposit, and per deposit (base units of the mint). */
+export interface DepositCaps { authority: PublicKey; maxTotal: bigint; maxPerDeposit: bigint }
+
+/** Only the program's upgrade authority may sign as `payer`; it names the pool's config authority (also its underwriter) and caps. */
+export function safetyInitPoolIx(programId: PublicKey, payer: PublicKey, mint: PublicKey, caps: DepositCaps, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
   return anchorIx(programId, 'init_pool', [
     w(safetyConfigPda(programId, mint)), r(mint), w(safetyVaultPda(programId, mint)), w(payer, true), r(tokenProgram), r(SystemProgram.programId),
-  ]);
+    r(programDataPda(programId)),
+  ], caps.authority.toBytes(), u64le(caps.maxTotal), u64le(caps.maxPerDeposit));
 }
+
+/** Config authority: deposit caps. */
+export function safetySetDepositCapsIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, maxTotal: bigint, maxPerDeposit: bigint): TransactionInstruction {
+  return anchorIx(programId, 'set_deposit_caps', [w(safetyConfigPda(programId, mint)), r(authority, true)], u64le(maxTotal), u64le(maxPerDeposit));
+}
+
+/** Config authority: pause or resume deposits and new covers (never unbonding, withdrawals or slashes). */
+export function safetySetDepositsPausedIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, paused: boolean): TransactionInstruction {
+  return anchorIx(programId, 'set_deposits_paused', [w(safetyConfigPda(programId, mint)), r(authority, true)], Uint8Array.of(paused ? 1 : 0));
+}
+
+/** Underwriting terms set by the config authority. `loanAsset` = PublicKey.default insures nothing. */
+export interface Underwriting { loanAsset: PublicKey; maxCover: bigint; maxExposure: bigint; minPremiumBps: number }
+export function safetySetUnderwritingIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, u: Underwriting): TransactionInstruction {
+  const bps = new Uint8Array(2);
+  new DataView(bps.buffer).setUint16(0, u.minPremiumBps, true);
+  return anchorIx(programId, 'set_underwriting', [w(safetyConfigPda(programId, mint)), r(authority, true)], u.loanAsset.toBytes(), u64le(u.maxCover), u64le(u.maxExposure), bps);
+}
+
+/** Config authority: hand the pool's config authority (and underwriting) over. */
+export function safetySetConfigAuthorityIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, next: PublicKey): TransactionInstruction {
+  return anchorIx(programId, 'set_config_authority', [w(safetyConfigPda(programId, mint)), r(authority, true)], next.toBytes());
+}
+
+/** Least premium for `cover` (safety_pool::min_premium): cover * bps / 10,000 rounded up. */
+export const minPremium = (cover: bigint, minPremiumBps: number) => (cover * BigInt(minPremiumBps) + 9_999n) / 10_000n;
 
 export function safetyDepositIx(programId: PublicKey, owner: PublicKey, mint: PublicKey, from: PublicKey, amount: bigint, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
   return anchorIx(programId, 'deposit', [
@@ -275,11 +338,15 @@ export function safetyWithdrawIx(programId: PublicKey, owner: PublicKey, mint: P
   ]);
 }
 
-export function insureIx(programId: PublicKey, lender: PublicKey, mint: PublicKey, from: PublicKey, loanRef: bigint, premium: bigint, tokenProgram = TOKEN22_PROGRAM_ID, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID): TransactionInstruction {
+/** The slot lender and the pool's underwriter (config authority) both sign. `cover` is the most a slash may pay. */
+export function insureIx(
+  programId: PublicKey, lender: PublicKey, mint: PublicKey, from: PublicKey, loanRef: bigint, premium: bigint, cover: bigint, underwriter: PublicKey,
+  tokenProgram = TOKEN22_PROGRAM_ID, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID,
+): TransactionInstruction {
   return anchorIx(programId, 'insure', [
     w(safetyConfigPda(programId, mint)), w(coverPda(programId, loanRef)), r(streamSlotPda(loanRef, streamLoan)), r(mint), w(safetyVaultPda(programId, mint)),
-    w(from), w(lender, true), r(tokenProgram), r(SystemProgram.programId),
-  ], u64le(loanRef), u64le(premium));
+    w(from), w(lender, true), r(tokenProgram), r(SystemProgram.programId), r(underwriter, true),
+  ], u64le(loanRef), u64le(premium), u64le(cover));
 }
 
 /** Anyone but a launch wallet: adds what the vault receives of `amount` to the pool's assets without minting shares
@@ -308,6 +375,13 @@ export function slashIx(programId: PublicKey, mint: PublicKey, loanRef: bigint, 
   ], u64le(loanRef));
 }
 
+/** Anyone: frees an unpaid cover's exposure once its loan is settled or fully repaid. */
+export function releaseCoverIx(programId: PublicKey, mint: PublicKey, loanRef: bigint, loan: LoanAccounts): TransactionInstruction {
+  return anchorIx(programId, 'release_cover', [
+    w(safetyConfigPda(programId, mint)), w(coverPda(programId, loanRef)), r(loan.slot), r(loan.inbox), r(loan.ledger), r(loan.escrow),
+  ], u64le(loanRef));
+}
+
 /** View: return data u64 LE, the shortfall slash would see now. */
 export function safetyShortfallIx(programId: PublicKey, loanRef: bigint, loan: LoanAccounts): TransactionInstruction {
   return anchorIx(programId, 'shortfall', [r(loan.slot), r(loan.inbox), r(loan.ledger), r(loan.escrow)], u64le(loanRef));
@@ -320,12 +394,15 @@ export function closePositionIx(programId: PublicKey, owner: PublicKey, mint: Pu
 /** `assets`: the pool's accounted balance (deposits + premiums + top-ups - withdrawals - slashes); shares are priced on it. */
 export interface SafetyConfig {
   mint: PublicKey; tokenProgram: PublicKey; vault: PublicKey; decimals: number; totalShares: bigint; generation: bigint; bump: number; vaultBump: number; assets: bigint;
+  authority: PublicKey; depositsPaused: boolean; maxTotal: bigint; maxPerDeposit: bigint; loanAsset: PublicKey; maxCover: bigint; maxExposure: bigint;
+  minPremiumBps: number; exposure: bigint;
 }
 export function decodeSafetyConfig(data: Uint8Array): SafetyConfig {
   const rd = new Reader(data, 'SafetyConfig');
   return {
     mint: rd.key(), tokenProgram: rd.key(), vault: rd.key(), decimals: rd.u8(), totalShares: rd.u128(), generation: rd.u64(), bump: rd.u8(), vaultBump: rd.u8(),
-    assets: rd.u64(),
+    assets: rd.u64(), authority: rd.key(), depositsPaused: rd.bool(), maxTotal: rd.u64(), maxPerDeposit: rd.u64(), loanAsset: rd.key(), maxCover: rd.u64(),
+    maxExposure: rd.u64(), minPremiumBps: rd.u16(), exposure: rd.u64(),
   };
 }
 
@@ -335,15 +412,20 @@ export function decodePosition(data: Uint8Array): Position {
   return { owner: rd.key(), mint: rd.key(), shares: rd.u128(), unbonding: rd.u128(), readyAt: rd.i64(), gen: rd.u64(), bump: rd.u8() };
 }
 
-export interface Cover { loanRef: bigint; mint: PublicKey; lender: PublicKey; premium: bigint; boundAt: bigint; paid: boolean; paidOut: bigint; bump: number }
+export interface Cover { loanRef: bigint; mint: PublicKey; lender: PublicKey; premium: bigint; boundAt: bigint; paid: boolean; paidOut: bigint; bump: number; limit: bigint; released: boolean }
 export function decodeCover(data: Uint8Array): Cover {
   const rd = new Reader(data, 'Cover');
-  return { loanRef: rd.u64(), mint: rd.key(), lender: rd.key(), premium: rd.u64(), boundAt: rd.i64(), paid: rd.bool(), paidOut: rd.u64(), bump: rd.u8() };
+  return {
+    loanRef: rd.u64(), mint: rd.key(), lender: rd.key(), premium: rd.u64(), boundAt: rd.i64(), paid: rd.bool(), paidOut: rd.u64(), bump: rd.u8(),
+    limit: rd.u64(), released: rd.bool(),
+  };
 }
 
 /** Virtual shares and assets of safety_pool's share price (VIRTUAL_SHARES / VIRTUAL_ASSETS in the program). */
-export const SAFETY_VIRTUAL_SHARES = 1_000n;
-export const SAFETY_VIRTUAL_ASSETS = 1n;
+export const SAFETY_VIRTUAL_SHARES = 1_000_000_000n;
+export const SAFETY_VIRTUAL_ASSETS = 1_000_000n;
+/** A slash leaving more shares per base unit than this retires the generation (safety_pool::MAX_SHARES_PER_ASSET). */
+export const SAFETY_MAX_SHARES_PER_ASSET = 1_000_000_000n;
 /** Shares a deposit that the vault receives as `amount` mints (safety_pool::shares_for). */
 export const sharesFor = (amount: bigint, assets: bigint, totalShares: bigint) => (amount * (totalShares + SAFETY_VIRTUAL_SHARES)) / (assets + SAFETY_VIRTUAL_ASSETS);
 /** H081 that `shares` redeem for now (safety_pool::assets_for, capped at the pool's assets). */

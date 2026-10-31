@@ -1,8 +1,8 @@
 // One-time mainnet setup after the programs are deployed, then a free smoke test:
 //  1. stipend_pool initialize + grow_pool (the pool's Merkle tree and deposit guard; DEPLOYER_KEY must be the
 //     program's upgrade authority, the program refuses anyone else; config.authority is read back and checked),
-//  2. create_vault for USDG (Token-2022), 3. stream_loan initialize (loan registry), only when stream_loan is
-//     deployed. Steps 2-3 are permissionless. Everything is skipped if already done.
+//  2. create_vault for USDG (Token-2022, permissionless), 3. stream_loan initialize (loan registry), only when
+//     stream_loan is deployed; DEPLOYER_KEY must also be stream_loan's upgrade authority (the program checks it). Everything is skipped if already done.
 //  4. A real disclose proof is uploaded to a buffer and checked by verify_proof through simulateTransaction
 //     (no state change), a tampered copy must fail, then the buffer is closed (rent refunded).
 // H081 staking (capacity_stake init_config, safety_pool init_pool) waits for the H081 mint to exist.

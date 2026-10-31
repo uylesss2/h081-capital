@@ -3,6 +3,9 @@
 import { PublicKey } from '@solana/web3.js';
 import { getAddress } from 'ethers';
 
+/** capacity_stake's localnet program id (src/solana/token.ts LOCALNET_CAPACITY_STAKE_PROGRAM_ID). */
+const LOCALNET_CAPACITY_ID = '6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3';
+
 export interface RelayerConfig {
   host: string;
   port: number;
@@ -106,6 +109,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       if (!isKey(env.RELAYER_SOLANA_CAPACITY_MINT)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_MINT is not a public key');
       const capProgram = env.RELAYER_SOLANA_CAPACITY_PROGRAM_ID;
       if (capProgram && !isKey(capProgram)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_PROGRAM_ID is not a public key');
+      // Off localnet (any explicit pool program id) the capacity program must be named and must not be the localnet
+      // id: whoever holds that test key could deploy a program there that reports unlimited stakes.
+      if (env.RELAYER_SOLANA_PROGRAM_ID && (!capProgram || new PublicKey(capProgram).toBase58() === LOCALNET_CAPACITY_ID)) {
+        throw new ConfigError('RELAYER_SOLANA_CAPACITY_PROGRAM_ID must name the deployed capacity_stake program (not the localnet id) when RELAYER_SOLANA_PROGRAM_ID is set');
+      }
       const freeTier = env.RELAYER_SOLANA_CAPACITY_FREE_TIER;
       if (freeTier && !/^\d+$/.test(freeTier)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_FREE_TIER must be an amount in base units');
       const assets = (env.RELAYER_SOLANA_CAPACITY_ASSETS ?? '').split(',').map((s) => s.trim()).filter(Boolean);

@@ -76,6 +76,8 @@ const RENT_BUFFER = 5_000_000n;
 const MIN_CHUNK = 10_000_000n;
 /** A chunk may be executed until its suggested time plus this; after that its frozen quote is too old (NO-GO, re-plan). */
 const CHUNK_GRACE_MINUTES = 60;
+/** Least accounted H081 (whole tokens) the safety pool must hold before the flywheel tops it up instead of burning. */
+const MIN_SAFETY_ASSETS_WHOLE = 10_000n;
 
 interface ProposalTx {
   order: number; label: string; executeAfterMinutes: number;
@@ -187,6 +189,10 @@ async function plan() {
 
   // Split: burn only, until the safety pool is live (exists and has stakers).
   let split: { burnBps: number; topUpBps: number } = SPLIT_BURN_ONLY;
+  // The pool's accounted assets when it qualifies for a top-up. safety_pool refuses a top-up above them, and a
+  // top-up into a pool with almost no real stake would mostly go to whoever holds its few shares (a dust stake
+  // set up just before the flywheel runs): below MIN_SAFETY_ASSETS_WHOLE whole tokens the cycle burns instead.
+  let safetyAssets = 0n;
   let safety: Proposal['safety'] = null;
   let safetyNote = 'no --safety-program given: 100% burn';
   if (args['safety-program']) {
@@ -204,8 +210,11 @@ async function plan() {
     else {
       const c = decodeSafetyConfig(acct.data);
       if (!c.mint.equals(mint)) throw new Error('safety pool is for a different mint');
+      const floor = MIN_SAFETY_ASSETS_WHOLE * 10n ** BigInt(mintInfo.decimals);
       if (c.totalShares === 0n) safetyNote = 'safety pool has no stakers yet: 100% burn';
+      else if (c.assets < floor) safetyNote = `safety pool assets ${fmt(c.assets, mintInfo.decimals)} H081 are below the ${MIN_SAFETY_ASSETS_WHOLE} H081 floor: 100% burn`;
       else {
+        safetyAssets = c.assets;
         split = SPLIT_LIVE;
         safety = { program: sp.toBase58(), config: cfgKey.toBase58(), vault: safetyVaultPda(sp, mint).toBase58() };
         safetyNote = `safety pool live (assets ${fmt(c.assets, mintInfo.decimals)} H081): 50% burn / 50% top-up`;
@@ -249,7 +258,8 @@ async function plan() {
   const spend = sizes.reduce((a, b) => a + b, 0n);
   const minBought = chunks.reduce((a, c) => a + BigInt(c.minOut), 0n);
   const toSettle = h081Held + minBought;
-  const topUp = (toSettle * BigInt(split.topUpBps)) / 10_000n;
+  let topUp = (toSettle * BigInt(split.topUpBps)) / 10_000n;
+  if (topUp > safetyAssets) topUp = safetyAssets; // one top-up at most doubles the pool (safety_pool::top_up); the rest is burned
   const burn = toSettle - topUp;
 
   // Instructions. The treasury is the only signer and pays for its own ATAs.

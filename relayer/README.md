@@ -32,7 +32,7 @@ Configuration comes from environment variables set by the operator (nothing read
 | `RELAYER_SOLANA_MIN_LAMPORTS`, `RELAYER_SOLANA_MAX_IN_FLIGHT` | refuse when underfunded / busy |
 | `RELAYER_SOLANA_CAPACITY_MINT` | enables capacity_stake enforcement for this staked mint (H081) |
 | `RELAYER_SOLANA_CAPACITY_ASSETS` | required with the above: comma-separated 6-decimal (USDG) mints whose amounts count against capacity (other decimals are refused at startup) |
-| `RELAYER_SOLANA_CAPACITY_FREE_TIER`, `RELAYER_SOLANA_CAPACITY_PROGRAM_ID` | anonymous free tier in base units (default 100 USDG); capacity_stake program id (default: localnet id) |
+| `RELAYER_SOLANA_CAPACITY_FREE_TIER`, `RELAYER_SOLANA_CAPACITY_PROGRAM_ID` | anonymous free tier in base units (default 100 USDG); capacity_stake program id (default: localnet id; required, and never the localnet id, when `RELAYER_SOLANA_PROGRAM_ID` is set) |
 | `RELAYER_EVM_RPC`, `RELAYER_EVM_POOL`, `RELAYER_EVM_KEY` | enables EVM relaying (key: 0x hex) |
 | `RELAYER_EVM_MIN_FEES` | `asset=amount,...` minimum fee per ERC-20 |
 | `RELAYER_EVM_MAX_GAS` | refuse calls estimated above this (default 8,000,000) |

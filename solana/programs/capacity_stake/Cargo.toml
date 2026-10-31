@@ -1,7 +1,7 @@
 [package]
 name = "capacity_stake"
 version = "0.1.0"
-description = "Stipend Phase 2 (H0.81 Capital): staked H081 buys desk and shielding capacity. Permissionless per mint, no admin"
+description = "Stipend Phase 2 (H0.81 Capital): staked H081 buys desk and shielding capacity. Per-mint configs created by the upgrade authority; staking caps and a stake-only pause"
 edition = "2021"
 license = "MIT"
 
@@ -13,6 +13,8 @@ name = "capacity_stake"
 default = []
 # Localnet-only test build with a separate program id and a 3-second cooldown. Never deployed.
 fast = []
+# Mainnet build: refuses the localnet program id (see build-phase2-mainnet.sh).
+mainnet = []
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []

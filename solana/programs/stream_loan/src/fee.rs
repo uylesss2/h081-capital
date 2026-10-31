@@ -28,7 +28,7 @@ pub const LAUNCH_WALLETS: [Pubkey; 3] = [
     pubkey!("5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw"),
 ];
 
-const fn same(a: &Pubkey, b: &Pubkey) -> bool {
+pub(crate) const fn same(a: &Pubkey, b: &Pubkey) -> bool {
     let (a, b) = (a.as_array(), b.as_array());
     let mut i = 0;
     while i < 32 {

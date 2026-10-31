@@ -1,38 +1,48 @@
 //! safety_pool: H081 stakers insure lenders against a stream-backed loan that is not repaid
 //! (Phase 2, docs/SOLANA-PORT.md section 3.3). Port of contracts/token/SafetyPool.sol.
 //!
-//! - One pool per mint (`SafetyConfig`, PDA ["safety", mint]), created permissionlessly; no admin field.
-//! - Stakers `deposit` for shares at the price (assets + 1) / (total shares + 1,000). The virtual shares and
+//! - One pool per mint (`SafetyConfig`, PDA ["safety", mint]). Only the program's upgrade authority may
+//!   create one (`init_pool`, ProgramData check as in stipend_pool); it names the pool's config authority.
+//! - The config authority caps and pauses DEPOSITS only (`set_deposit_caps`, `set_deposits_paused`):
+//!   unbonding, withdrawals and slashes are never paused. It is also the pool's underwriter: `insure`
+//!   needs its signature, and it sets which loan asset is insurable, the per-cover and total cover limits
+//!   and the premium floor (`set_underwriting`). Until it does, nothing can be insured.
+//! - Stakers `deposit` for shares at the price (assets + 10^6) / (total shares + 10^9). The virtual shares and
 //!   assets (an offset in the style of OpenZeppelin ERC4626) make share-price inflation by a first depositor
 //!   unprofitable, and the pool's assets are an accounted figure (`SafetyConfig.assets`, moved only by
 //!   deposits, premiums, top-ups, withdrawals and slashes), so tokens sent straight to the vault never move
 //!   the price; they stay in the vault unaccounted. Premiums and top-ups raise the price, slashes lower it.
 //!   `request_unbond` starts a 14-day cooldown during which the shares stay at risk; `withdraw` redeems them at the price on that day.
-//! - `insure(loan_ref, premium)`: only the stream_loan slot's lender, only for a loan that is funded, not
-//!   settled, has an expiry and has not expired. One cover per loan ref across every mint's pool (PDA
-//!   ["cover", loan_ref]) so a loan cannot be insured twice.
+//! - `insure(loan_ref, premium, cover)`: the stream_loan slot's lender AND the pool's underwriter sign; only
+//!   for a loan in the pool's insurable asset that is funded, not settled, has an expiry, and whose
+//!   expiry + grace is at least one unbonding cooldown away (stakers can leave before it can be slashed).
+//!   `cover` (the most a slash can pay) is at most the principal and the per-cover limit; open cover in
+//!   the pool stays under the total limit; the premium is at least min_premium_bps of the cover. One cover
+//!   per loan ref across every mint's pool (PDA ["cover", loan_ref]) so a loan cannot be insured twice.
+//!   `release_cover` (anyone) frees the cover's exposure once the loan is settled or repaid.
 //! - `slash(loan_ref)`: anyone, once stream_loan's state shows a shortfall (expiry + 7-day grace passed,
 //!   repaid below principal, not settled; shares routed to the loan but still unsynced in the slot inbox or
 //!   held in the stipend_pool escrow count as repaid). Pays the cover's lender min(shortfall, pool assets) of the
-//!   pool's token, valued 1:1 in base units (see caveats), and marks the cover paid. A slash with an
-//!   empty pool fails (`PoolEmpty`) so the cover stays open. A slash that takes the whole pool bumps the
-//!   generation, retiring every share (including unbonding ones); the next deposit starts a fresh share count.
+//!   pool's token, valued 1:1 in base units (see caveats), never more than the cover, and marks the cover
+//!   paid. A slash with an empty pool fails (`PoolEmpty`) so the cover stays open. A slash that takes the
+//!   whole pool, or leaves the share price below 1/MAX_SHARES_PER_ASSET, bumps the generation, retiring every
+//!   share (including unbonding ones); the next deposit starts a fresh share count.
 //! - `top_up(amount)`: anyone adds tokens to the pool's assets without minting shares, raising what every
 //!   outstanding share (unbonding ones too) redeems for. The H081 flywheel pays stakers this way from
 //!   PLATFORM fees only (docs/FLYWHEEL.md). Refused while no shares exist (nobody to pay; the tokens would
-//!   go to the next depositor), and refused from the token launch wallets (`LAUNCH_WALLETS`): the token's
-//!   trading creator fees are never a source. Like a premium, a top-up into a pool whose only shares are a
-//!   first depositor's dust mostly accrues to the virtual shares, so it cannot inflate the price at a
-//!   later depositor's expense.
+//!   go to the next depositor), refused above the pool's current assets (one top-up at most doubles it),
+//!   and refused from the token launch wallets (`LAUNCH_WALLETS`): the token's trading creator fees are
+//!   never a source. The virtual 10^6 base units of assets mean a dust stake earns only its proportional
+//!   share of a top-up (a 1-unit stake gets about a millionth of it, not half).
 //!
-//! CAVEATS (docs/tokenomics.md, restated): with lender-chosen premiums and 1:1 valuation a lender can fund
-//! a loan to itself, let it lapse past the grace period and slash the pool for the principal; until
-//! premiums are priced or cover is underwritten, only stakers who trust the set of insurable lenders
-//! should deposit. The 1:1 valuation ignores the H081 price entirely. A loan with no expiry never reports
-//! a shortfall and cannot be insured.
-//! No admin key, no pause, no upgrade logic.
+//! CAVEATS (docs/tokenomics.md, restated): the valuation is 1:1 in base units and ignores the H081 price;
+//! the underwriter must size cover and premium accordingly. A lender can still fund a loan to a borrower it
+//! controls; only the underwriter's signature stands between such a loan and the pool, so stakers trust the
+//! config authority. A loan with no expiry never reports a shortfall and cannot be insured.
+//! No upgrade logic.
 #![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 pub mod stream_loan_view;
@@ -42,6 +52,14 @@ use stream_loan_view::{load_slot, pending_in_escrow, pending_in_inbox, shortfall
 declare_id!("EvKjwxVQX1RhyoBXisdbzk1JGLb5fMgZzHVLQAiPKJwe");
 #[cfg(feature = "fast")]
 declare_id!("5K2L3eNBzmeznEZpY4vav74UHRaBHgQJv582W5i4kT7");
+
+/// Localnet program id (solana/keys/safety_pool-keypair.json). A mainnet build patches declare_id to the
+/// mainnet key (solana/scripts/build-phase2-mainnet.sh) and refuses to compile if it is still this one.
+pub const LOCALNET_ID: Pubkey = pubkey!("EvKjwxVQX1RhyoBXisdbzk1JGLb5fMgZzHVLQAiPKJwe");
+#[cfg(all(feature = "mainnet", feature = "fast"))]
+compile_error!("the mainnet build cannot use the fast (test) feature");
+#[cfg(feature = "mainnet")]
+const _: () = assert!(!stream_loan_view::same(&ID, &LOCALNET_ID), "mainnet build: declare_id is still the localnet safety_pool key");
 
 /// Time between an unbond request and the tokens leaving.
 #[cfg(not(feature = "fast"))]
@@ -68,9 +86,40 @@ pub const LAUNCH_WALLETS: [Pubkey; 3] = [
     pubkey!("5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw"),
 ];
 
-/// Virtual shares and assets added to the pool's totals when pricing shares (see the module docs).
-pub const VIRTUAL_SHARES: u128 = 1_000;
-pub const VIRTUAL_ASSETS: u128 = 1;
+/// Virtual shares and assets added to the pool's totals when pricing shares (see the module docs). The
+/// first deposit gets 1,000 shares per base unit; the 10^6 virtual base units keep a dust stake from
+/// capturing a top-up or premium paid into an almost empty pool.
+pub const VIRTUAL_SHARES: u128 = 1_000_000_000;
+pub const VIRTUAL_ASSETS: u128 = 1_000_000;
+/// A slash that leaves more than this many shares per base unit (the price fell 10^6-fold from the first
+/// deposit's 1,000) retires the generation, so a dust remainder cannot blow up later share counts.
+pub const MAX_SHARES_PER_ASSET: u128 = 1_000_000_000;
+/// Basis-point denominator of min_premium_bps.
+pub const BPS: u128 = 10_000;
+
+/// Upgrade authority recorded in a BPF upgradeable loader ProgramData account (same parser as
+/// stipend_pool::upgrade_authority): u32 LE tag 3 | slot u64 | Option<Pubkey>. None when immutable.
+pub fn upgrade_authority(info: &AccountInfo) -> Result<Option<Pubkey>> {
+    require_keys_eq!(*info.owner, bpf_loader_upgradeable::ID, SafetyError::UpgradeAuthority);
+    let data = info.try_borrow_data()?;
+    require!(data.len() >= 45 && data[..4] == [3, 0, 0, 0], SafetyError::UpgradeAuthority);
+    Ok(match data[12] {
+        0 => None,
+        1 => Some(Pubkey::new_from_array(data[13..45].try_into().unwrap())),
+        _ => return err!(SafetyError::UpgradeAuthority),
+    })
+}
+
+/// True when a pool with `assets` against `total` shares has collapsed past MAX_SHARES_PER_ASSET.
+pub fn collapsed(assets: u64, total: u128) -> bool {
+    total > (assets as u128 + VIRTUAL_ASSETS).saturating_mul(MAX_SHARES_PER_ASSET)
+}
+
+/// Least premium for `cover`: cover * min_premium_bps / 10,000, rounded up.
+pub fn min_premium(cover: u64, min_premium_bps: u16) -> u64 {
+    let x = (cover as u128) * (min_premium_bps as u128);
+    x.div_ceil(BPS) as u64
+}
 
 /// Shares minted for `assets_in` when the pool holds `assets` against `total` shares (rounds down).
 pub fn shares_for(assets_in: u64, assets: u64, total: u128) -> Result<u128> {
@@ -85,17 +134,59 @@ pub fn assets_for(shares: u128, assets: u64, total: u128) -> Result<u64> {
     Ok(out.min(assets as u128) as u64)
 }
 
-fn mul_div(a: u128, b: u128, c: u128) -> Result<u128> {
-    a.checked_mul(b).and_then(|x| x.checked_div(c)).ok_or(error!(SafetyError::Overflow))
+/// a * b / c rounded down, through a 256-bit product: fails only when c == 0 or the quotient exceeds u128.
+pub fn mul_div(a: u128, b: u128, c: u128) -> Result<u128> {
+    require!(c != 0, SafetyError::Overflow);
+    if let Some(p) = a.checked_mul(b) {
+        return Ok(p / c);
+    }
+    let (hi, lo) = mul_wide(a, b);
+    require!(hi < c, SafetyError::Overflow);
+    // long division of hi:lo by c; rem < c holds before every step
+    let mut rem = hi;
+    let mut q: u128 = 0;
+    for i in (0..128).rev() {
+        let carry = rem >> 127;
+        rem = (rem << 1) | ((lo >> i) & 1);
+        q <<= 1;
+        if carry == 1 || rem >= c {
+            rem = rem.wrapping_sub(c);
+            q |= 1;
+        }
+    }
+    Ok(q)
+}
+
+/// Full 256-bit product of two u128 values as (high, low).
+pub fn mul_wide(a: u128, b: u128) -> (u128, u128) {
+    const M: u128 = u64::MAX as u128;
+    let (a1, a0) = (a >> 64, a & M);
+    let (b1, b0) = (b >> 64, b & M);
+    let (p00, p01, p10, p11) = (a0 * b0, a0 * b1, a1 * b0, a1 * b1);
+    let mid = (p00 >> 64) + (p01 & M) + (p10 & M);
+    let lo = (p00 & M) | (mid << 64);
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    (hi, lo)
 }
 
 #[program]
 pub mod safety_pool {
     use super::*;
 
-    /// Creates the per-mint pool and its vault. Permissionless; `init` makes a second call fail.
-    pub fn init_pool(ctx: Context<InitPool>) -> Result<()> {
+    /// Creates the per-mint pool and its vault, naming its config authority and deposit caps. Only the
+    /// program's upgrade authority (read from its ProgramData account); `init` makes a second call fail.
+    /// Nothing is insurable until the config authority calls `set_underwriting`.
+    pub fn init_pool(ctx: Context<InitPool>, config_authority: Pubkey, max_total: u64, max_per_deposit: u64) -> Result<()> {
         let c = &mut ctx.accounts.config;
+        c.authority = config_authority;
+        c.deposits_paused = false;
+        c.max_total = max_total;
+        c.max_per_deposit = max_per_deposit;
+        c.loan_asset = Pubkey::default();
+        c.max_cover = 0;
+        c.max_exposure = 0;
+        c.min_premium_bps = 0;
+        c.exposure = 0;
         c.mint = ctx.accounts.mint.key();
         c.token_program = ctx.accounts.token_program.key();
         c.vault = ctx.accounts.vault.key();
@@ -109,9 +200,52 @@ pub mod safety_pool {
         Ok(())
     }
 
+    /// Config authority: deposit caps (on the pool's accounted assets after a deposit, and per deposit).
+    /// A cap below the current assets only blocks new deposits.
+    pub fn set_deposit_caps(ctx: Context<SetPoolConfig>, max_total: u64, max_per_deposit: u64) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.max_total = max_total;
+        c.max_per_deposit = max_per_deposit;
+        emit!(PoolConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
+    /// Config authority: pauses or resumes DEPOSITS and new covers. Unbonding, withdrawals, slashes,
+    /// top-ups and releases are never paused.
+    pub fn set_deposits_paused(ctx: Context<SetPoolConfig>, paused: bool) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.deposits_paused = paused;
+        emit!(PoolConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
+    /// Config authority: which stream_loan asset the pool insures (the default pubkey: none), the most one
+    /// cover may pay, the most open cover in total, and the premium floor in bps of the cover.
+    pub fn set_underwriting(ctx: Context<SetPoolConfig>, loan_asset: Pubkey, max_cover: u64, max_exposure: u64, min_premium_bps: u16) -> Result<()> {
+        require!((min_premium_bps as u128) <= BPS, SafetyError::PremiumTooLow);
+        let c = &mut ctx.accounts.config;
+        c.loan_asset = loan_asset;
+        c.max_cover = max_cover;
+        c.max_exposure = max_exposure;
+        c.min_premium_bps = min_premium_bps;
+        emit!(PoolConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
+    /// Config authority: hands the authority to `new_authority` (the default pubkey renounces it, which
+    /// also ends underwriting: no new cover can be signed).
+    pub fn set_config_authority(ctx: Context<SetPoolConfig>, new_authority: Pubkey) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.authority = new_authority;
+        emit!(PoolConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
     /// Puts `amount` at risk; shares are minted at the current price on what the vault received.
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, SafetyError::Amount);
+        require!(!ctx.accounts.config.deposits_paused, SafetyError::DepositsPaused);
+        require!(amount <= ctx.accounts.config.max_per_deposit, SafetyError::DepositCap);
         let before = ctx.accounts.vault.amount;
         token_interface::transfer_checked(
             CpiContext::new(
@@ -129,6 +263,8 @@ pub mod safety_pool {
         ctx.accounts.vault.reload()?;
         let received = ctx.accounts.vault.amount.checked_sub(before).ok_or(error!(SafetyError::Amount))?;
         require!(received > 0, SafetyError::Amount);
+        let after = ctx.accounts.config.assets.checked_add(received).ok_or(error!(SafetyError::Overflow))?;
+        require!(after <= ctx.accounts.config.max_total, SafetyError::DepositCap);
         let total = ctx.accounts.config.total_shares;
         let shares = shares_for(received, ctx.accounts.config.assets, total)?;
         require!(shares > 0, SafetyError::TooSmall);
@@ -205,8 +341,9 @@ pub mod safety_pool {
         Ok(())
     }
 
-    /// The slot's lender binds its funded, unexpired loan to this pool and pays `premium` in.
-    pub fn insure(ctx: Context<Insure>, loan_ref: u64, premium: u64) -> Result<()> {
+    /// The slot's lender binds its funded loan to this pool for at most `cover` and pays `premium` in; the
+    /// pool's underwriter (config authority) co-signs. See the module docs for every limit.
+    pub fn insure(ctx: Context<Insure>, loan_ref: u64, premium: u64, cover: u64) -> Result<()> {
         let s = load_slot(&ctx.accounts.slot, loan_ref)?;
         let lender = ctx.accounts.lender.key();
         require_keys_eq!(s.lender, lender, SafetyError::NotTheLender);
@@ -215,6 +352,17 @@ pub mod safety_pool {
         require!(s.expiry != 0, SafetyError::NoDueDate);
         let now = Clock::get()?.unix_timestamp;
         require!(now >= 0 && (now as u64) <= s.expiry, SafetyError::Expired);
+        let cfg = &ctx.accounts.config;
+        require!(!cfg.deposits_paused, SafetyError::DepositsPaused);
+        require!(cfg.loan_asset != Pubkey::default() && s.asset == cfg.loan_asset, SafetyError::NotInsurable);
+        // stakers who object to a new cover can unbond and leave before it can be slashed
+        let earliest_slash = s.expiry.saturating_add(GRACE);
+        require!(earliest_slash >= (now as u64).saturating_add(COOLDOWN as u64), SafetyError::TooShort);
+        require!(cover > 0 && cover <= cfg.max_cover && cover <= s.principal, SafetyError::CoverTooLarge);
+        let exposure = cfg.exposure.checked_add(cover).ok_or(error!(SafetyError::Overflow))?;
+        require!(exposure <= cfg.max_exposure, SafetyError::ExposureCap);
+        require!(premium >= min_premium(cover, cfg.min_premium_bps), SafetyError::PremiumTooLow);
+        ctx.accounts.config.exposure = exposure;
 
         let mut received = 0u64;
         if premium > 0 {
@@ -234,6 +382,8 @@ pub mod safety_pool {
             )?;
             ctx.accounts.vault.reload()?;
             received = ctx.accounts.vault.amount.checked_sub(before).ok_or(error!(SafetyError::Amount))?;
+            // the floor holds on what the vault received (a Token-2022 transfer fee cannot shave it)
+            require!(received >= min_premium(cover, ctx.accounts.config.min_premium_bps), SafetyError::PremiumTooLow);
             let cfg = &mut ctx.accounts.config;
             cfg.assets = cfg.assets.checked_add(received).ok_or(error!(SafetyError::Overflow))?;
         }
@@ -246,18 +396,22 @@ pub mod safety_pool {
         c.paid = false;
         c.paid_out = 0;
         c.bump = ctx.bumps.cover;
-        emit!(Insured { loan_ref, mint: c.mint, lender, premium: received });
+        c.limit = cover;
+        c.released = false;
+        emit!(Insured { loan_ref, mint: c.mint, lender, premium: received, cover });
         Ok(())
     }
 
     /// Anyone: pays the lender of an insured loan stream_loan's shortfall, capped by the pool.
     pub fn slash(ctx: Context<Slash>, loan_ref: u64) -> Result<()> {
         require!(!ctx.accounts.cover.paid, SafetyError::AlreadyPaid);
+        require!(!ctx.accounts.cover.released, SafetyError::Released);
         let shortfall = current_shortfall(&ctx.accounts.slot, &ctx.accounts.inbox, &ctx.accounts.ledger, &ctx.accounts.escrow, loan_ref)?;
         require!(shortfall > 0, SafetyError::NoShortfall);
         let balance = ctx.accounts.config.assets;
         require!(balance > 0, SafetyError::PoolEmpty);
-        let pay = shortfall.min(balance);
+        let limit = ctx.accounts.cover.limit;
+        let pay = shortfall.min(balance).min(limit);
         {
             let c = &mut ctx.accounts.cover;
             c.paid = true;
@@ -284,7 +438,8 @@ pub mod safety_pool {
         emit!(Slashed { loan_ref, mint: mint_key, lender, shortfall, paid: pay });
         let c = &mut ctx.accounts.config;
         c.assets = balance - pay;
-        if pay == balance && c.total_shares > 0 {
+        c.exposure = c.exposure.saturating_sub(limit);
+        if c.total_shares > 0 && (c.assets == 0 || collapsed(c.assets, c.total_shares)) {
             c.total_shares = 0;
             c.generation += 1;
             emit!(PoolRetired { mint: mint_key, generation: c.generation });
@@ -302,6 +457,7 @@ pub mod safety_pool {
             SafetyError::LaunchWallet
         );
         require!(ctx.accounts.config.total_shares > 0, SafetyError::NoShares);
+        require!(amount <= ctx.accounts.config.assets, SafetyError::TopUpTooLarge);
         let before = ctx.accounts.vault.amount;
         token_interface::transfer_checked(
             CpiContext::new(
@@ -322,6 +478,27 @@ pub mod safety_pool {
         let c = &mut ctx.accounts.config;
         c.assets = c.assets.checked_add(received).ok_or(error!(SafetyError::Overflow))?;
         emit!(ToppedUp { mint: c.mint, funder, amount: received, assets: c.assets, generation: c.generation });
+        Ok(())
+    }
+
+    /// Anyone: frees an unpaid cover's exposure once its loan is settled or repaid in full (repaid plus
+    /// routed-but-unsynced value covers the principal). The cover can no longer be slashed.
+    pub fn release_cover(ctx: Context<ReleaseCover>, loan_ref: u64) -> Result<()> {
+        let cover = &ctx.accounts.cover;
+        require!(!cover.paid && !cover.released, SafetyError::Released);
+        let s = load_slot(&ctx.accounts.slot, loan_ref)?;
+        let slot_key = ctx.accounts.slot.key();
+        let done = s.settled || {
+            let pending = pending_in_inbox(&slot_key, &s, &ctx.accounts.inbox, &ctx.accounts.ledger)?
+                .saturating_add(pending_in_escrow(&slot_key, &s, &ctx.accounts.escrow)?);
+            s.repaid.saturating_add(pending) >= s.principal
+        };
+        require!(done, SafetyError::NotReleasable);
+        let limit = cover.limit;
+        ctx.accounts.cover.released = true;
+        let c = &mut ctx.accounts.config;
+        c.exposure = c.exposure.saturating_sub(limit);
+        emit!(CoverReleased { loan_ref, mint: c.mint, limit });
         Ok(())
     }
 
@@ -364,6 +541,24 @@ pub struct SafetyConfig {
     /// The pool's accounted assets: deposits + premiums + top-ups - withdrawals - slashes. Shares are priced on
     /// this, not on the vault balance, so direct transfers to the vault do not move the price.
     pub assets: u64,
+    /// Config authority: deposit caps and pause, and the pool's underwriter (co-signs every insure).
+    pub authority: Pubkey,
+    /// Pauses deposits and new covers only.
+    pub deposits_paused: bool,
+    /// Most accounted assets a deposit may bring the pool to.
+    pub max_total: u64,
+    /// Most one deposit may bring in.
+    pub max_per_deposit: u64,
+    /// The only stream_loan asset this pool insures (default pubkey: none).
+    pub loan_asset: Pubkey,
+    /// Most one cover may pay (pool base units).
+    pub max_cover: u64,
+    /// Most open cover in total (sum of unpaid, unreleased covers' limits).
+    pub max_exposure: u64,
+    /// Premium floor, in bps of the cover.
+    pub min_premium_bps: u16,
+    /// Open cover now.
+    pub exposure: u64,
 }
 
 /// One staker's position in one mint's pool. PDA ["position", mint, owner].
@@ -410,6 +605,17 @@ pub struct Cover {
     pub paid: bool,
     pub paid_out: u64,
     pub bump: u8,
+    /// Most a slash of this cover pays.
+    pub limit: u64,
+    /// Freed by release_cover (loan settled or repaid); cannot be slashed.
+    pub released: bool,
+}
+
+#[derive(Accounts)]
+pub struct SetPoolConfig<'info> {
+    #[account(mut, seeds = [SAFETY_SEED, config.mint.as_ref()], bump = config.bump, has_one = authority @ SafetyError::ConfigAuthority)]
+    pub config: Account<'info, SafetyConfig>,
+    pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -428,10 +634,20 @@ pub struct InitPool<'info> {
         token::token_program = token_program
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
+    /// Must be the program's upgrade authority.
     #[account(mut)]
     pub payer: Signer<'info>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+    /// CHECK: this program's ProgramData account (PDA [program id] of the BPF upgradeable loader); its
+    /// upgrade authority must be the payer (parsed by upgrade_authority).
+    #[account(
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = bpf_loader_upgradeable::ID,
+        constraint = upgrade_authority(&program_data)? == Some(payer.key()) @ SafetyError::UpgradeAuthority
+    )]
+    pub program_data: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -499,6 +715,26 @@ pub struct Insure<'info> {
     pub lender: Signer<'info>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+    /// The pool's config authority, underwriting this cover.
+    #[account(address = config.authority @ SafetyError::ConfigAuthority)]
+    pub underwriter: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(loan_ref: u64)]
+pub struct ReleaseCover<'info> {
+    #[account(mut, seeds = [SAFETY_SEED, config.mint.as_ref()], bump = config.bump)]
+    pub config: Account<'info, SafetyConfig>,
+    #[account(mut, seeds = [COVER_SEED, &loan_ref.to_le_bytes()], bump = cover.bump, constraint = cover.mint == config.mint @ SafetyError::WrongPool)]
+    pub cover: Account<'info, Cover>,
+    /// CHECK: stream_loan Slot PDA; checked in load_slot
+    pub slot: UncheckedAccount<'info>,
+    /// CHECK: see Slash
+    pub inbox: UncheckedAccount<'info>,
+    /// CHECK: see Slash
+    pub ledger: UncheckedAccount<'info>,
+    /// CHECK: see Slash
+    pub escrow: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -600,6 +836,19 @@ pub struct Insured {
     pub mint: Pubkey,
     pub lender: Pubkey,
     pub premium: u64,
+    pub cover: u64,
+}
+
+#[event]
+pub struct CoverReleased {
+    pub loan_ref: u64,
+    pub mint: Pubkey,
+    pub limit: u64,
+}
+
+#[event]
+pub struct PoolConfigChanged {
+    pub mint: Pubkey,
 }
 
 #[event]
@@ -670,4 +919,98 @@ pub enum SafetyError {
     NoShares,
     #[msg("launch wallets cannot top up")]
     LaunchWallet,
+    #[msg("signer is not the program's upgrade authority")]
+    UpgradeAuthority,
+    #[msg("signer is not the pool's config authority")]
+    ConfigAuthority,
+    #[msg("deposits are paused")]
+    DepositsPaused,
+    #[msg("deposit above the pool's caps")]
+    DepositCap,
+    #[msg("the loan's asset is not insurable by this pool")]
+    NotInsurable,
+    #[msg("cover is zero, above the principal or above the per-cover limit")]
+    CoverTooLarge,
+    #[msg("premium below the pool's floor")]
+    PremiumTooLow,
+    #[msg("open cover would exceed the pool's limit")]
+    ExposureCap,
+    #[msg("the loan can be slashed before stakers could unbond")]
+    TooShort,
+    #[msg("cover already paid or released")]
+    Released,
+    #[msg("loan neither settled nor repaid")]
+    NotReleasable,
+    #[msg("top-up larger than the pool's assets")]
+    TopUpTooLarge,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wide_eq(a: u128, b: u128, q: u128, c: u128) {
+        // a * b == q * c + r with r < c
+        let (h1, l1) = mul_wide(a, b);
+        let (h2, l2) = mul_wide(q, c);
+        let r = l1.wrapping_sub(l2);
+        let borrow = (l1 < l2) as u128;
+        assert_eq!(h1 - h2 - borrow, 0, "remainder exceeds 128 bits");
+        assert!(r < c, "remainder not below divisor");
+    }
+
+    #[test]
+    fn mul_div_matches_u128_and_handles_wide_products() {
+        for (a, b, c) in [(0u128, 5u128, 3u128), (7, 9, 2), (u64::MAX as u128, u64::MAX as u128, 1), (1_000, 999, 7)] {
+            assert_eq!(mul_div(a, b, c).unwrap(), a * b / c);
+        }
+        // the reviewer's case: 5e27 shares * 1e12 assets / 1e28 total
+        let (a, b, c) = (5_000_000_000_000_000_000_000_000_000u128, 1_000_000_000_001u128, 10_000_000_000_000_000_000_000_000_000u128);
+        let q = mul_div(a, b, c).unwrap();
+        assert_eq!(q, 500_000_000_000);
+        wide_eq(a, b, q, c);
+        let big = [u128::MAX, u128::MAX - 1, 1u128 << 127, (1u128 << 100) + 12345, 3u128.pow(80)];
+        for &x in &big {
+            for &y in &big {
+                for &d in &big {
+                    match mul_div(x, y, d) {
+                        Ok(q) => wide_eq(x, y, q, d),
+                        Err(_) => assert!(mul_wide(x, y).0 >= d),
+                    }
+                }
+            }
+        }
+        assert_eq!(mul_div(u128::MAX, u128::MAX, u128::MAX).unwrap(), u128::MAX);
+        assert!(mul_div(1, 1, 0).is_err());
+    }
+
+    #[test]
+    fn dust_stake_gets_a_proportional_share_of_a_top_up() {
+        let s = shares_for(1, 0, 0).unwrap();
+        assert_eq!(s, 1_000);
+        // a 1,000,000-unit top-up: the dust stake redeems for ~1 unit, not half
+        let v = assets_for(s, 1 + 1_000_000, s).unwrap();
+        assert!(v <= 2, "dust stake got {v}");
+    }
+
+    #[test]
+    fn dust_slash_is_retired_and_no_withdraw_overflows() {
+        // 10M tokens staked (6 decimals), then a slash that leaves 1 base unit
+        let total = shares_for(10_000_000_000_000, 0, 0).unwrap();
+        assert!(collapsed(1, total));
+        assert!(!collapsed(10_000_000_000_000, total));
+        // even without retiring, a later 1M-token depositor can always withdraw
+        let d = shares_for(1_000_000_000_000, 1, total).unwrap();
+        let out = assets_for(d, 1_000_000_000_001, total + d).unwrap();
+        assert!(out <= 1_000_000_000_001);
+    }
+
+    #[test]
+    fn premium_floor_rounds_up() {
+        assert_eq!(min_premium(0, 100), 0);
+        assert_eq!(min_premium(1, 100), 1);
+        assert_eq!(min_premium(10_000, 100), 100);
+        assert_eq!(min_premium(10_001, 100), 101);
+        assert_eq!(min_premium(u64::MAX, 10_000), u64::MAX);
+    }
 }

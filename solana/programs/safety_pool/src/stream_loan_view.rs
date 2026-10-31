@@ -12,13 +12,37 @@ use solana_sha256_hasher::hash;
 
 use crate::{SafetyError, GRACE};
 
-/// stream_loan program id (localnet key in solana/keys/stream_loan-keypair.json).
+/// stream_loan program id (localnet key in solana/keys/stream_loan-keypair.json). A mainnet build patches
+/// this line to the mainnet stream_loan key (solana/scripts/build-phase2-mainnet.sh) and refuses to compile
+/// if it is still the localnet key: whoever holds a localnet key could deploy a forged stream_loan there.
 pub const STREAM_LOAN_ID: Pubkey = pubkey!("FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc");
+pub const LOCALNET_STREAM_LOAN_ID: Pubkey = pubkey!("FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc");
+#[cfg(feature = "mainnet")]
+const _: () = assert!(!same(&STREAM_LOAN_ID, &LOCALNET_STREAM_LOAN_ID), "mainnet build: STREAM_LOAN_ID is still the localnet key");
 pub const ATA_PROGRAM_ID: Pubkey = pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 pub const SLOT_SEED: &[u8] = b"slot";
 pub const LEDGER_SEED: &[u8] = b"ledger";
-/// stipend_pool program id (localnet key in solana/keys/stipend_pool-keypair.json) and its escrow seed.
-pub const POOL_PROGRAM_ID: Pubkey = pubkey!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
+/// stipend_pool program id and its escrow seed: the mainnet deployment with `--features mainnet`, the
+/// localnet key (solana/keys/stipend_pool-keypair.json) otherwise.
+pub const LOCALNET_POOL_PROGRAM_ID: Pubkey = pubkey!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
+pub const MAINNET_POOL_PROGRAM_ID: Pubkey = pubkey!("E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM");
+#[cfg(not(feature = "mainnet"))]
+pub const POOL_PROGRAM_ID: Pubkey = LOCALNET_POOL_PROGRAM_ID;
+#[cfg(feature = "mainnet")]
+pub const POOL_PROGRAM_ID: Pubkey = MAINNET_POOL_PROGRAM_ID;
+
+/// Compile-time pubkey equality (for the mainnet build guards).
+pub const fn same(a: &Pubkey, b: &Pubkey) -> bool {
+    let (a, b) = (a.as_array(), b.as_array());
+    let mut i = 0;
+    while i < 32 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 pub const ESCROW_SEED: &[u8] = b"owed";
 
 /// Field-for-field mirror of stream_loan::state::Slot (borsh, after the 8-byte discriminator).

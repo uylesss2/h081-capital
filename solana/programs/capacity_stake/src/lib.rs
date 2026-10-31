@@ -1,17 +1,22 @@
 //! capacity_stake: staked H081 buys capacity (Phase 2, docs/SOLANA-PORT.md section 3.3).
 //! Port of contracts/token/CapacityStake.sol for an SPL Token or Token-2022 mint.
 //!
-//! - One `Config` per mint, created permissionlessly by anyone (`init_config`); it has no admin field.
+//! - One `Config` per mint. Only the program's upgrade authority may create it (`init_config`, ProgramData
+//!   check as in stipend_pool); it names the config authority, which caps and pauses STAKING only
+//!   (`set_stake_caps`, `set_staking_paused`). Unstake requests and unstaking are never paused.
 //! - `stake` locks tokens; they count as capacity at once. `request_unstake` moves an amount out of
-//!   capacity into a 7-day cooldown (a new request adds to it and restarts the cooldown); `unstake`
-//!   takes back everything whose cooldown has passed.
+//!   capacity into a 30-day cooldown (a new request adds to it and restarts the cooldown); `unstake`
+//!   takes back everything whose cooldown has passed. The cooldown equals the relayers' rolling 30-day
+//!   capacity window, so tokens that bought a window's volume cannot be restaked under another key and buy
+//!   a second window's volume before the first window has rolled off.
 //! - Capacity is read off the `Stake` account (or the `capacity` view): desks = staked / DESK_UNIT,
 //!   shield cap = (staked / SHIELD_UNIT) * SHIELD_PER_UNIT. Units follow the mint's decimals:
 //!   DESK_UNIT = SHIELD_UNIT = 100 whole tokens; SHIELD_PER_UNIT = 10,000 USDG (6 decimals).
 //! - Relayers and hosted endpoints enforce capacity off-chain; stipend_pool never reads this program.
-//! No admin key, no pause, no upgrade logic.
+//! No upgrade logic.
 #![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 #[cfg(not(feature = "fast"))]
@@ -19,15 +24,41 @@ declare_id!("6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3");
 #[cfg(feature = "fast")]
 declare_id!("DoiRuuwMkN8M4CWQy45Lne2wGP7JCPUtPDiC1pE9QM1q");
 
+/// Localnet program id (solana/keys/capacity_stake-keypair.json). A mainnet build patches declare_id to the
+/// mainnet key (solana/scripts/build-phase2-mainnet.sh) and refuses to compile if it is still this one.
+pub const LOCALNET_ID: Pubkey = pubkey!("6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3");
+#[cfg(all(feature = "mainnet", feature = "fast"))]
+compile_error!("the mainnet build cannot use the fast (test) feature");
+#[cfg(feature = "mainnet")]
+const _: () = assert!(!same(&ID, &LOCALNET_ID), "mainnet build: declare_id is still the localnet capacity_stake key");
+
+/// Compile-time pubkey equality.
+pub const fn same(a: &Pubkey, b: &Pubkey) -> bool {
+    let (a, b) = (a.as_array(), b.as_array());
+    let mut i = 0;
+    while i < 32 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The relayers' rolling capacity window (relayer/solana.ts CAPACITY_WINDOW_SECS).
+pub const CAPACITY_WINDOW: i64 = 30 * 24 * 60 * 60;
+
 /// Whole tokens per desk (scaled by the mint's decimals at `init_config`).
 pub const DESK_WHOLE_TOKENS: u64 = 100;
 /// Whole tokens per shielding unit (scaled by the mint's decimals at `init_config`).
 pub const SHIELD_WHOLE_TOKENS: u64 = 100;
 /// USDG base units (6 decimals) per 30 days that one shielding unit allows: 10,000 USDG.
 pub const SHIELD_PER_UNIT: u64 = 10_000_000_000;
-/// Time between an unstake request and the tokens leaving.
+/// Time between an unstake request and the tokens leaving: one full capacity window.
 #[cfg(not(feature = "fast"))]
-pub const COOLDOWN: i64 = 7 * 24 * 60 * 60;
+pub const COOLDOWN: i64 = CAPACITY_WINDOW;
+#[cfg(not(feature = "fast"))]
+const _: () = assert!(COOLDOWN >= CAPACITY_WINDOW);
 /// LOCALNET TEST BUILD ONLY (feature `fast`, separate program id).
 #[cfg(feature = "fast")]
 pub const COOLDOWN: i64 = 3;
@@ -36,12 +67,26 @@ pub const CONFIG_SEED: &[u8] = b"config";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const STAKE_SEED: &[u8] = b"stake";
 
+/// Upgrade authority recorded in a BPF upgradeable loader ProgramData account (same parser as
+/// stipend_pool::upgrade_authority): u32 LE tag 3 | slot u64 | Option<Pubkey>. None when immutable.
+pub fn upgrade_authority(info: &AccountInfo) -> Result<Option<Pubkey>> {
+    require_keys_eq!(*info.owner, bpf_loader_upgradeable::ID, StakeError::UpgradeAuthority);
+    let data = info.try_borrow_data()?;
+    require!(data.len() >= 45 && data[..4] == [3, 0, 0, 0], StakeError::UpgradeAuthority);
+    Ok(match data[12] {
+        0 => None,
+        1 => Some(Pubkey::new_from_array(data[13..45].try_into().unwrap())),
+        _ => return err!(StakeError::UpgradeAuthority),
+    })
+}
+
 #[program]
 pub mod capacity_stake {
     use super::*;
 
-    /// Creates the per-mint config and its vault. Permissionless; `init` makes a second call fail.
-    pub fn init_config(ctx: Context<InitConfig>) -> Result<()> {
+    /// Creates the per-mint config and its vault, naming its config authority and staking caps. Only the
+    /// program's upgrade authority (read from its ProgramData account); `init` makes a second call fail.
+    pub fn init_config(ctx: Context<InitConfig>, config_authority: Pubkey, max_total: u64, max_per_stake: u64) -> Result<()> {
         let decimals = ctx.accounts.mint.decimals;
         let scale = 10u64.checked_pow(decimals as u32).ok_or(error!(StakeError::Decimals))?;
         let c = &mut ctx.accounts.config;
@@ -55,7 +100,37 @@ pub mod capacity_stake {
         c.total_pending = 0;
         c.bump = ctx.bumps.config;
         c.vault_bump = ctx.bumps.vault;
+        c.authority = config_authority;
+        c.staking_paused = false;
+        c.max_total = max_total;
+        c.max_per_stake = max_per_stake;
         emit!(ConfigCreated { mint: c.mint, vault: c.vault, desk_unit: c.desk_unit, shield_unit: c.shield_unit });
+        Ok(())
+    }
+
+    /// Config authority: caps on total_staked after a stake and on one stake. A cap below the current
+    /// total only blocks new stakes.
+    pub fn set_stake_caps(ctx: Context<SetStakeConfig>, max_total: u64, max_per_stake: u64) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.max_total = max_total;
+        c.max_per_stake = max_per_stake;
+        emit!(StakeConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
+    /// Config authority: pauses or resumes STAKING. Unstake requests and unstaking are never paused.
+    pub fn set_staking_paused(ctx: Context<SetStakeConfig>, paused: bool) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.staking_paused = paused;
+        emit!(StakeConfigChanged { mint: c.mint });
+        Ok(())
+    }
+
+    /// Config authority: hands the authority to `new_authority` (the default pubkey renounces it).
+    pub fn set_config_authority(ctx: Context<SetStakeConfig>, new_authority: Pubkey) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.authority = new_authority;
+        emit!(StakeConfigChanged { mint: c.mint });
         Ok(())
     }
 
@@ -63,6 +138,8 @@ pub mod capacity_stake {
     /// transfer fee) counts as capacity at once.
     pub fn stake(ctx: Context<StakeTokens>, amount: u64) -> Result<()> {
         require!(amount > 0, StakeError::Amount);
+        require!(!ctx.accounts.config.staking_paused, StakeError::StakingPaused);
+        require!(amount <= ctx.accounts.config.max_per_stake, StakeError::StakeCap);
         let before = ctx.accounts.vault.amount;
         token_interface::transfer_checked(
             CpiContext::new(
@@ -80,6 +157,8 @@ pub mod capacity_stake {
         ctx.accounts.vault.reload()?;
         let received = ctx.accounts.vault.amount.checked_sub(before).ok_or(error!(StakeError::Amount))?;
         require!(received > 0, StakeError::Amount);
+        let after = ctx.accounts.config.total_staked.checked_add(received).ok_or(error!(StakeError::Overflow))?;
+        require!(after <= ctx.accounts.config.max_total, StakeError::StakeCap);
 
         let owner = ctx.accounts.owner.key();
         let s = &mut ctx.accounts.stake;
@@ -176,6 +255,14 @@ pub struct Config {
     pub total_pending: u64,
     pub bump: u8,
     pub vault_bump: u8,
+    /// Config authority: staking caps and pause.
+    pub authority: Pubkey,
+    /// Pauses `stake` only.
+    pub staking_paused: bool,
+    /// Most total_staked a stake may bring the config to.
+    pub max_total: u64,
+    /// Most one stake may bring in.
+    pub max_per_stake: u64,
 }
 
 impl Config {
@@ -209,6 +296,13 @@ pub struct Capacity {
 }
 
 #[derive(Accounts)]
+pub struct SetStakeConfig<'info> {
+    #[account(mut, seeds = [CONFIG_SEED, config.mint.as_ref()], bump = config.bump, has_one = authority @ StakeError::ConfigAuthority)]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct InitConfig<'info> {
     #[account(init, payer = payer, space = 8 + Config::INIT_SPACE, seeds = [CONFIG_SEED, mint.key().as_ref()], bump)]
     pub config: Account<'info, Config>,
@@ -224,10 +318,20 @@ pub struct InitConfig<'info> {
         token::token_program = token_program
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
+    /// Must be the program's upgrade authority.
     #[account(mut)]
     pub payer: Signer<'info>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+    /// CHECK: this program's ProgramData account (PDA [program id] of the BPF upgradeable loader); its
+    /// upgrade authority must be the payer (parsed by upgrade_authority).
+    #[account(
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = bpf_loader_upgradeable::ID,
+        constraint = upgrade_authority(&program_data)? == Some(payer.key()) @ StakeError::UpgradeAuthority
+    )]
+    pub program_data: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -302,6 +406,11 @@ pub struct ConfigCreated {
 }
 
 #[event]
+pub struct StakeConfigChanged {
+    pub mint: Pubkey,
+}
+
+#[event]
 pub struct Staked {
     pub mint: Pubkey,
     pub owner: Pubkey,
@@ -339,4 +448,12 @@ pub enum StakeError {
     Decimals,
     #[msg("arithmetic overflow")]
     Overflow,
+    #[msg("signer is not the program's upgrade authority")]
+    UpgradeAuthority,
+    #[msg("signer is not the config authority")]
+    ConfigAuthority,
+    #[msg("staking is paused")]
+    StakingPaused,
+    #[msg("stake above the caps")]
+    StakeCap,
 }

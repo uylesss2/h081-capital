@@ -10,9 +10,10 @@ import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, decodeLedger, decodeSlot, ledgerPda, slotEscrow, slotInbox, slotPda } from '../../src/solana/lender.js';
 import {
   CAPACITY_ERROR, CLASSIC_TOKEN_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_FAST_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID,
-  LOCALNET_SAFETY_POOL_PROGRAM_ID, SAFETY_ERROR, SAFETY_POOL_ESCROW_PROGRAM_ID, SAFETY_STREAM_LOAN_PROGRAM_ID, SAFETY_VIRTUAL_ASSETS, SAFETY_VIRTUAL_SHARES,
+  LOCALNET_SAFETY_POOL_PROGRAM_ID, SAFETY_ERROR, SAFETY_POOL_ESCROW_PROGRAM_ID, SAFETY_STREAM_LOAN_PROGRAM_ID, SAFETY_VIRTUAL_ASSETS, SAFETY_VIRTUAL_SHARES, SAFETY_MAX_SHARES_PER_ASSET, CAPACITY_COOLDOWN,
   STREAM_GRACE, ataAddress, encodeStreamLedger, encodeStreamSlot, streamEscrowPda, streamLedgerPda, streamSlotPda,
 } from '../../src/solana/token.js';
+import { CAPACITY_WINDOW_SECS } from '../../relayer/solana.js';
 
 const SOL = resolve(import.meta.dirname, '..', '..', 'solana');
 const src = (p: string) => readFileSync(resolve(SOL, 'programs', p), 'utf8');
@@ -45,9 +46,24 @@ describe('program ids', () => {
     expect(declared('capacity_stake/src/lib.rs')).toEqual([LOCALNET_CAPACITY_STAKE_PROGRAM_ID.toBase58(), LOCALNET_CAPACITY_STAKE_FAST_PROGRAM_ID.toBase58()]);
     expect(declared('safety_pool/src/lib.rs')).toEqual([LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58(), LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID.toBase58()]);
     // stream_loan reaches the pool; safety_pool reads stream_loan and the pool's escrows
-    expect(constPubkey('stream_loan/src/pool.rs', 'POOL_PROGRAM_ID')).toBe(LOCALNET_POOL_PROGRAM_ID.toBase58());
+    // (localnet builds; the mainnet feature selects the deployed stipend_pool E16DK... and refuses localnet ids)
+    const MAINNET_POOL = 'E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM';
+    for (const f of ['stream_loan/src/pool.rs', 'safety_pool/src/stream_loan_view.rs']) {
+      expect(constPubkey(f, 'LOCALNET_POOL_PROGRAM_ID')).toBe(LOCALNET_POOL_PROGRAM_ID.toBase58());
+      expect(constPubkey(f, 'MAINNET_POOL_PROGRAM_ID')).toBe(MAINNET_POOL);
+      expect(src(f)).toContain('#[cfg(not(feature = "mainnet"))]\npub const POOL_PROGRAM_ID: Pubkey = LOCALNET_POOL_PROGRAM_ID;');
+      expect(src(f)).toContain('#[cfg(feature = "mainnet")]\npub const POOL_PROGRAM_ID: Pubkey = MAINNET_POOL_PROGRAM_ID;');
+    }
     expect(constPubkey('safety_pool/src/stream_loan_view.rs', 'STREAM_LOAN_ID')).toBe(LOCALNET_LOAN_PROGRAM_ID.toBase58());
-    expect(constPubkey('safety_pool/src/stream_loan_view.rs', 'POOL_PROGRAM_ID')).toBe(LOCALNET_POOL_PROGRAM_ID.toBase58());
+    expect(constPubkey('safety_pool/src/stream_loan_view.rs', 'LOCALNET_STREAM_LOAN_ID')).toBe(LOCALNET_LOAN_PROGRAM_ID.toBase58());
+    expect(constPubkey('stream_loan/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_LOAN_PROGRAM_ID.toBase58());
+    expect(constPubkey('safety_pool/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58());
+    expect(constPubkey('capacity_stake/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_CAPACITY_STAKE_PROGRAM_ID.toBase58());
+    // the mainnet build script patches exactly these lines (never a global replace, which would also patch LOCALNET_*)
+    const build = readFileSync(resolve(SOL, 'scripts', 'build-phase2-mainnet.sh'), 'utf8');
+    expect(build).toContain('s/^declare_id!');
+    expect(build).toContain('s/^pub const STREAM_LOAN_ID: Pubkey = pubkey!');
+    expect(build).toContain('--features mainnet,no-log-ix-name');
     expect(SAFETY_STREAM_LOAN_PROGRAM_ID.equals(LOCALNET_LOAN_PROGRAM_ID)).toBe(true);
     expect(SAFETY_POOL_ESCROW_PROGRAM_ID.equals(LOCALNET_POOL_PROGRAM_ID)).toBe(true);
     for (const f of ['stipend_pool/src/tokens.rs', 'stream_loan/src/token.rs', 'safety_pool/src/stream_loan_view.rs']) {
@@ -153,6 +169,12 @@ describe('mirrored layouts', () => {
       expect(sh, script).toMatch(/--upgradeable-program "\$POOL_ID" "[^"]+stipend_pool\.so" "\$UPGRADE_AUTHORITY"/);
       expect(sh, script).not.toMatch(/--bpf-program "\$(POOL|PROBE)_ID"/);
     }
+    // every program with an upgrade-authority-gated init is loaded upgradeable on its suite's validator
+    const loan = readFileSync(resolve(SOL, 'scripts', 'loan-start-validator.sh'), 'utf8');
+    expect(loan).toMatch(/--upgradeable-program "\$LOAN_ID" "[^"]+stream_loan\.so" "\$UPGRADE_AUTHORITY"/);
+    const staking = readFileSync(resolve(SOL, 'scripts', 'staking-validator.sh'), 'utf8');
+    expect(staking).toContain(`UPGRADE_AUTHORITY=${auth}`);
+    expect(staking).not.toContain('--bpf-program');
   });
 });
 
@@ -162,9 +184,15 @@ describe('constants and error tables', () => {
     expect(STREAM_GRACE).toBe(GRACE);
     expect(src('stream_loan/src/state.rs')).toContain('pub const GRACE: u64 = 7 * 24 * 60 * 60;');
     expect(src('safety_pool/src/lib.rs')).toContain('pub const GRACE: u64 = 7 * 24 * 60 * 60;');
-    expect(src('safety_pool/src/lib.rs')).toContain(`pub const VIRTUAL_SHARES: u128 = 1_000;`);
-    expect(src('safety_pool/src/lib.rs')).toContain(`pub const VIRTUAL_ASSETS: u128 = 1;`);
-    expect([SAFETY_VIRTUAL_SHARES, SAFETY_VIRTUAL_ASSETS]).toEqual([1_000n, 1n]);
+    expect(src('safety_pool/src/lib.rs')).toContain(`pub const VIRTUAL_SHARES: u128 = 1_000_000_000;`);
+    expect(src('safety_pool/src/lib.rs')).toContain(`pub const VIRTUAL_ASSETS: u128 = 1_000_000;`);
+    expect([SAFETY_VIRTUAL_SHARES, SAFETY_VIRTUAL_ASSETS]).toEqual([1_000_000_000n, 1_000_000n]);
+    expect(src('safety_pool/src/lib.rs')).toContain(`pub const MAX_SHARES_PER_ASSET: u128 = 1_000_000_000;`);
+    expect(SAFETY_MAX_SHARES_PER_ASSET).toBe(1_000_000_000n);
+    // capacity_stake's cooldown is one full relayer capacity window (30 days)
+    expect(src('capacity_stake/src/lib.rs')).toContain('pub const CAPACITY_WINDOW: i64 = 30 * 24 * 60 * 60;');
+    expect(src('capacity_stake/src/lib.rs')).toContain('pub const COOLDOWN: i64 = CAPACITY_WINDOW;');
+    expect(CAPACITY_COOLDOWN).toBe(BigInt(CAPACITY_WINDOW_SECS));
   });
 
   it('every launch-wallet deny-list is exactly the three H081 launch wallets (creator fees are never a source)', () => {

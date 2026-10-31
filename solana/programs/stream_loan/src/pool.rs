@@ -8,7 +8,15 @@ use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use crate::error::LoanError;
 
 /// Localnet stipend_pool program id (solana/keys/stipend_pool-keypair.json).
-pub const POOL_PROGRAM_ID: Pubkey = pubkey!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
+pub const LOCALNET_POOL_PROGRAM_ID: Pubkey = pubkey!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
+/// The stipend_pool deployed on mainnet-beta (2026-10-31).
+pub const MAINNET_POOL_PROGRAM_ID: Pubkey = pubkey!("E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM");
+/// The stipend_pool this build talks to: the mainnet deployment with `--features mainnet`, the localnet key
+/// otherwise. A devnet build patches LOCALNET_POOL_PROGRAM_ID (build-devnet.sh).
+#[cfg(not(feature = "mainnet"))]
+pub const POOL_PROGRAM_ID: Pubkey = LOCALNET_POOL_PROGRAM_ID;
+#[cfg(feature = "mainnet")]
+pub const POOL_PROGRAM_ID: Pubkey = MAINNET_POOL_PROGRAM_ID;
 
 /// Buffer header: discriminator(8) | authority(32) | seed u64 | len u32 | bump u8, then the payload.
 pub const BUFFER_HEADER: usize = 8 + 32 + 8 + 4 + 1;
