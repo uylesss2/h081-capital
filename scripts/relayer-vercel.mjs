@@ -15,8 +15,11 @@ await build({
   entryPoints: [join(root, 'relayer', 'vercel.ts')],
   outfile: join(out, 'api', 'index.mjs'),
   bundle: true, platform: 'node', format: 'esm', target: 'node22', minify: false, legalComments: 'none',
-  // CommonJS dependencies inside an ESM bundle still call require()
-  banner: { js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);" },
+  // CommonJS dependencies inside an ESM bundle still use require, __filename and __dirname (e.g. `bindings`)
+  banner: {
+    js: "import { createRequire as __cr } from 'node:module'; import { fileURLToPath as __fu } from 'node:url'; import { dirname as __dn } from 'node:path';"
+      + ' const require = __cr(import.meta.url); const __filename = __fu(import.meta.url); const __dirname = __dn(__filename);',
+  },
 });
 writeFileSync(join(out, 'package.json'), JSON.stringify({ name: 'h081-relayer', private: true, type: 'module', engines: { node: '24.x' } }, null, 2) + '\n');
 writeFileSync(join(out, 'vercel.json'), JSON.stringify({
