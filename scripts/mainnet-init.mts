@@ -1,6 +1,8 @@
 // One-time mainnet setup after the programs are deployed, then a free smoke test:
-//  1. stipend_pool initialize (the pool's Merkle tree), 2. create_vault for USDG (Token-2022),
-//  3. stream_loan initialize (loan registry), only when stream_loan is deployed. All permissionless; skipped if already done.
+//  1. stipend_pool initialize + grow_pool (the pool's Merkle tree and deposit guard; DEPLOYER_KEY must be the
+//     program's upgrade authority, the program refuses anyone else; config.authority is read back and checked),
+//  2. create_vault for USDG (Token-2022), 3. stream_loan initialize (loan registry), only when stream_loan is
+//     deployed. Steps 2-3 are permissionless. Everything is skipped if already done.
 //  4. A real disclose proof is uploaded to a buffer and checked by verify_proof through simulateTransaction
 //     (no state change), a tampered copy must fail, then the buffer is closed (rent refunded).
 // H081 staking (capacity_stake init_config, safety_pool init_pool) waits for the H081 mint to exist.
@@ -12,8 +14,8 @@ import { MerkleTree } from '../src/merkle.js';
 import { LEVELS, discloseInput } from '../src/inputs.js';
 import { Prover } from '../src/prover.js';
 import {
-  LOCALNET_POOL_PROGRAM_ID as POOL, closeBuffer, concatBytes, createVaultIx, encodeFieldVec, encodeProof, fieldOf, initializeIx,
-  poolPda, send, simulate, uploadBuffer, vaultPda, verifyProofIx,
+  LOCALNET_POOL_PROGRAM_ID as POOL, SolanaPool, closeBuffer, concatBytes, configPda, createVaultIx, decodeConfig, encodeFieldVec, encodeProof, fieldOf,
+  programDataAddress, send, simulate, uploadBuffer, vaultPda, verifyProofIx,
 } from '../src/solana/index.js';
 import { LOCALNET_LOAN_PROGRAM_ID as LOAN, loanInitializeIx, registryPda } from '../src/solana/lender.js';
 
@@ -42,7 +44,14 @@ const guard = {
   maxPerDeposit: BigInt(process.env.MAX_PER_DEPOSIT ?? 1_000_000_000), // 1,000 USDG
 };
 console.log(`deposit guard: authority ${guard.authority.toBase58()}, max total ${guard.maxTotal}, max per deposit ${guard.maxPerDeposit}`);
-await step('pool initialize', poolPda(POOL), () => send(conn, payer, [initializeIx(POOL, payer.publicKey, guard)]));
+// initialize requires the upgrade authority: check it before sending (ProgramData: tag u32 | slot u64 | Option<Pubkey>)
+const pd = (await conn.getAccountInfo(programDataAddress(POOL)))?.data;
+if (!pd || pd[12] !== 1 || !new PublicKey(pd.subarray(13, 45)).equals(payer.publicKey)) throw new Error('DEPLOYER_KEY is not the upgrade authority of stipend_pool');
+// one transaction (initialize + grow_pool); a pool left short of full size is finished
+await new SolanaPool(conn, POOL).initialize(payer, guard);
+const config = decodeConfig((await conn.getAccountInfo(configPda(POOL), 'confirmed'))!.data);
+if (!config.authority.equals(guard.authority)) throw new Error(`config.authority is ${config.authority.toBase58()}, expected ${guard.authority.toBase58()}`);
+console.log(`pool initialize: done; config.authority ${config.authority.toBase58()} verified on chain`);
 await step('USDG vault', vaultPda(POOL, USDG), () => send(conn, payer, [createVaultIx(POOL, payer.publicKey, USDG, TOKEN_2022)]));
 const registry = registryPda(LOAN);
 if (loanDeployed) await step('loan registry initialize', registry, () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));

@@ -84,4 +84,10 @@ pub enum PoolError {
     ConfigAuthority,
     #[msg("wrong asset cap account")]
     WrongAssetCap,
+    #[msg("only the program's upgrade authority can initialize")]
+    UpgradeAuthority,
+    #[msg("the pool account is already full size")]
+    PoolComplete,
+    #[msg("the pool account was not created by initialize")]
+    PoolAccount,
 }

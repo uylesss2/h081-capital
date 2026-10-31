@@ -38,9 +38,13 @@ import {
 } from './ops.js';
 import { vaultPda } from './pda.js';
 import {
-  DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, encodeDiscloseArgs, encodeStreamArgs, initializeIx, verifyDisclosureIx, verifyStreamIx,
+  DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, encodeDiscloseArgs, encodeStreamArgs, growPoolIx, initializePoolIxs, isPoolComplete,
+  poolGrowsNeeded, verifyDisclosureIx, verifyStreamIx,
 } from './program.js';
 import { poolPda } from './pda.js';
+
+/** Compute-unit limit for initialize + grow_pool (one transaction). */
+export const POOL_INIT_CU_LIMIT = 400_000;
 
 /** Compute-unit limit for proof-bearing operations (a 16-way grant uses ~0.7M). */
 export const OP_CU_LIMIT = 1_400_000;
@@ -139,10 +143,21 @@ export class SolanaPool {
     return this;
   }
 
-  /** Creates the pool's Merkle state and deposit guard if they do not exist yet (permissionless). */
+  /**
+   * Creates the pool's Merkle state and deposit guard if they do not exist yet: initialize + grow_pool in one
+   * transaction. `payer` must be the program's upgrade authority (the program refuses anyone else). A pool
+   * account left short of full size (initialize sent without its grow_pool calls) is finished here.
+   */
   async initialize(payer: Keypair, guard: DepositGuard = {}): Promise<void> {
-    if (await this.connection.getAccountInfo(poolPda(this.programId), 'confirmed')) return;
-    await send(this.connection, payer, [initializeIx(this.programId, payer.publicKey, guard)]);
+    const info = await this.connection.getAccountInfo(poolPda(this.programId), 'confirmed');
+    if (!info) {
+      await send(this.connection, payer, initializePoolIxs(this.programId, payer.publicKey, guard), { cuLimit: POOL_INIT_CU_LIMIT });
+      return;
+    }
+    if (isPoolComplete(info.data)) return;
+    const grows = poolGrowsNeeded(info.data.length);
+    if (grows === 0) throw new Error('pool account is full size but has no Pool discriminator');
+    await send(this.connection, payer, Array.from({ length: grows }, () => growPoolIx(this.programId, payer.publicKey)), { cuLimit: POOL_INIT_CU_LIMIT });
   }
 
   async tokenProgramOf(mint: PublicKey): Promise<PublicKey> {

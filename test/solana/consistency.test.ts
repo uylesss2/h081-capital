@@ -4,8 +4,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Keypair, PublicKey } from '@solana/web3.js';
-import { BUFFER_HEADER, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, ROOT_HISTORY, escrowPda, fieldOf } from '../../src/solana/index.js';
+import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { BUFFER_HEADER, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, POOL_INIT_LEN, POOL_SIZE, ROOT_HISTORY, escrowPda, fieldOf, initializePoolIxs } from '../../src/solana/index.js';
+import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, decodeLedger, decodeSlot, ledgerPda, slotEscrow, slotInbox, slotPda } from '../../src/solana/lender.js';
 import {
   CAPACITY_ERROR, CLASSIC_TOKEN_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_FAST_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID,
@@ -130,8 +131,28 @@ describe('mirrored layouts', () => {
     expect(BUFFER_HEADER).toBe(8 + 32 + 8 + 4 + 1);
     expect(src('stream_loan/src/pool.rs')).toContain('pub const BUFFER_HEADER: usize = 8 + 32 + 8 + 4 + 1;');
     expect(src('stipend_pool/src/state.rs')).toContain(`pub const ROOT_HISTORY: usize = ${ROOT_HISTORY};`);
-    expect(ROOT_HISTORY).toBe(128); // MerkleTreeWithHistory.ROOT_HISTORY_SIZE
-    expect(readFileSync(resolve(SOL, '..', 'contracts', 'MerkleTreeWithHistory.sol'), 'utf8')).toContain('ROOT_HISTORY_SIZE = 128');
+    // one root per operation, 1024 kept (the EVM reference keeps 128, one per leaf)
+    expect(ROOT_HISTORY).toBe(1024);
+    expect(POOL_SIZE).toBe(8 + 4 + 4 + 32 * 20 + 32 * 1024);
+    expect(POOL_SIZE).toBe(33_424);
+    expect(POOL_INIT_LEN).toBe(10_240);
+  });
+
+  it('initialize + grow_pool are one transaction that fits the 1232-byte packet', () => {
+    const auth = LOCALNET_UPGRADE_AUTHORITY.publicKey;
+    const tx = new Transaction({ feePayer: auth, recentBlockhash: PublicKey.default.toBase58() });
+    tx.add(...initializePoolIxs(LOCALNET_POOL_PROGRAM_ID, auth, { authority: Keypair.generate().publicKey }));
+    expect(tx.serialize({ requireAllSignatures: false, verifySignatures: false }).length).toBeLessThan(1232 - 100); // room for a CU-limit ix
+  });
+
+  it('the validator scripts load stipend_pool upgradeable with the localnet upgrade authority', () => {
+    const auth = LOCALNET_UPGRADE_AUTHORITY.publicKey.toBase58();
+    for (const script of ['start-validator.sh', 'loan-start-validator.sh']) {
+      const sh = readFileSync(resolve(SOL, 'scripts', script), 'utf8');
+      expect(sh, script).toContain(`UPGRADE_AUTHORITY=${auth}`);
+      expect(sh, script).toMatch(/--upgradeable-program "\$POOL_ID" "[^"]+stipend_pool\.so" "\$UPGRADE_AUTHORITY"/);
+      expect(sh, script).not.toMatch(/--bpf-program "\$(POOL|PROBE)_ID"/);
+    }
   });
 });
 

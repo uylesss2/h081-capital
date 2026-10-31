@@ -1,8 +1,10 @@
 //! stipend_pool: the H0.81 Capital shielded pool on Solana. Port of contracts/StipendPool.sol.
-//! No upgrade logic. One config authority can cap and pause DEPOSITS only (never withdrawals or other
-//! outflows); see state::Config. See docs/SOLANA-PORT.md.
+//! No upgrade logic. Only the program's upgrade authority can `initialize` (it names the config authority).
+//! One config authority can cap and pause DEPOSITS only (never withdrawals or other outflows); see
+//! state::Config. See docs/SOLANA-PORT.md.
 #![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_spl::token_interface::{Mint, TokenInterface};
 
 pub mod error;
@@ -114,21 +116,88 @@ pub fn require_proof(circuit: u8, proof: &Proof, inputs: &[[u8; 32]]) -> Result<
     Ok(())
 }
 
+/// Upgrade authority recorded in a BPF upgradeable loader ProgramData account: UpgradeableLoaderState
+/// (bincode) = u32 LE tag 3 | slot u64 LE | Option<Pubkey> (u8 tag | 32 bytes). Parsed by hand: deserializing
+/// it through anchor's Account<ProgramData> / Program::programdata_address pulls bincode into the binary
+/// (+60 KB of .so, i.e. deploy rent). None when the program is immutable.
+pub fn upgrade_authority(info: &AccountInfo) -> Result<Option<Pubkey>> {
+    require_keys_eq!(*info.owner, bpf_loader_upgradeable::ID, PoolError::UpgradeAuthority);
+    let data = info.try_borrow_data()?;
+    require!(data.len() >= 45 && data[..4] == [3, 0, 0, 0], PoolError::UpgradeAuthority);
+    Ok(match data[12] {
+        0 => None,
+        1 => Some(Pubkey::new_from_array(data[13..45].try_into().unwrap())),
+        _ => return err!(PoolError::UpgradeAuthority),
+    })
+}
+
+/// Completes a full-size pool account: writes the zero-copy discriminator, then the empty tree. Runs once,
+/// from the instruction that brings the account to Pool::SIZE (the bytes are zero before it).
+fn finish_pool(info: &AccountInfo) -> Result<()> {
+    let mut data = info.try_borrow_mut_data()?;
+    require!(data.len() == Pool::SIZE, PoolError::PoolAccount);
+    let disc = Pool::DISCRIMINATOR;
+    require!(data[..disc.len()].iter().all(|b| *b == 0), PoolError::PoolComplete);
+    data[..disc.len()].copy_from_slice(disc);
+    let pool: &mut Pool = bytemuck::from_bytes_mut(&mut data[8..Pool::SIZE]);
+    merkle::init_tree(pool);
+    Ok(())
+}
+
 #[program]
 pub mod stipend_pool {
     use super::*;
 
-    /// Creates the pool's Merkle state and its deposit guard (config authority, default per-asset caps).
-    /// Permissionless; the `init` constraints make a second call fail.
+    /// Creates the pool PDA (at Pool::INIT_LEN; `grow_pool` brings it to full size and writes the empty
+    /// tree) and the deposit guard (config authority, default per-asset caps). Only the program's upgrade
+    /// authority (read from its ProgramData account) may call it; a second call fails (accounts exist).
+    /// Send it with enough `grow_pool` calls in the same transaction (the SDK does).
     pub fn initialize(ctx: Context<Initialize>, config_authority: Pubkey, default_max_total: u64, default_max_per_deposit: u64) -> Result<()> {
-        let mut pool = ctx.accounts.pool.load_init()?;
-        merkle::init_tree(&mut pool);
+        let pool = ctx.accounts.pool.to_account_info();
+        tokens::create_pda_account(
+            &ctx.accounts.payer.to_account_info(),
+            &pool,
+            &ctx.accounts.system_program.to_account_info(),
+            Pool::INIT_LEN,
+            &crate::ID,
+            &[POOL_SEED, &[ctx.bumps.pool]],
+        )?;
+        if Pool::INIT_LEN == Pool::SIZE {
+            finish_pool(&pool)?;
+        }
         let c = &mut ctx.accounts.config;
         c.authority = config_authority;
         c.deposits_paused = false;
         c.default_max_total = default_max_total;
         c.default_max_per_deposit = default_max_per_deposit;
         c.bump = ctx.bumps.config;
+        Ok(())
+    }
+
+    /// Grows the pool PDA by up to 10 KiB toward Pool::SIZE, topping up its rent from the payer. The call
+    /// that reaches Pool::SIZE writes the discriminator and the empty tree. Permissionless (the result is
+    /// fixed); fails once the pool is complete.
+    pub fn grow_pool(ctx: Context<GrowPool>) -> Result<()> {
+        let info = ctx.accounts.pool.to_account_info();
+        require_keys_eq!(*info.owner, crate::ID, PoolError::PoolAccount);
+        let current = info.data_len();
+        require!(current < Pool::SIZE, PoolError::PoolComplete);
+        let new_len = Pool::SIZE.min(current + anchor_lang::solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE);
+        let need = Rent::get()?.minimum_balance(new_len);
+        let have = info.lamports();
+        if need > have {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.key(),
+                    anchor_lang::system_program::Transfer { from: ctx.accounts.payer.to_account_info(), to: info.clone() },
+                ),
+                need - have,
+            )?;
+        }
+        info.resize(new_len)?;
+        if new_len == Pool::SIZE {
+            finish_pool(&info)?;
+        }
         Ok(())
     }
 
@@ -288,11 +357,18 @@ pub mod stipend_pool {
 
     /// LOCALNET PROBE BUILD ONLY (feature `merkle-probe`, separate program id): appends raw leaves so
     /// tests can compare on-chain roots with src/merkle.ts. Absent from the production program.
+    /// `commit_each`: one root per leaf (fast ring-eviction tests) instead of one per call (as operations do).
     #[cfg(feature = "merkle-probe")]
-    pub fn probe_insert(ctx: Context<ProbeInsert>, leaves: Vec<[u8; 32]>) -> Result<()> {
+    pub fn probe_insert(ctx: Context<ProbeInsert>, leaves: Vec<[u8; 32]>, commit_each: bool) -> Result<()> {
         let mut pool = ctx.accounts.pool.load_mut()?;
         for leaf in leaves.iter() {
             merkle::insert(&mut pool, leaf)?;
+            if commit_each {
+                merkle::commit_root(&mut pool);
+            }
+        }
+        if !commit_each && !leaves.is_empty() {
+            merkle::commit_root(&mut pool);
         }
         Ok(())
     }
@@ -300,13 +376,34 @@ pub mod stipend_pool {
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = payer, space = Pool::SIZE, seeds = [POOL_SEED], bump)]
-    pub pool: AccountLoader<'info, Pool>,
+    /// CHECK: PDA ["pool"], created here (raw, no discriminator); grow_pool completes it.
+    #[account(mut, seeds = [POOL_SEED], bump)]
+    pub pool: UncheckedAccount<'info>,
+    /// Must be the program's upgrade authority.
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
     #[account(init, payer = payer, space = Config::SIZE, seeds = [CONFIG_SEED], bump)]
     pub config: Account<'info, Config>,
+    /// CHECK: this program's ProgramData account (PDA [program id] of the BPF upgradeable loader, the only
+    /// address the loader uses for it); its upgrade authority must be the payer (parsed by upgrade_authority).
+    #[account(
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = bpf_loader_upgradeable::ID,
+        constraint = upgrade_authority(&program_data)? == Some(payer.key()) @ PoolError::UpgradeAuthority
+    )]
+    pub program_data: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct GrowPool<'info> {
+    /// CHECK: PDA ["pool"]; must be owned by this program (created by initialize); checked in the handler.
+    #[account(mut, seeds = [POOL_SEED], bump)]
+    pub pool: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

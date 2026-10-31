@@ -10,11 +10,11 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { Allowance, Policy, SpendingKey, allowanceCommitment, initCrypto, lenderKey, randomField, randomKeys } from '../../src/crypto.js';
 import { MerkleTree } from '../../src/merkle.js';
-import { LOCALNET_CONFIG_AUTHORITY } from './config-authority.js';
+import { LOCALNET_CONFIG_AUTHORITY, LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { LEVELS, SPEND_PUBLIC, discloseInput, spendInput, streamInput } from '../../src/inputs.js';
 import { Prover, type ProofResult } from '../../src/prover.js';
 import {
-  BUFFER_HEADER, LEVELS as POOL_LEVELS, ROOT_HISTORY, be32, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, bufferPda, bufferWriteIx, closeBuffer, concatBytes, customErrorCode,
+  BUFFER_HEADER, LEVELS as POOL_LEVELS, POOL_INIT_LEN, POOL_SIZE, ROOT_HISTORY, SolanaPool, be32, growPoolIx, initializePoolIxs, isPoolComplete, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, bufferPda, bufferWriteIx, closeBuffer, concatBytes, customErrorCode,
   decodePool, encodeDiscloseArgs, encodeFieldVec, encodeProof, encodeStreamArgs, fieldOf, initializeIx, poolPda, probeInsertIx, send, simulate,
   uploadBuffer, verifyDisclosureIx, verifyProofIx, verifyStreamIx, type CircuitId, type DiscloseArgs, type StreamArgs,
 } from '../../src/solana/index.js';
@@ -83,23 +83,78 @@ beforeAll(async () => {
 });
 
 describe('initialize', () => {
-  it('creates the pool with the empty-tree root, permissionlessly, exactly once', async () => {
-    const empty = new MerkleTree(LEVELS);
-    for (const id of [POOL, PROBE]) {
-      const fresh = !(await connection.getAccountInfo(poolPda(id)));
-      if (fresh) await send(connection, payer, [initializeIx(id, payer.publicKey, { authority: LOCALNET_CONFIG_AUTHORITY.publicKey })]);
-      const s = await readPool(id);
-      // the e2e suite shares this validator and may have used the production pool already
-      if (id.equals(POOL) && fresh) {
-        expect(s.nextIndex).toBe(0);
-        expect(s.lastRoot).toBe(empty.root);
-        expect(s.filledSubtrees).toEqual(empty.zeros.slice(0, LEVELS));
-      }
+  const auth = LOCALNET_UPGRADE_AUTHORITY;
+  const guard = { authority: LOCALNET_CONFIG_AUTHORITY.publicKey };
+  let empty: MerkleTree;
+  const expectEmpty = async (id: PublicKey) => {
+    empty ??= new MerkleTree(LEVELS);
+    const s = await readPool(id);
+    expect(s.nextIndex).toBe(0);
+    expect(s.currentRootIndex).toBe(0);
+    expect(s.lastRoot).toBe(empty.root);
+    expect(s.filledSubtrees).toEqual(empty.zeros.slice(0, LEVELS));
+    expect(s.roots.filter((r) => r !== 0n)).toEqual([empty.root]);
+  };
+  let someone: Keypair;
+  beforeAll(async () => {
+    someone = Keypair.generate();
+    for (const k of [auth.publicKey, someone.publicKey]) {
+      await connection.confirmTransaction(await connection.requestAirdrop(k, 2 * LAMPORTS_PER_SOL), 'confirmed');
     }
-    // a second initialize cannot reset the tree (account already in use)
-    const someone = Keypair.generate();
-    await connection.confirmTransaction(await connection.requestAirdrop(someone.publicKey, LAMPORTS_PER_SOL), 'confirmed');
-    await expect(send(connection, someone, [initializeIx(POOL, someone.publicKey)])).rejects.toThrow();
+  });
+
+  it('only the upgrade authority can initialize (the probe pool is fresh: only this suite uses it)', async () => {
+    expect(await connection.getAccountInfo(poolPda(PROBE))).toBeNull();
+    await expectCode(send(connection, someone, initializePoolIxs(PROBE, someone.publicKey, guard), { cuLimit: CU }), POOL_ERROR.UpgradeAuthority);
+    await expectCode(send(connection, someone, [initializeIx(PROBE, someone.publicKey, guard)]), POOL_ERROR.UpgradeAuthority);
+    expect(await connection.getAccountInfo(poolPda(PROBE))).toBeNull();
+  });
+
+  it('initialize + grow_pool fit in one transaction (simulated on the fresh probe pool)', async () => {
+    const ixs = initializePoolIxs(PROBE, auth.publicKey, guard);
+    expect(ixs).toHaveLength(4); // initialize + 3 x grow_pool: 10,240 -> 20,480 -> 30,720 -> 33,424
+    expect(POOL_SIZE).toBe(33_424);
+    const sim = await simulate(connection, auth, ixs);
+    expect(sim.err, sim.logs.join(' | ')).toBeNull();
+    cu.initialize_and_grow_tx = sim.computeUnits;
+  });
+
+  it('a half-grown pool loads nowhere until grow_pool completes it; the SDK finishes it', async () => {
+    await send(connection, auth, [initializeIx(PROBE, auth.publicKey, guard)]);
+    const created = await connection.getAccountInfo(poolPda(PROBE), 'confirmed');
+    expect(created!.owner.equals(PROBE)).toBe(true);
+    expect(created!.data.length).toBe(POOL_INIT_LEN);
+    expect(isPoolComplete(created!.data)).toBe(false);
+    expect(() => decodePool(created!.data)).toThrow(/not complete/);
+    // every AccountLoader<Pool> refuses it: no discriminator yet (anchor AccountDiscriminatorMismatch 3002)
+    await expect(send(connection, payer, [probeInsertIx(PROBE, [1n])], { cuLimit: CU })).rejects.toThrow(/0xbba|3002|AccountDiscriminatorMismatch/);
+    await send(connection, someone, [growPoolIx(PROBE, someone.publicKey)]); // permissionless; 20,480 bytes
+    expect((await connection.getAccountInfo(poolPda(PROBE), 'confirmed'))!.data.length).toBe(POOL_INIT_LEN + 10_240);
+    await expect(send(connection, payer, [probeInsertIx(PROBE, [1n])], { cuLimit: CU })).rejects.toThrow(/0xbba|3002|AccountDiscriminatorMismatch/);
+    await new SolanaPool(connection, PROBE).initialize(auth, guard); // detects the half-grown pool and finishes it
+    const done = await connection.getAccountInfo(poolPda(PROBE), 'confirmed');
+    expect(done!.data.length).toBe(POOL_SIZE);
+    expect(done!.lamports).toBeGreaterThanOrEqual(await connection.getMinimumBalanceForRentExemption(POOL_SIZE));
+    await expectEmpty(PROBE);
+  });
+
+  it('grow_pool on a complete pool fails, and a second initialize fails (even by the upgrade authority)', async () => {
+    await expectCode(send(connection, someone, [growPoolIx(PROBE, someone.publicKey)]), POOL_ERROR.PoolComplete);
+    await expect(send(connection, auth, initializePoolIxs(PROBE, auth.publicKey, guard), { cuLimit: CU })).rejects.toThrow();
+    await expect(send(connection, auth, [initializeIx(PROBE, auth.publicKey, guard)])).rejects.toThrow();
+    await expectEmpty(PROBE);
+  });
+
+  it('creates the production pool in one transaction with the empty-tree root', async () => {
+    // the e2e suite shares this validator and may have initialized (and used) the production pool already
+    const fresh = !(await connection.getAccountInfo(poolPda(POOL)));
+    if (fresh) {
+      const res = await send(connection, auth, initializePoolIxs(POOL, auth.publicKey, guard), { cuLimit: CU });
+      cu.initialize_and_grow_tx = res.computeUnits;
+      await expectEmpty(POOL);
+    }
+    expect((await readPool(POOL)).roots).toHaveLength(ROOT_HISTORY);
+    await expect(send(connection, someone, initializePoolIxs(POOL, someone.publicKey), { cuLimit: CU })).rejects.toThrow();
   });
 });
 
@@ -194,10 +249,11 @@ describe('poseidon merkle tree (probe build)', () => {
   const leaves: bigint[] = [];
   beforeAll(() => { local = new MerkleTree(LEVELS); });
 
-  it('on-chain roots equal src/merkle.ts roots after every batch of inserts', async () => {
+  it('on-chain roots equal src/merkle.ts roots after every batch of inserts; one root per call', async () => {
     const start = await readPool(PROBE);
     expect(start.nextIndex).toBe(0); // fresh validator (npm run test:solana restarts it)
     expect(start.lastRoot).toBe(local.root);
+    let rootIndex = start.currentRootIndex;
     const batches = [1, 1, 2, 3, 5, 8, 13];
     const perBatch: Record<number, number> = {};
     for (const n of batches) {
@@ -208,9 +264,12 @@ describe('poseidon merkle tree (probe build)', () => {
       const s = await readPool(PROBE);
       expect(s.nextIndex).toBe(local.size);
       expect(s.lastRoot).toBe(local.root);
+      // n leaves, one committed root (as every operation does: transact 2, grant 17, delegate 5 leaves)
+      expect(s.currentRootIndex).toBe((rootIndex + 1) % ROOT_HISTORY);
+      rootIndex = s.currentRootIndex;
     }
     const s = await readPool(PROBE);
-    // the ring holds every root since the start (fewer than 100 inserts so far)
+    // the ring holds every root since the start (fewer than ROOT_HISTORY calls so far)
     expect(s.roots.slice(0, batches.length + 1).every((x) => x !== 0n)).toBe(true);
     expect(local.size).toBe(33);
     cu.insert_1_leaf_tx = perBatch[1];
@@ -265,26 +324,50 @@ describe('poseidon merkle tree (probe build)', () => {
     );
   });
 
-  it('the root ring keeps the last 128 roots, like ROOT_HISTORY_SIZE of the EVM pool', async () => {
-    expect(ROOT_HISTORY).toBe(128);
+  it('the ring keeps the last 1024 committed roots: a proof 1023 operations old verifies, one more evicts it', async () => {
+    expect(ROOT_HISTORY).toBe(1024);
     const info = await connection.getAccountInfo(poolPda(PROBE), 'confirmed');
     expect(info!.data.length).toBe(8 + 4 + 4 + 32 * POOL_LEVELS + 32 * ROOT_HISTORY);
-    const roots: bigint[] = [];
-    for (let b = 0; b < 10; b++) {
-      const batch = Array.from({ length: 14 }, () => randomField());
-      await send(connection, payer, [probeInsertIx(PROBE, batch)], { cuLimit: CU });
+    // a real disclose proof against the root committed right after this note
+    const a = fresh(fieldOf(Keypair.generate().publicKey), 700n);
+    const c = allowanceCommitment(a);
+    await send(connection, payer, [probeInsertIx(PROBE, [c])], { cuLimit: CU });
+    const idx = local.insert(c);
+    const proofRoot = local.root;
+    expect((await readPool(PROBE)).lastRoot).toBe(proofRoot);
+    const d = discloseInput({ root: proofRoot, allowance: a, path: local.path(idx), kind: 'remainingAtLeast', bound: 1n, audience: 9n });
+    const r = await prover.prove('disclose', d.input);
+    const s0 = r.publicSignals;
+    const payload = concatBytes(encodeProof(r.proof), encodeDiscloseArgs({ root: s0[0], kind: s0[1], bound: s0[2], windowId: s0[3], agentPk: s0[4], audience: s0[5] }));
+    cu.verify_disclosure_newest_root = await viaBuffer(PROBE, payload, (b) => verifyDisclosureIx(PROBE, b));
+    // ROOT_HISTORY - 1 more commits, one per leaf (commitEach), as ROOT_HISTORY - 1 single-note operations would make
+    const roots = [proofRoot];
+    for (let left = ROOT_HISTORY - 1; left > 0;) {
+      const batch = Array.from({ length: Math.min(28, left) }, () => randomField());
+      await send(connection, payer, [probeInsertIx(PROBE, batch, true)], { cuLimit: CU });
       for (const l of batch) { local.insert(l); roots.push(local.root); }
+      left -= batch.length;
     }
-    const ring = new Set((await readPool(PROBE)).roots);
-    expect(roots.length).toBeGreaterThan(ROOT_HISTORY);
-    for (const r of roots.slice(-ROOT_HISTORY)) expect(ring.has(r)).toBe(true);
-    expect(ring.has(roots[roots.length - ROOT_HISTORY - 1])).toBe(false); // the 129th newest has left the ring
+    const full = await readPool(PROBE);
+    expect(full.lastRoot).toBe(local.root);
+    expect(new Set(full.roots)).toEqual(new Set(roots)); // exactly the newest ROOT_HISTORY roots
+    // the proof's root is now the oldest one in the ring (worst case of the newest-first scan) and still verifies
+    cu.verify_disclosure_oldest_root = await viaBuffer(PROBE, payload, (b) => verifyDisclosureIx(PROBE, b));
+    // one more operation evicts it
+    const last = randomField();
+    await send(connection, payer, [probeInsertIx(PROBE, [last])], { cuLimit: CU });
+    local.insert(last);
+    const after = await readPool(PROBE);
+    expect(after.roots.includes(proofRoot)).toBe(false);
+    expect(after.roots.includes(roots[1])).toBe(true);
+    await expectCode(viaBuffer(PROBE, payload, (b) => verifyDisclosureIx(PROBE, b)), POOL_ERROR.UnknownRoot);
   });
 
   it('compute units stay within budget (written to solana/target-so, not a tracked file)', () => {
     const budget: Record<string, number> = {
       verify_spend: 200_000, verify_disclose: 200_000, insert_1_leaf_tx: 60_000, insert_13_leaves_tx: 400_000, insert_marginal_per_leaf: 30_000,
       verify_disclosure_with_root_check: 200_000, verify_stream_with_root_check: 250_000,
+      verify_disclosure_newest_root: 200_000, verify_disclosure_oldest_root: 250_000, initialize_and_grow_tx: 200_000,
     };
     for (const [k, max] of Object.entries(budget)) {
       expect(cu[k], k).toBeGreaterThan(0);

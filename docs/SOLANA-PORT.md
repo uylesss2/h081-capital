@@ -46,8 +46,12 @@ for localnet are generated with `solana-keygen` into `solana/keys/` (gitignored)
 ### 3.1 `stipend_pool`
 
 Accounts:
-- `Pool` PDA `["pool"]`: Merkle state (filled subtrees, next index, root history ring of 128 like
-  ROOT_HISTORY_SIZE of the EVM pool), nothing else. Created once by `initialize` (permissionless, idempotent-refusing; no admin field). `initialize` also creates
+- `Pool` PDA `["pool"]`: Merkle state (filled subtrees, next index, a ring of the last 1,024 roots, one root per
+  state-changing operation), nothing else; 33,424 B. Created once by `initialize`, which only the program's upgrade
+  authority may call (read from the ProgramData account; idempotent-refusing; no admin field). Accounts created by
+  CPI are capped at 10,240 B, so `initialize` creates the PDA at 10,240 B without a discriminator and `grow_pool`
+  (+10 KiB per call, rent topped up by the caller) completes it; the call that reaches full size writes the
+  discriminator and the empty tree. initialize + 3 x grow_pool are sent as one transaction. `initialize` also creates
   `Config` `["config"]` (config authority, deposits_paused, default caps); `create_vault` creates `AssetCap` `["cap", mint]`.
 - `Nullifier` PDA `["nf", nullifier_be32]`: created on spend; existing account = double spend (`init` fails).
 - Per-asset vault: token account owned by PDA `["vault_auth"]`, one per mint, ATA-style PDA
@@ -118,14 +122,14 @@ upload, instruction builders, a `SolanaWallet` with the same surface as `Wallet`
 `src/inputs.ts`, `src/prover.ts` and `src/encryption.ts` unchanged.
 
 Tests: a local `solana-test-validator` in WSL (Ubuntu; Solana CLI 4.3.2; the existing script pattern in
-`solana/scripts/start-validator.sh`, but loading our `.so` files with `--bpf-program`, on its own ports,
+`solana/scripts/start-validator.sh`, but loading our `.so` files with `--bpf-program` (stipend_pool: `--upgradeable-program`, see 4b), on its own ports,
 never touching other validators already running) driven from Windows Node with vitest
 (`test/solana/*.test.ts`, `npm run test:solana`). Mints are created locally (SPL Token and Token-2022). No
 mainnet mint is hard-coded in programs; the SDK takes mints as parameters.
 
 ## 4a. Amendments after review (2026-10-26)
 
-- Root history is 128 (the EVM pool's ROOT_HISTORY_SIZE); an earlier draft said 100.
+- Root history is 128 (the EVM pool's ROOT_HISTORY_SIZE); an earlier draft said 100. Superseded 2026-10-31, see 4b.
 - Token destinations that extDataHash does not bind must be the owner's canonical associated token account:
   the spend public payout (`Recipient` otherwise), the lender leg (escrowed otherwise) and
   `pull_lender_share` (`LenderAccount` otherwise). Without this a submitter could divert a share to a
@@ -135,6 +139,22 @@ mainnet mint is hard-coded in programs; the SDK takes mints as parameters.
   the inbox at funding time (not repayment, matching onPledge) and refuses to fund while that escrow is non-empty.
 - safety_pool prices shares on an accounted `assets` figure with virtual shares/assets (1,000 / 1), so
   donations to the vault do not move the price and first-depositor inflation does not pay.
+
+
+## 4b. Amendments before mainnet (2026-10-31, stipend_pool security review)
+
+- Root history DoS: with one root per leaf and 128 roots, anyone could flush the ring with cheap zero-amount
+  transacts/grants (17 roots per grant) and make every pending proof stale. Now one root per INSTRUCTION
+  (`merkle::insert` stages, `merkle::commit_root` advances the ring once after an operation's inserts; the
+  proof's root is checked before them) and ROOT_HISTORY = 1,024, so a proof survives the next 1,023 operations.
+  `is_known_root` scans newest first. The Pool account grew to 33,424 B (see 3.1: `grow_pool`).
+- `initialize` was permissionless (the first caller set the config authority). It now requires the signer to
+  be the program's upgrade authority: `program_data` must be the loader's ProgramData PDA `[program id]` and
+  its recorded upgrade authority must equal the payer. The ProgramData header is parsed by hand
+  (`upgrade_authority`): anchor's `Account<ProgramData>` / `Program::programdata_address` pull bincode into
+  the binary (+57 KB of .so, i.e. deploy rent). Local validators load stipend_pool with
+  `--upgradeable-program <id> <so> <authority>`, authority = the localnet-only
+  `LOCALNET_UPGRADE_AUTHORITY` (test/solana/config-authority.ts).
 
 ## 5. Out of scope
 

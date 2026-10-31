@@ -14,6 +14,7 @@ import {
   decodeRegistry, decodeSlot, collectIx, decodeLedger, fundIx, ledgerPda, loanInitializeIx, openSlotIx, registryPda, settleIx, shortfallIx, slotEscrow,
   slotInbox, slotPda, syncIx,
 } from '../../src/solana/lender.js';
+import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 
 const RPC = process.env.STIPEND_LOAN_RPC;
 const LOAN = LOCALNET_LOAN_PROGRAM_ID;
@@ -252,7 +253,9 @@ suite('stream-backed lending through stream_loan', () => {
     if (!RPC) return;
     pool = new SolanaPool(connection);
     await fundSol(authority.publicKey, ownerKp.publicKey, agentKp.publicKey, lenderKp.publicKey, strangerKp.publicKey, vendorKp.publicKey, borrowerKp.publicKey);
-    await pool.initialize(payer);
+    // stipend_pool is loaded upgradeable on the loan validator; only its upgrade authority may initialize
+    await fundSol(LOCALNET_UPGRADE_AUTHORITY.publicKey);
+    await pool.initialize(LOCALNET_UPGRADE_AUTHORITY);
     mint = await createMint(authority);
     otherMint = await createMint(authority);
     for (const k of [ownerKp, lenderKp]) await send(connection, authority, [createAtaIx(authority.publicKey, k.publicKey, mint)]);

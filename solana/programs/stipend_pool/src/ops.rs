@@ -242,6 +242,8 @@ fn spend_nullifier<'info>(
     emitter.emit(&NewNullifier { nullifier: *nf })
 }
 
+/// Appends a note and emits its commitment event. The root is staged; the operation commits it once
+/// (merkle::commit_root) after its last insert.
 fn insert_with_memo(pool: &mut Pool, commitment: &Fe, memo: &[u8], emitter: &mut Emitter) -> Result<u32> {
     let index = merkle::insert(pool, commitment)?;
     emitter.commitment(commitment, index, memo)?;
@@ -368,6 +370,7 @@ pub fn transact<'info>(ctx: Context<'info, Transact<'info>>) -> Result<()> {
 
     insert_with_memo(&mut pool, &args.output_commitments[0], ext.outputs[0], &mut emitter)?;
     insert_with_memo(&mut pool, &args.output_commitments[1], ext.outputs[1], &mut emitter)?;
+    merkle::commit_root(&mut pool);
 
     if ext.ext_amount < 0 {
         let v = vault.as_ref().unwrap();
@@ -424,6 +427,7 @@ pub fn grant<'info>(ctx: Context<'info, Grant<'info>>) -> Result<()> {
         insert_with_memo(&mut pool, &args.allowance_commitments[i], ext.allowances[i], &mut emitter)?;
     }
     insert_with_memo(&mut pool, &args.change_commitment, ext.change, &mut emitter)?;
+    merkle::commit_root(&mut pool);
     emitter.emit(&NewGrant { total_commitment: args.total_commitment, first_index: first })
 }
 
@@ -506,6 +510,8 @@ pub fn spend<'info>(ctx: Context<'info, Spend<'info>>) -> Result<()> {
         // A public spend whose net is zero (pledgeBps 10000) has no payout note to insert.
         insert_with_memo(&mut pool, &args.pay_commitment, ext.payment, &mut emitter)?;
     }
+    // one root for the whole spend (the new allowance and, if any, the payment note)
+    merkle::commit_root(&mut pool);
 
     if args.lender_amount > 0 {
         require!(!is_zero(&args.lender_addr), PoolError::Lender);
@@ -611,6 +617,7 @@ pub fn delegate<'info>(ctx: Context<'info, Delegate<'info>>) -> Result<()> {
         insert_with_memo(&mut pool, &args.sub_commitments[i], ext.subs[i], &mut emitter)?;
     }
     insert_with_memo(&mut pool, &args.residual_commitment, ext.residual, &mut emitter)?;
+    merkle::commit_root(&mut pool);
     emitter.emit(&NewDelegation { nullifier: args.nullifier, first_index: first })
 }
 

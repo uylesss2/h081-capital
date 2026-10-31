@@ -13,11 +13,11 @@ import { Account } from '../../src/client.js';
 import { allowanceCommitment, initCrypto, lenderClaimable, randomField } from '../../src/crypto.js';
 import { randomViewingKey } from '../../src/encryption.js';
 import {
-  OP_CU_LIMIT, POOL_ERROR, SPEND_ROOT_OFFSET, SolanaLenderWallet, SolanaPool, SolanaWallet, be32, customErrorCode, decodePool, encodeSpendArgs, escrowPda,
+  OP_CU_LIMIT, POOL_ERROR, ROOT_HISTORY, SPEND_ROOT_OFFSET, SolanaLenderWallet, SolanaPool, SolanaWallet, be32, customErrorCode, decodePool, encodeSpendArgs, escrowPda,
   fieldOf, nullifierPda, poolPda, pullLenderShareIx, send, spendIx, vaultPda, type LocatedEvent, type SolOwnedAllowance,
   U64_MAX, assetCapPda, configPda, decodeAssetCaps, decodeConfig, setAssetCapsIx, setConfigAuthorityIx, setDefaultCapsIx, setDepositsPausedIx,
 } from '../../src/solana/index.js';
-import { LOCALNET_CONFIG_AUTHORITY } from './config-authority.js';
+import { LOCALNET_CONFIG_AUTHORITY, LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 
 const RPC = process.env.SOLANA_RPC ?? 'http://127.0.0.1:8999';
 const connection = new Connection(RPC, 'confirmed');
@@ -50,6 +50,14 @@ async function nextIndex(): Promise<number> {
   const info = await connection.getAccountInfo(poolPda(pool.programId), 'confirmed');
   return decodePool(info!.data).nextIndex;
 }
+
+/** Ring slot of the pool's newest committed root. */
+async function rootIndex(): Promise<number> {
+  const info = await connection.getAccountInfo(poolPda(pool.programId), 'confirmed');
+  return decodePool(info!.data).currentRootIndex;
+}
+/** Ring slots advanced from `before` to `after` (the ring wraps at ROOT_HISTORY). */
+const advanced = (before: number, after: number) => (after - before + ROOT_HISTORY) % ROOT_HISTORY;
 
 const bal = (mint: PublicKey, owner: PublicKey, tp = TOKEN_PROGRAM_ID) => pool.tokenBalance(pool.ata(mint, owner, tp));
 
@@ -106,7 +114,9 @@ beforeAll(async () => {
   const prog = await connection.getAccountInfo(pool.programId);
   if (!prog?.executable) throw new Error('stipend_pool is not loaded; run npm run solana:build and restart the validator');
   await airdrop(funder.publicKey, 100);
-  await pool.initialize(funder, { authority: LOCALNET_CONFIG_AUTHORITY.publicKey });
+  // only the upgrade authority the validator loaded stipend_pool with may initialize (pool.test.ts may have already)
+  await airdrop(LOCALNET_UPGRADE_AUTHORITY.publicKey, 2);
+  await pool.initialize(LOCALNET_UPGRADE_AUTHORITY, { authority: LOCALNET_CONFIG_AUTHORITY.publicKey });
   usd = await createMint(connection, funder, funder.publicKey, funder.publicKey, 6, undefined, { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
   t22 = await createMint(connection, funder, funder.publicKey, funder.publicKey, 6, undefined, { commitment: 'confirmed' }, TOKEN_2022_PROGRAM_ID);
   [owner, agentA, agentB, agentC, shop] = await Promise.all([wallet(), wallet(), wallet(), wallet(), wallet()]);
@@ -119,6 +129,7 @@ beforeAll(async () => {
 describe('treasury', () => {
   it('deposits with a relayer fee and sees a shielded balance', async () => {
     const before = await nextIndex();
+    const rootBefore = await rootIndex();
     const res = await owner.deposit(usd, 2_000_000n, { relayer: relayer.publicKey, fee: 1_000n });
     cu.transact_deposit = res.tx.computeUnits;
     expect(owner.balance(usd)).toBe(1_999_000n);
@@ -126,6 +137,7 @@ describe('treasury', () => {
     expect(await bal(usd, relayer.publicKey)).toBe(1_000n);
     expect(await bal(usd, owner.signer.publicKey)).toBe(8_000_000n);
     expect(await nextIndex()).toBe(before + 2);
+    expect(advanced(rootBefore, await rootIndex())).toBe(1); // two notes, one root: roots are per operation
     // both input nullifiers are marked spent on chain
     const evs = eventsOf(res.tx.signature);
     const nfs = evs.filter((e) => e.name === 'NewNullifier');
@@ -151,12 +163,15 @@ describe('treasury', () => {
 
 describe('distribution', () => {
   it('funds three agents under three policies in one transaction', async () => {
+    const [leavesBefore, rootBefore] = [await nextIndex(), await rootIndex()];
     const res = await owner.grant(usd, [
       { to: agentA.address, amount: 300_000n, maxPerTx: 100_000n, windowCap: 150_000n },
       { to: agentB.address, amount: 200_000n },
       { to: agentC.address, amount: 100_000n, recipients: [merchant.publicKey] },
     ]);
     cu.grant = res.tx.computeUnits;
+    expect(await nextIndex()).toBe(leavesBefore + 17);
+    expect(advanced(rootBefore, await rootIndex())).toBe(1); // 17 notes, one root
     expect(res.total).toBe(600_000n);
     expect(owner.balance(usd)).toBe(1_999_000n - 5_000n - 600_000n);
     expect(eventsOf(res.tx.signature).filter((e) => e.name === 'NewCommitment')).toHaveLength(17);
@@ -187,12 +202,14 @@ describe('spending under policy', () => {
 
   it('has no proof over the per-transaction cap or the window cap', async () => {
     const before = await nextIndex();
+    const rootBefore = await rootIndex();
     const a = agentA.agentAllowances(usd).filter((x) => x.allowance.remaining > 0n)[0];
     await expect(agentA.pay(a, 100_001n, merchant.publicKey)).rejects.toThrow();
     await agentA.pay(a, 100_000n, merchant.publicKey); // 150k used in the window
     const a2 = agentA.agentAllowances(usd).filter((x) => x.allowance.remaining > 0n)[0];
     await expect(agentA.pay(a2, 1n, merchant.publicKey)).rejects.toThrow();
     expect(await nextIndex()).toBe(before + 1); // only the valid spend inserted a successor
+    expect(advanced(rootBefore, await rootIndex())).toBe(1); // ...and committed one root; failed ones none
   });
 
   it('allow-listed agent can pay the merchant and nobody else', async () => {
@@ -206,8 +223,11 @@ describe('spending under policy', () => {
 
   it('shielded payment between agents reveals nothing and can be unshielded later', async () => {
     const b = agentB.agentAllowances(usd).filter((x) => x.allowance.remaining > 0n)[0];
+    const [leavesBefore, rootBefore] = [await nextIndex(), await rootIndex()];
     const res = await agentB.pay(b, 40_000n, shop.address);
     cu.spend_shielded = res.tx.computeUnits;
+    expect(await nextIndex()).toBe(leavesBefore + 2); // new allowance + payment note (the optional second insert)
+    expect(advanced(rootBefore, await rootIndex())).toBe(1);
     const tx = await connection.getTransaction(res.tx.signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
     expect(tx!.transaction.message.staticAccountKeys.some((k) => k.equals(usd))).toBe(false);
     expect(eventsOf(res.tx.signature).some((e) => e.name === 'PublicPayout')).toBe(false);
@@ -295,8 +315,11 @@ describe('hierarchical delegation and bearer notes', () => {
   it('an agent splits its allowance into a tighter sub-allowance without the owner', async () => {
     agentD = await wallet();
     const a = agentA.agentAllowances(usd).filter((x) => x.allowance.remaining > 0n)[0];
+    const [leavesBefore, rootBefore] = [await nextIndex(), await rootIndex()];
     const res = await agentA.delegate(a, [{ to: agentD.address, amount: 30_000n, maxPerTx: 10_000n, windowCap: 20_000n }]);
     cu.delegate = res.tx.computeUnits;
+    expect(await nextIndex()).toBe(leavesBefore + 5);
+    expect(advanced(rootBefore, await rootIndex())).toBe(1);
     expect(eventsOf(res.tx.signature).some((e) => e.name === 'NewDelegation')).toBe(true);
     await agentD.sync();
     const d = agentD.agentAllowances(usd).filter((x) => x.allowance.remaining > 0n)[0];

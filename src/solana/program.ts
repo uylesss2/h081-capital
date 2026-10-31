@@ -22,11 +22,26 @@ export const POOL_ERROR = {
   AmountOverflow: 6023, WrongMint: 6024, WrongTokenAccount: 6025, WrongVault: 6026, WrongEscrow: 6027, NothingOwed: 6028,
   DepositShortfall: 6029, FeeExceedsAmount: 6030, WrongTokenProgram: 6031, BufferAuthority: 6032, AccountInUse: 6033, LenderAccount: 6034,
   DepositsPaused: 6035, DepositTooLarge: 6036, DepositCapExceeded: 6037, ConfigAuthority: 6038, WrongAssetCap: 6039,
+  UpgradeAuthority: 6040, PoolComplete: 6041, PoolAccount: 6042,
 } as const;
 
 export const LEVELS = 20;
-/** Recent roots a proof may use (MerkleTreeWithHistory.ROOT_HISTORY_SIZE in the EVM reference). */
-export const ROOT_HISTORY = 128;
+/**
+ * Committed roots the pool keeps: one per state-changing operation (not per leaf), so a proof stays valid for
+ * the next ROOT_HISTORY - 1 operations. (The EVM reference kept 128, one per leaf.)
+ */
+export const ROOT_HISTORY = 1024;
+/** Full size of the ["pool"] account: discriminator | next_index | current_root_index | [20][32] | [1024][32]. */
+export const POOL_SIZE = 8 + 4 + 4 + 32 * LEVELS + 32 * ROOT_HISTORY;
+/** `initialize` creates the pool account at this size (CPI creation limit); `grow_pool` adds 10 KiB per call. */
+export const POOL_INIT_LEN = Math.min(POOL_SIZE, 10_240);
+export const POOL_GROW_STEP = 10_240;
+/** grow_pool calls that bring a pool account of `len` bytes to POOL_SIZE. */
+export const poolGrowsNeeded = (len: number) => Math.max(0, Math.ceil((POOL_SIZE - len) / POOL_GROW_STEP));
+/** The BPF upgradeable loader, owner of every upgradeable program and its ProgramData account. */
+export const BPF_LOADER_UPGRADEABLE_ID = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+/** ProgramData account of an upgradeable program (holds its upgrade authority). */
+export const programDataAddress = (programId: PublicKey) => PublicKey.findProgramAddressSync([programId.toBytes()], BPF_LOADER_UPGRADEABLE_ID)[0];
 export const BUFFER_HEADER = 8 + 32 + 8 + 4 + 1;
 /** A buffer is created with up to this many payload bytes (CPI account creation is capped at 10 KiB)... */
 export const BUFFER_MAX_INIT = 10_240 - BUFFER_HEADER;
@@ -57,9 +72,24 @@ export interface DepositGuard {
   maxPerDeposit?: bigint;
 }
 
+/**
+ * `initialize` alone: creates the pool account at POOL_INIT_LEN and the config. `payer` must be the program's
+ * upgrade authority. Use initializePoolIxs, which adds the grow_pool calls that complete the pool.
+ */
 export function initializeIx(programId: PublicKey, payer: PublicKey, guard: DepositGuard = {}): TransactionInstruction {
-  return ix(programId, 'initialize', [w(poolPda(programId)), w(payer, true), r(SystemProgram.programId), w(configPda(programId))],
+  return ix(programId, 'initialize',
+    [w(poolPda(programId)), w(payer, true), r(SystemProgram.programId), w(configPda(programId)), r(programDataAddress(programId))],
     (guard.authority ?? payer).toBytes(), u64le(guard.maxTotal ?? U64_MAX), u64le(guard.maxPerDeposit ?? U64_MAX));
+}
+
+/** Grows the pool account by 10 KiB toward POOL_SIZE (the last call writes the empty tree). Permissionless. */
+export function growPoolIx(programId: PublicKey, payer: PublicKey): TransactionInstruction {
+  return ix(programId, 'grow_pool', [w(poolPda(programId)), w(payer, true), r(SystemProgram.programId)]);
+}
+
+/** initialize + the grow_pool calls that complete the pool: one transaction. `payer` = upgrade authority. */
+export function initializePoolIxs(programId: PublicKey, payer: PublicKey, guard: DepositGuard = {}): TransactionInstruction[] {
+  return [initializeIx(programId, payer, guard), ...Array.from({ length: poolGrowsNeeded(POOL_INIT_LEN) }, () => growPoolIx(programId, payer))];
 }
 
 /** Config authority only: one asset's caps. */
@@ -123,9 +153,9 @@ export function verifyStreamIx(programId: PublicKey, buffer: PublicKey): Transac
   return ix(programId, 'verify_stream', [r(poolPda(programId)), r(buffer)]);
 }
 
-/** Probe build only: append raw leaves. */
-export function probeInsertIx(programId: PublicKey, leaves: bigint[]): TransactionInstruction {
-  return ix(programId, 'probe_insert', [w(poolPda(programId))], u32le(leaves.length), ...leaves.map(be32));
+/** Probe build only: append raw leaves; one root for the call (as operations do) or, with commitEach, one per leaf. */
+export function probeInsertIx(programId: PublicKey, leaves: bigint[], commitEach = false): TransactionInstruction {
+  return ix(programId, 'probe_insert', [w(poolPda(programId))], u32le(leaves.length), ...leaves.map(be32), Uint8Array.of(commitEach ? 1 : 0));
 }
 
 // ------------------------------------------------------------- payload encoders
@@ -152,10 +182,19 @@ export function encodeStreamArgs(a: StreamArgs): Uint8Array {
 
 // ------------------------------------------------------------- account decoders
 
+/** Anchor account discriminator of Pool: sha256("account:Pool")[0..8]. */
+export const POOL_DISCRIMINATOR = sha256(new TextEncoder().encode('account:Pool')).subarray(0, 8);
+
+/** Whether a ["pool"] account is full size and carries the Pool discriminator (grow_pool finished). */
+export function isPoolComplete(data: Uint8Array): boolean {
+  return data.length === POOL_SIZE && POOL_DISCRIMINATOR.every((b, i) => data[i] === b);
+}
+
 export interface PoolState { nextIndex: number; currentRootIndex: number; filledSubtrees: bigint[]; roots: bigint[]; lastRoot: bigint }
 
-/** Decodes the zero-copy Pool account (discriminator | u32 | u32 | [20][32] | [128][32]). */
+/** Decodes the zero-copy Pool account (discriminator | u32 | u32 | [20][32] | [1024][32]). Throws on a pool that is not complete. */
 export function decodePool(data: Uint8Array): PoolState {
+  if (!isPoolComplete(data)) throw new Error(`pool account is not complete (${data.length} of ${POOL_SIZE} bytes); finish it with grow_pool`);
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const nextIndex = dv.getUint32(8, true);
   const currentRootIndex = dv.getUint32(12, true);
