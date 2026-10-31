@@ -146,6 +146,21 @@ describe('constants and error tables', () => {
     expect([SAFETY_VIRTUAL_SHARES, SAFETY_VIRTUAL_ASSETS]).toEqual([1_000n, 1n]);
   });
 
+  it('every launch-wallet deny-list is exactly the three H081 launch wallets (creator fees are never a source)', () => {
+    const launch = ['2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw', 'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ'];
+    const listed = (text: string, re: RegExp) => {
+      const block = text.match(re);
+      expect(block, re.source).not.toBeNull();
+      return [...block![1].matchAll(/["'](\w{32,44})["']/g)].map((m) => m[1]).sort();
+    };
+    const rust = /pub const LAUNCH_WALLETS: \[Pubkey; 3\] = \[([^\]]*)\];/;
+    const repo = (p: string) => readFileSync(resolve(SOL, '..', p), 'utf8');
+    expect(listed(src('safety_pool/src/lib.rs'), rust)).toEqual(launch); // top_up
+    expect(listed(src('stream_loan/src/fee.rs'), rust)).toEqual(launch); // origination-fee TREASURY build check
+    expect(listed(repo('relayer/config.ts'), /LAUNCH_WALLET_DENYLIST[^=]*= new Set\(\[([^\]]*)\]/)).toEqual(launch); // relayer fee recipient
+    expect(listed(repo('scripts/flywheel/common.mts'), /DENY_LIST[^=]*= Object\.freeze\(\[([^\]]*)\]/)).toEqual(launch); // buyback
+  });
+
   it('every SDK error table is the Rust enum in order (6000 + index)', () => {
     expect(POOL_ERROR).toEqual(table(variants('stipend_pool/src/error.rs', 'PoolError')));
     expect(LOAN_ERROR).toEqual(table(variants('stream_loan/src/error.rs', 'LoanError')));

@@ -28,9 +28,12 @@
     "solana:preflight": "tsx scripts/solana-preflight.mts",
     "ceremony": "node scripts/ceremony.mjs",
     "relayer": "tsx relayer/main.ts",
+    "flywheel:buyback": "tsx scripts/flywheel/buyback.mts",
+    "flywheel:rehearse": "tsx scripts/flywheel/rehearse.mts",
     "test:relayer": "vitest run test/relayer test/sdk/solana-alt.test.ts"
   },
   "dependencies": {
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
     "@noble/ciphers": "1.3.0",
     "@noble/curves": "1.9.2",
     "@noble/hashes": "1.8.0",
