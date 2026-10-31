@@ -8,11 +8,15 @@
 //! the new inbox balance as repayment and forwards it to the slot lender; what cannot be forwarded
 //! (lender account missing or frozen) is held for `collect`. The lender pulls its vested share with
 //! `claim`, a lender-claim spend submitted through this program with the slot PDA as signer.
+//!
+//! Platform fee: `fund` takes a 0.25% origination fee out of the payout for the treasury (fee.rs).
+//! The rate and the treasury are compile-time constants; the loan still owes the full principal.
 #![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::set_return_data;
 
 pub mod error;
+pub mod fee;
 pub mod pool;
 pub mod state;
 pub mod token;
@@ -35,7 +39,10 @@ pub struct LoanFunded {
     pub loan_ref: u64,
     pub lender: Pubkey,
     pub asset: Pubkey,
+    /// the full principal: what the loan owes
     pub principal: u64,
+    /// origination fee sent to the treasury; `payout_to` received principal - fee
+    pub fee: u64,
     pub payout_to: Pubkey,
 }
 
@@ -176,8 +183,10 @@ pub mod stream_loan {
 
     /// Funds a slot against a stream proof staged in a stipend_pool buffer as (Proof, StreamArgs).
     /// The proof must name this slot PDA and loan ref, the loan asset and a stream that has started;
-    /// the pool verifies it (known root + Groth16) by CPI. The principal goes from the lender to
-    /// `payout_to`. Creates the slot's inbox for the asset so routed shares can arrive.
+    /// the pool verifies it (known root + Groth16) by CPI. The principal leaves the lender: principal - fee
+    /// goes to `payout_to` and the origination fee (fee::origination_fee, rounds down) to the treasury's
+    /// associated token account for the asset (no fee if that account is frozen). The loan owes the full
+    /// principal. Creates the slot's inbox for the asset so routed shares can arrive.
     pub fn fund(ctx: Context<Fund>, loan_ref: u64, principal: u64) -> Result<()> {
         let a = &ctx.accounts;
         require!(!a.slot.funded, LoanError::AlreadyFunded);
@@ -191,6 +200,18 @@ pub mod stream_loan {
         let payout = token::read_token_account(&a.payout_to, tp).ok_or(error!(LoanError::BadPayout))?;
         require_keys_eq!(payout.mint, a.mint.key(), LoanError::BadPayout);
         let decimals = token::mint_decimals(&a.mint, tp)?;
+        let mut fee = fee::origination_fee(principal).ok_or(error!(LoanError::Overflow))?;
+        require_keys_eq!(a.treasury.key(), token::ata(&fee::TREASURY, a.mint.key, tp), LoanError::BadTreasury);
+        if fee > 0 {
+            let tr = token::read_token_account(&a.treasury, tp).ok_or(error!(LoanError::BadTreasury))?;
+            require!(tr.owner == fee::TREASURY && tr.mint == a.mint.key(), LoanError::BadTreasury);
+            // A frozen treasury account (the asset issuer froze it, or the mint creates accounts frozen) must
+            // never block lending in that asset for everyone: the loan is funded without a fee instead.
+            if tr.frozen {
+                fee = 0;
+            }
+        }
+        let to_payout = principal.checked_sub(fee).ok_or(error!(LoanError::Overflow))?;
         pool::verify_stream(&a.pool_program, &a.pool_state, &a.buffer)?;
         let min_remaining = be32_to_u128(&args.min_remaining)?;
         let min_rate = be32_to_u128(&args.min_rate)?;
@@ -204,7 +225,10 @@ pub mod stream_loan {
             &a.ata_program, &a.lender.to_account_info(), &a.inbox, &a.slot.to_account_info(), &a.mint,
             &a.system_program.to_account_info(), &a.token_program,
         )?;
-        token::transfer_checked(&a.token_program, &a.lender_source, &a.mint, &a.payout_to, &a.lender.to_account_info(), principal, decimals, &[])?;
+        token::transfer_checked(&a.token_program, &a.lender_source, &a.mint, &a.payout_to, &a.lender.to_account_info(), to_payout, decimals, &[])?;
+        if fee > 0 {
+            token::transfer_checked(&a.token_program, &a.lender_source, &a.mint, &a.treasury, &a.lender.to_account_info(), fee, decimals, &[])?;
+        }
         // StreamLoan.onPledge credits only shares that arrive while the loan is funded. Whatever already sits
         // in the inbox now (routed or sent before funding) is held for `collect`, never counted as repayment.
         let pre_fund = token::read_token_account(&a.inbox, tp).map(|v| v.amount).unwrap_or(0);
@@ -233,7 +257,7 @@ pub mod stream_loan {
         s.funded_at = t;
         s.payout_to = ctx.accounts.payout_to.key();
         s.stream_start = args.stream_start;
-        emit!(LoanFunded { loan_ref, lender: s.lender, asset: s.asset, principal, payout_to: s.payout_to });
+        emit!(LoanFunded { loan_ref, lender: s.lender, asset: s.asset, principal, fee, payout_to: s.payout_to });
         Ok(())
     }
 
@@ -393,6 +417,10 @@ pub struct Fund<'info> {
     pub ledger: Account<'info, Ledger>,
     /// CHECK: stipend_pool escrow ["owed", mint, fieldOf(slot), loan_ref] (address checked; may not exist; must be empty)
     pub escrow: UncheckedAccount<'info>,
+    /// CHECK: fee::TREASURY's associated token account for the loan asset (address checked; owner and
+    /// mint checked when a fee is due; may not exist when the fee rounds to 0; if frozen, no fee is taken)
+    #[account(mut)]
+    pub treasury: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

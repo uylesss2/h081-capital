@@ -5,8 +5,8 @@
 //! - Stakers `deposit` for shares at the price (assets + 1) / (total shares + 1,000). The virtual shares and
 //!   assets (an offset in the style of OpenZeppelin ERC4626) make share-price inflation by a first depositor
 //!   unprofitable, and the pool's assets are an accounted figure (`SafetyConfig.assets`, moved only by
-//!   deposits, premiums, withdrawals and slashes), so tokens sent straight to the vault never move the price;
-//!   they stay in the vault unaccounted. Premiums raise the price, slashes lower it.
+//!   deposits, premiums, top-ups, withdrawals and slashes), so tokens sent straight to the vault never move
+//!   the price; they stay in the vault unaccounted. Premiums and top-ups raise the price, slashes lower it.
 //!   `request_unbond` starts a 14-day cooldown during which the shares stay at risk; `withdraw` redeems them at the price on that day.
 //! - `insure(loan_ref, premium)`: only the stream_loan slot's lender, only for a loan that is funded, not
 //!   settled, has an expiry and has not expired. One cover per loan ref across every mint's pool (PDA
@@ -17,6 +17,13 @@
 //!   pool's token, valued 1:1 in base units (see caveats), and marks the cover paid. A slash with an
 //!   empty pool fails (`PoolEmpty`) so the cover stays open. A slash that takes the whole pool bumps the
 //!   generation, retiring every share (including unbonding ones); the next deposit starts a fresh share count.
+//! - `top_up(amount)`: anyone adds tokens to the pool's assets without minting shares, raising what every
+//!   outstanding share (unbonding ones too) redeems for. The H081 flywheel pays stakers this way from
+//!   PLATFORM fees only (docs/FLYWHEEL.md). Refused while no shares exist (nobody to pay; the tokens would
+//!   go to the next depositor), and refused from the token launch wallets (`LAUNCH_WALLETS`): the token's
+//!   trading creator fees are never a source. Like a premium, a top-up into a pool whose only shares are a
+//!   first depositor's dust mostly accrues to the virtual shares, so it cannot inflate the price at a
+//!   later depositor's expense.
 //!
 //! CAVEATS (docs/tokenomics.md, restated): with lender-chosen premiums and 1:1 valuation a lender can fund
 //! a loan to itself, let it lapse past the grace period and slash the pool for the principal; until
@@ -52,6 +59,14 @@ pub const SAFETY_SEED: &[u8] = b"safety";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const POSITION_SEED: &[u8] = b"position";
 pub const COVER_SEED: &[u8] = b"cover";
+
+/// H081 launch wallets. `top_up` refuses them as signer or as source owner so the token's trading
+/// creator fees can never be routed into the pool.
+pub const LAUNCH_WALLETS: [Pubkey; 3] = [
+    pubkey!("2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP"),
+    pubkey!("FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ"),
+    pubkey!("5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw"),
+];
 
 /// Virtual shares and assets added to the pool's totals when pricing shares (see the module docs).
 pub const VIRTUAL_SHARES: u128 = 1_000;
@@ -277,6 +292,39 @@ pub mod safety_pool {
         Ok(())
     }
 
+    /// Anyone but a launch wallet: adds what the vault receives of `amount` to the pool's assets, minting
+    /// no shares, so every outstanding share of the current generation redeems for more.
+    pub fn top_up(ctx: Context<TopUp>, amount: u64) -> Result<()> {
+        require!(amount > 0, SafetyError::Amount);
+        let funder = ctx.accounts.funder.key();
+        require!(
+            !LAUNCH_WALLETS.contains(&funder) && !LAUNCH_WALLETS.contains(&ctx.accounts.from.owner),
+            SafetyError::LaunchWallet
+        );
+        require!(ctx.accounts.config.total_shares > 0, SafetyError::NoShares);
+        let before = ctx.accounts.vault.amount;
+        token_interface::transfer_checked(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                TransferChecked {
+                    from: ctx.accounts.from.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                    authority: ctx.accounts.funder.to_account_info(),
+                },
+            ),
+            amount,
+            ctx.accounts.mint.decimals,
+        )?;
+        ctx.accounts.vault.reload()?;
+        let received = ctx.accounts.vault.amount.checked_sub(before).ok_or(error!(SafetyError::Amount))?;
+        require!(received > 0, SafetyError::Amount);
+        let c = &mut ctx.accounts.config;
+        c.assets = c.assets.checked_add(received).ok_or(error!(SafetyError::Overflow))?;
+        emit!(ToppedUp { mint: c.mint, funder, amount: received, assets: c.assets, generation: c.generation });
+        Ok(())
+    }
+
     /// View (return data, u64 LE; use simulateTransaction): the shortfall slash would see now.
     pub fn shortfall(ctx: Context<ShortfallView>, loan_ref: u64) -> Result<u64> {
         current_shortfall(&ctx.accounts.slot, &ctx.accounts.inbox, &ctx.accounts.ledger, &ctx.accounts.escrow, loan_ref)
@@ -313,7 +361,7 @@ pub struct SafetyConfig {
     pub generation: u64,
     pub bump: u8,
     pub vault_bump: u8,
-    /// The pool's accounted assets: deposits + premiums - withdrawals - slashes. Shares are priced on
+    /// The pool's accounted assets: deposits + premiums + top-ups - withdrawals - slashes. Shares are priced on
     /// this, not on the vault balance, so direct transfers to the vault do not move the price.
     pub assets: u64,
 }
@@ -482,6 +530,19 @@ pub struct Slash<'info> {
 }
 
 #[derive(Accounts)]
+pub struct TopUp<'info> {
+    #[account(mut, seeds = [SAFETY_SEED, mint.key().as_ref()], bump = config.bump, has_one = mint, has_one = vault, has_one = token_program)]
+    pub config: Account<'info, SafetyConfig>,
+    pub mint: InterfaceAccount<'info, Mint>,
+    #[account(mut)]
+    pub vault: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut, token::mint = mint, token::token_program = token_program)]
+    pub from: InterfaceAccount<'info, TokenAccount>,
+    pub funder: Signer<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+#[derive(Accounts)]
 pub struct ShortfallView<'info> {
     /// CHECK: stream_loan Slot PDA; checked in load_slot
     pub slot: UncheckedAccount<'info>,
@@ -550,6 +611,16 @@ pub struct Slashed {
     pub paid: u64,
 }
 
+/// `amount`: what the vault received; `assets`: the pool's accounted assets after it.
+#[event]
+pub struct ToppedUp {
+    pub mint: Pubkey,
+    pub funder: Pubkey,
+    pub amount: u64,
+    pub assets: u64,
+    pub generation: u64,
+}
+
 #[event]
 pub struct PoolRetired {
     pub mint: Pubkey,
@@ -595,4 +666,8 @@ pub enum SafetyError {
     NotEmpty,
     #[msg("arithmetic overflow")]
     Overflow,
+    #[msg("no shares to top up")]
+    NoShares,
+    #[msg("launch wallets cannot top up")]
+    LaunchWallet,
 }

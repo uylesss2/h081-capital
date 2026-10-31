@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Verifiable build of the four PRODUCTION programs (stipend_pool, stream_loan, capacity_stake, safety_pool).
-# Never builds the localnet-only probe/fast variants (no --features is ever passed).
+# Never builds the localnet-only probe/fast/localnet-treasury variants (no --features is ever passed), so
+# stream_loan fails to compile here until its fee::TREASURY placeholder is set to the treasury multisig vault.
 #
 # Reproducibility rests on four things, all pinned or fixed here:
 #   1. the source: a tar of the `solana/` tree at one commit (git archive), unpacked at a fixed path;
@@ -40,7 +41,7 @@ while [ $# -gt 0 ]; do
     --commit) COMMIT="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -17,7 +17,7 @@ import {
   TOKEN22_PROGRAM_ID, ataAddress, capacityConfigPda, capacityInitConfigIx, capacityOf, capacityVaultPda, closePositionIx, closeStakeIx,
   coverPda, createAtaIdempotentIx, createMintIxs, sharesFor, transferCheckedIx, decodeCapacityConfig, decodeCover, decodePosition, decodeSafetyConfig, decodeStake,
   decodeStreamSlot, insureIx, loanAccounts, mintToIx, positionPda, readCapacity, readSafetyPosition, redeemable, requestUnbondIx,
-  requestUnstakeIx, safetyConfigPda, safetyDepositIx, safetyInitPoolIx, safetyVaultPda, safetyWithdrawIx, simulateReturn, slashIx,
+  requestUnstakeIx, safetyConfigPda, safetyDepositIx, safetyInitPoolIx, safetyTopUpIx, safetyVaultPda, safetyWithdrawIx, simulateReturn, slashIx,
   stakeIx, stakePda, streamSlotPda, tokenBalance, unstakeIx, viewCapacity, viewShortfall, padTo, type CreateMintOptions,
 } from '../../src/solana/token.js';
 import { REF, readStakingMeta, type StakingMeta } from './staking-fixtures.js';
@@ -510,5 +510,88 @@ describe.skipIf(!reachable)('safety_pool: share price manipulation', () => {
     // the attacker's shares redeem for about the one unit it deposited; the donation is not pool assets
     const pa = await readSafetyPosition(connection, SPF, G.publicKey, att.publicKey);
     expect(pa.value).toBeLessThanOrEqual(1n);
+  });
+});
+
+// top_up: the flywheel pays stakers with H081 bought from PLATFORM fees (never the token's creator fees).
+// Runs after the slash describe above, which retires the E pool's generation 0.
+describe.skipIf(!reachable)('safety_pool: top_up', () => {
+  const LAUNCH = new PublicKey('2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP');
+
+  it('raises what every share redeems for (unbonding ones too) without minting shares; refused at zero shares', async () => {
+    const G = Keypair.generate();
+    await makeMint(G);
+    const a1 = await fund(s1.publicKey, G.publicKey, 1_000n * TOK);
+    const a2 = await fund(s2.publicKey, G.publicKey, 500n * TOK);
+    const aS = await fund(stranger.publicKey, G.publicKey, 300n * TOK);
+    await tx(payer, safetyInitPoolIx(SPF, payer.publicKey, G.publicKey));
+    const vault = safetyVaultPda(SPF, G.publicKey);
+    // nobody to pay yet: refused, nothing moves
+    await expectCode(tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, G.publicKey, aS, 300n * TOK)), SAFETY_ERROR.NoShares);
+    expect(await tokenBalance(connection, aS)).toBe(300n * TOK);
+    expect(await tokenBalance(connection, vault)).toBe(0n);
+
+    await tx(s1, safetyDepositIx(SPF, s1.publicKey, G.publicKey, a1, 1_000n * TOK));
+    await tx(s2, safetyDepositIx(SPF, s2.publicKey, G.publicKey, a2, 500n * TOK));
+    const q2 = await readSafetyPosition(connection, SPF, G.publicKey, s2.publicKey);
+    await tx(s2, requestUnbondIx(SPF, s2.publicKey, G.publicKey, q2.shares));
+    const c0 = decodeSafetyConfig(await account(safetyConfigPda(SPF, G.publicKey)));
+    const q1 = await readSafetyPosition(connection, SPF, G.publicKey, s1.publicKey);
+
+    await expectCode(tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, G.publicKey, aS, 0n)), SAFETY_ERROR.Amount);
+    await tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, G.publicKey, aS, 300n * TOK));
+    expect(await tokenBalance(connection, aS)).toBe(0n);
+    expect(await tokenBalance(connection, vault)).toBe(1_800n * TOK);
+    const p1 = await readSafetyPosition(connection, SPF, G.publicKey, s1.publicKey);
+    const p2 = await readSafetyPosition(connection, SPF, G.publicKey, s2.publicKey);
+    expect(p1.config.totalShares).toBe(c0.totalShares); // no shares minted
+    expect(p1.config.assets).toBe(c0.assets + 300n * TOK);
+    expect(p1.config.generation).toBe(c0.generation);
+    expect(p1.shares).toBe(q1.shares);
+    expect(p2.unbonding).toBe(q2.shares);
+    expect(p1.value).toBeGreaterThan(q1.value);
+    expect(p1.value).toBe(redeemable(p1.shares, p1.config.assets, p1.config.totalShares));
+    expect(1_200n * TOK - p1.value).toBeLessThanOrEqual(2n); // 1,000 + 2/3 of 300
+    expect(600n * TOK - p2.unbondingValue).toBeLessThanOrEqual(2n); // 500 + 1/3 of 300, while unbonding
+    // on chain: the unbonding staker withdraws its share of the top-up
+    await waitUntilChain(Number(p2.readyAt) + 1);
+    await tx(s2, safetyWithdrawIx(SPF, s2.publicKey, G.publicKey, a2));
+    expect(600n * TOK - (await tokenBalance(connection, a2))).toBeLessThanOrEqual(2n);
+  });
+
+  it('refuses a launch wallet as the source', async () => {
+    const launchAta = await fund(LAUNCH, H.publicKey, 0n);
+    await expectCode(tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, H.publicKey, launchAta, 1n)), SAFETY_ERROR.LaunchWallet);
+  });
+
+  it('Token-2022 transfer fee: only what the vault receives is added', async () => {
+    const ata = ataAddress(s1.publicKey, F.publicKey);
+    await tx(payer, safetyInitPoolIx(SPF, payer.publicKey, F.publicKey));
+    await tx(s1, safetyDepositIx(SPF, s1.publicKey, F.publicKey, ata, 100n * TOK));
+    expect(decodeSafetyConfig(await account(safetyConfigPda(SPF, F.publicKey))).assets).toBe(99n * TOK);
+    await tx(s1, safetyTopUpIx(SPF, s1.publicKey, F.publicKey, ata, 100n * TOK));
+    const c = decodeSafetyConfig(await account(safetyConfigPda(SPF, F.publicKey)));
+    expect(c.assets).toBe(198n * TOK); // 1% withheld on each transfer
+    expect(await tokenBalance(connection, safetyVaultPda(SPF, F.publicKey))).toBe(198n * TOK);
+  });
+
+  it('survives a generation bump: refused while the retired pool has no shares, then pays only the new generation', async () => {
+    // the E pool was emptied by a slash above (generation 1, no shares); s3's generation-0 position is retired
+    const c0 = decodeSafetyConfig(await account(safetyConfigPda(SPF, E.publicKey)));
+    expect(c0.generation).toBe(1n);
+    expect(c0.totalShares).toBe(0n);
+    const aS = await fund(stranger.publicKey, E.publicKey, 500_000n);
+    await expectCode(tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, E.publicKey, aS, 500_000n)), SAFETY_ERROR.NoShares);
+    const a2 = await fund(s2.publicKey, E.publicKey, 1_000_000n);
+    await tx(s2, safetyDepositIx(SPF, s2.publicKey, E.publicKey, a2, 1_000_000n));
+    await tx(stranger, safetyTopUpIx(SPF, stranger.publicKey, E.publicKey, aS, 500_000n));
+    const p2 = await readSafetyPosition(connection, SPF, E.publicKey, s2.publicKey);
+    expect(p2.config.generation).toBe(1n);
+    expect(p2.config.assets).toBe(1_500_000n);
+    expect(p2.shares).toBe(p2.config.totalShares);
+    expect(1_500_000n - p2.value).toBeLessThanOrEqual(2n); // the only live staker gets the whole top-up
+    const p3 = await readSafetyPosition(connection, SPF, E.publicKey, s3.publicKey);
+    expect(p3.shares).toBe(0n);
+    expect(p3.value).toBe(0n);
   });
 });

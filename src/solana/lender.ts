@@ -29,8 +29,26 @@ export const GRACE = 7n * 86400n;
 export const LOAN_ERROR = {
   NotTheLender: 6000, AlreadyFunded: 6001, WrongSlot: 6002, WrongAsset: 6003, StreamNotStarted: 6004, BadPayout: 6005, NoLoan: 6006,
   NothingOwed: 6007, NotAClaim: 6008, WrongPoolProgram: 6009, BadBuffer: 6010, BadPayload: 6011, BadTokenProgram: 6012, BadMint: 6013,
-  BadInbox: 6014, BadLenderAccount: 6015, Overflow: 6016, BadEscrow: 6017, EscrowNotEmpty: 6018,
+  BadInbox: 6014, BadLenderAccount: 6015, Overflow: 6016, BadEscrow: 6017, EscrowNotEmpty: 6018, BadTreasury: 6019,
 } as const;
+
+/**
+ * Owner of the treasury token accounts that receive the loan origination fee (stream_loan fee::TREASURY).
+ * PLACEHOLDER until the treasury multisig exists; keep it equal to the program constant.
+ */
+export const LOAN_TREASURY = new PublicKey('TreasuryP1aceho1derSetMeBeforeMainnet111111');
+/** Origination fee in basis points of the principal (stream_loan fee::ORIGINATION_FEE_BPS). A platform fee only. */
+export const ORIGINATION_FEE_BPS = 25n;
+
+/** The origination fee `fund` takes out of the payout: principal * 25 / 10_000, rounded down. The loan owes the full principal. */
+export function originationFee(principal: bigint): bigint {
+  return (principal * ORIGINATION_FEE_BPS) / 10_000n;
+}
+
+/** The treasury's associated token account for `mint`: where `fund` sends the origination fee. */
+export function loanTreasuryAccount(mint: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID): PublicKey {
+  return associatedTokenAddress(LOAN_TREASURY, mint, tokenProgram);
+}
 /** Anchor's own error for a `has_one` / seeds mismatch etc. are 2000-range; `has_one = lender` maps to NotTheLender. */
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -96,10 +114,14 @@ export function openSlotIx(lender: PublicKey, nextLoanRef: bigint, programId = L
 export interface FundAccounts {
   lender: PublicKey; loanRef: bigint; principal: bigint; poolProgram: PublicKey; poolState: PublicKey; buffer: PublicKey; mint: PublicKey;
   lenderSource: PublicKey; payoutTo: PublicKey; tokenProgram?: PublicKey;
+  /** defaults to loanTreasuryAccount(mint); the program refuses any other account */
+  treasury?: PublicKey;
 }
 
 /**
  * Fund against the stream proof staged in `buffer` (a stipend_pool Buffer holding borsh (Proof, StreamArgs)).
+ * `payoutTo` receives principal - originationFee(principal), the treasury account the fee (it must exist when
+ * the fee is above 0); the loan owes the full principal.
  * The ledger takes whatever already sits in the inbox (held for `collect`, not repayment); the pool escrow of
  * the slot must be empty (pull it into the inbox first, see SolanaLoanLenderWallet.fundUnchecked).
  */
@@ -109,6 +131,7 @@ export function fundIx(a: FundAccounts, programId = LOCALNET_LOAN_PROGRAM_ID): T
     w(slotPda(a.loanRef, programId)), w(a.lender, true), r(a.poolProgram), r(a.poolState), r(a.buffer), r(a.mint), w(a.lenderSource), w(a.payoutTo),
     w(slotInbox(a.loanRef, a.mint, tp, programId)), r(tp), r(ASSOCIATED_TOKEN_PROGRAM_ID), r(SystemProgram.programId),
     w(ledgerPda(a.loanRef, a.mint, programId)), r(escrowPda(a.poolProgram, a.mint, fieldOf(slotPda(a.loanRef, programId)), a.loanRef)),
+    w(a.treasury ?? loanTreasuryAccount(a.mint, tp)),
   ], u64le(a.loanRef), u64le(a.principal));
 }
 
@@ -199,6 +222,22 @@ export interface LedgerAccount { loanRef: bigint; mint: PublicKey; held: bigint;
 export function decodeLedger(data: Uint8Array): LedgerAccount {
   const x = new Reader(data);
   return { loanRef: x.u64(), mint: x.key(), held: x.u64(), received: x.u64() };
+}
+
+/** The LoanFunded event (`emit!`, logged as "Program data: <base64>"). `principal` is owed; `payoutTo` received principal - fee. */
+export interface LoanFundedEvent { loanRef: bigint; lender: PublicKey; asset: PublicKey; principal: bigint; fee: bigint; payoutTo: PublicKey }
+const LOAN_FUNDED_DISC = sha256(enc('event:LoanFunded')).subarray(0, 8);
+/** The LoanFunded events in a transaction's logs (e.g. SentTx.logs of a fund). */
+export function loanFundedEvents(logs: string[]): LoanFundedEvent[] {
+  const out: LoanFundedEvent[] = [];
+  for (const line of logs) {
+    if (!line.startsWith('Program data: ')) continue;
+    const d = new Uint8Array(Buffer.from(line.slice('Program data: '.length), 'base64'));
+    if (d.length < 8 + 8 + 32 + 32 + 8 + 8 + 32 || !LOAN_FUNDED_DISC.every((b, i) => d[i] === b)) continue;
+    const x = new Reader(d);
+    out.push({ loanRef: x.u64(), lender: x.key(), asset: x.key(), principal: x.u64(), fee: x.u64(), payoutTo: x.key() });
+  }
+  return out;
 }
 
 /** Same rule as the program: unpaid principal once expiry + GRACE has passed (`pending`: unsynced inbox value plus the pool escrow, which count as paid). */
@@ -300,8 +339,9 @@ export class SolanaLoanLenderWallet {
   }
 
   /**
-   * Fund a slot against a stream proof; the principal goes from the lender's associated token account to
-   * `payoutTo` (a token account of `mint`). The proof must describe a live note this lender was handed (same
+   * Fund a slot against a stream proof; the principal leaves the lender's associated token account:
+   * principal - originationFee(principal) to `payoutTo` (a token account of `mint`), the fee to the treasury.
+   * The loan owes the full principal. The proof must describe a live note this lender was handed (same
    * agent, cap, expiry, pledge, routed total, start and asset, with the bounds holding).
    */
   async fund(loanRef: bigint, stream: { proof: ProofResult; args: StreamArgs }, mint: PublicKey, principal: bigint, payoutTo: PublicKey): Promise<SentTx> {
@@ -323,7 +363,7 @@ export class SolanaLoanLenderWallet {
 
   /** The fund transaction without the SDK-side note checks (the program's checks still apply). */
   async fundUnchecked(
-    loanRef: bigint, stream: { proof: ProofResult; args: StreamArgs }, mint: PublicKey, principal: bigint, payoutTo: PublicKey, opts: { pullEscrow?: boolean } = {},
+    loanRef: bigint, stream: { proof: ProofResult; args: StreamArgs }, mint: PublicKey, principal: bigint, payoutTo: PublicKey, opts: { pullEscrow?: boolean; treasury?: PublicKey } = {},
   ): Promise<SentTx> {
     const tokenProgram = await this.pool.tokenProgramOf(mint);
     const payload = concatBytes(encodeProof(stream.proof.proof), encodeStreamArgs(stream.args));
@@ -333,13 +373,15 @@ export class SolanaLoanLenderWallet {
     const pre = escrowed > 0n && opts.pullEscrow !== false
       ? [createAtaIdempotentIx(this.signer.publicKey, slot, mint, tokenProgram), pullLenderShareIx(this.pool.programId, mint, tokenProgram, fieldOf(slot), loanRef, slotInbox(loanRef, mint, tokenProgram, this.programId))]
       : [];
+    // the treasury's account for the asset must exist when a fee is due; creating it is idempotent (the lender pays rent once per asset)
+    if (originationFee(principal) > 0n) pre.push(createAtaIdempotentIx(this.signer.publicKey, LOAN_TREASURY, mint, tokenProgram));
     const buf = await uploadBuffer(this.connection, this.pool.programId, this.signer, payload);
     try {
       return await send(this.connection, this.signer, [
         ...pre,
         fundIx({
           lender: this.signer.publicKey, loanRef, principal, poolProgram: this.pool.programId, poolState: poolPda(this.pool.programId), buffer: buf.address,
-          mint, lenderSource: associatedTokenAddress(this.signer.publicKey, mint, tokenProgram), payoutTo, tokenProgram,
+          mint, lenderSource: associatedTokenAddress(this.signer.publicKey, mint, tokenProgram), payoutTo, tokenProgram, treasury: opts.treasury,
         }, this.programId),
         bufferCloseIx(this.pool.programId, this.signer.publicKey, buf.seed),
       ], { cuLimit: OP_CU_LIMIT });

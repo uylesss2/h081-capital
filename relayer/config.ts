@@ -13,10 +13,33 @@ export interface RelayerConfig {
   evm?: { rpc: string; pool: string; key: string; minFees: Map<string, bigint>; maxGas: bigint };
   solana?: {
     rpc: string; programId?: string; keypairPath: string; minFees: Map<string, bigint>; lookupTables: string[]; minLamports: number; maxInFlight: number;
+    /** platform fee rate on the public amount, basis points: required fee = max(minFee, feeBps * amount / 10_000) */
+    feeBps: number;
+    /** owner (base58) of the fee token accounts: the platform treasury, never a launch wallet */
+    treasury: string;
+    /** capacity_stake enforcement; absent = off */
+    capacity?: { programId?: string; mint: string; freeTier: bigint; assets: string[] };
   };
 }
 
 export class ConfigError extends Error {}
+
+/**
+ * The H081 launch wallets. The token's trading creator fees are the team's income and never feed the
+ * platform-fee flywheel, so no relayer fee is ever paid to one of these (refused at startup and per relay).
+ */
+export const LAUNCH_WALLET_DENYLIST: ReadonlySet<string> = new Set([
+  '2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP',
+  'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ',
+  '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw',
+]);
+
+export const isDenyListed = (key: string | PublicKey) => LAUNCH_WALLET_DENYLIST.has(typeof key === 'string' ? key : key.toBase58());
+
+/** Default platform fee: 0.20% of the public amount. */
+export const DEFAULT_FEE_BPS = 20;
+/** Default free tier: an operation moving at most 100 USDG (6 decimals) needs no staked capacity. */
+export const DEFAULT_FREE_TIER = 100_000_000n;
 
 const flag = (v: string | undefined) => v === '1' || v === 'true';
 
@@ -71,9 +94,35 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     const lookupTables = (env.RELAYER_SOLANA_LOOKUP_TABLES ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     for (const t of lookupTables) if (!isKey(t)) throw new ConfigError(`RELAYER_SOLANA_LOOKUP_TABLES: ${t} is not a public key`);
     if (env.RELAYER_SOLANA_PROGRAM_ID && !isKey(env.RELAYER_SOLANA_PROGRAM_ID)) throw new ConfigError('RELAYER_SOLANA_PROGRAM_ID is not a public key');
+    const feeBps = int(env, 'RELAYER_FEE_BPS', DEFAULT_FEE_BPS);
+    if (feeBps > 10_000) throw new ConfigError('RELAYER_FEE_BPS must be at most 10000');
+    const treasuryRaw = env.RELAYER_SOLANA_TREASURY;
+    if (!treasuryRaw) throw new ConfigError('Solana relaying needs RELAYER_SOLANA_TREASURY (the platform treasury that owns the fee accounts)');
+    if (!isKey(treasuryRaw)) throw new ConfigError('RELAYER_SOLANA_TREASURY is not a public key');
+    const treasury = new PublicKey(treasuryRaw).toBase58();
+    if (isDenyListed(treasury)) throw new ConfigError(`RELAYER_SOLANA_TREASURY ${treasury} is an H081 launch wallet; platform fees never go to a launch wallet`);
+    let capacity: NonNullable<RelayerConfig['solana']>['capacity'];
+    if (env.RELAYER_SOLANA_CAPACITY_MINT) {
+      if (!isKey(env.RELAYER_SOLANA_CAPACITY_MINT)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_MINT is not a public key');
+      const capProgram = env.RELAYER_SOLANA_CAPACITY_PROGRAM_ID;
+      if (capProgram && !isKey(capProgram)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_PROGRAM_ID is not a public key');
+      const freeTier = env.RELAYER_SOLANA_CAPACITY_FREE_TIER;
+      if (freeTier && !/^\d+$/.test(freeTier)) throw new ConfigError('RELAYER_SOLANA_CAPACITY_FREE_TIER must be an amount in base units');
+      const assets = (env.RELAYER_SOLANA_CAPACITY_ASSETS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      // No default: capacity counts raw base units against a 6-decimal (USDG) shieldCap, so the operator names
+      // the 6-decimal stablecoin mint(s) that count; SolanaRelayer.init refuses any mint without 6 decimals.
+      if (assets.length === 0) throw new ConfigError('RELAYER_SOLANA_CAPACITY_ASSETS is required with RELAYER_SOLANA_CAPACITY_MINT (the 6-decimal USDG mint(s) capacity counts)');
+      for (const a of assets) if (!isKey(a)) throw new ConfigError(`RELAYER_SOLANA_CAPACITY_ASSETS: ${a} is not a public key`);
+      capacity = {
+        programId: capProgram || undefined, mint: new PublicKey(env.RELAYER_SOLANA_CAPACITY_MINT).toBase58(),
+        freeTier: freeTier ? BigInt(freeTier) : DEFAULT_FREE_TIER,
+        assets: assets.map((a) => new PublicKey(a).toBase58()),
+      };
+    }
     cfg.solana = {
       rpc: env.RELAYER_SOLANA_RPC, programId: env.RELAYER_SOLANA_PROGRAM_ID || undefined, keypairPath, minFees, lookupTables,
       minLamports: int(env, 'RELAYER_SOLANA_MIN_LAMPORTS', 50_000_000), maxInFlight: int(env, 'RELAYER_SOLANA_MAX_IN_FLIGHT', 4, 1),
+      feeBps, treasury, capacity,
     };
   }
   if (!cfg.evm && !cfg.solana) throw new ConfigError('configure at least one chain: RELAYER_EVM_RPC and/or RELAYER_SOLANA_RPC');

@@ -29,6 +29,7 @@ any public chain yet.**
 | Supply | 1,000,000,000, fixed: no mint authority, no freeze authority, metadata immutable |
 | Fee | flat 2% on every buy and sell, in SOL: 0.4% to Meteora, 1.6% to the creator |
 | Allocation | no presale, no free allocation, no dev buy |
+| Platform-fee buybacks | designed, not live: the bank's platform fees (relayer 0.20%, loan origination 0.25%, paid hosted tools) buy H081 weekly on the DAMM v2 pool; 100% burned until the safety pool is live, then 50% burn / 50% safety-pool top-up. Trading creator fees are never used. Spec: `docs/FLYWHEEL.md` |
 | Website | https://h081.xyz (facts and risks: https://h081.xyz/token) |
 | X | https://x.com/H081CAP |
 | Trade | https://jup.ag/tokens/EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo |

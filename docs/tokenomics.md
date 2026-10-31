@@ -107,15 +107,39 @@ Caveats the pricing work must address before any deployment:
 - A loan on an allowance that never expires has no due date and never reports a shortfall, so it cannot be
   insured (`insure` requires an expiry).
 
-## 5. Fee capture: none at launch
+## 5. Fee capture: platform fees buy back H081 (designed, not live)
 
-The protocol charges no fee. There is no fee switch, no treasury cut on spends, and the pool has no owner
-who could add one. Relayer fees are paid in the spent asset to the relayer named in the proof, and only for
-operations with a public leg. H081 captures no protocol revenue.
+Status 2026-10-31: **no platform fee is charged today and no buyback has happened.** The design below is in
+build on branch `feat/flywheel`; the full specification is `docs/FLYWHEEL.md`. Every mainnet step needs an
+explicit go from the owner.
 
-The EVM launchpad launch pays the 90% beneficiary share of the 2% trading tax in ETH straight to the creator wallet
-(owner decision of 2026-10-26: no receiver, timelock or restriction). That is the team's income, not fee
-capture by the protocol and not a holder payout.
+**Only platform fees feed the flywheel.** These are fees the bank earns for services it provides:
+
+| Source | Rate (v1) | Where it is charged |
+|---|---|---|
+| Our relayer | 0.20% of the public leg (withdrawals; public spends including the lender share), with a per-asset minimum that covers transaction costs | the proof's existing `fee` field, paid to the treasury's token account |
+| Loan origination | 0.25% of principal, deducted from the payout (the slot still owes the full principal) | `stream_loan::fund`, compile-time constants, no admin |
+| Paid services we host (MCP tools via x402) | per call | x402 `payTo` = treasury |
+
+`stipend_pool` itself charges no fee and does not change: it has no owner, no fee switch and no treasury cut,
+and anyone may run their own relayer or submit proofs directly.
+
+Fees collect in a Squads 2-of-3 treasury multisig that is distinct from every launch wallet. Once a week the
+treasury buys H081 on the official DAMM v2 pool (`CryBbh9QQttrUrfLVXLLEuhkM5wZ8W1DUZFYNhUEhYqs`) in
+randomised small chunks with at most 1% slippage. Until the safety pool (section 4) is live, 100% of the
+bought H081 is burned; after that, 50% is burned and 50% goes to `safety_pool.top_up`, which adds insurance
+capital for lenders without minting shares. Because no shares are minted, a top-up raises what every
+safety-pool share redeems for, so stakers who back loans benefit pro rata in return for carrying slashing
+risk (section 4); it is not a fixed or promised return. Holding H081 outside the safety pool pays nothing. Every run is recorded in the public ledger `flywheel-ledger.json`.
+Buybacks are ordinary trades and pay the pool's normal trading fee like any buyer.
+
+**The token's trading creator fees are never part of the flywheel.** The 1.6% creator share of the 2% trade
+fee is the team's income. It is not claimed, routed, swept or bought back with by any flywheel code, and the
+launch wallets `2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP`, `FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ`
+and `5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw` are on a hard deny-list wherever the flywheel moves money.
+
+The amount bought back depends only on how much the bank is used. Nothing here is a promise about the H081
+price.
 
 ## 6. What is tested
 
