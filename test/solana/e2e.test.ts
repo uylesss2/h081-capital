@@ -15,7 +15,9 @@ import { randomViewingKey } from '../../src/encryption.js';
 import {
   OP_CU_LIMIT, POOL_ERROR, SPEND_ROOT_OFFSET, SolanaLenderWallet, SolanaPool, SolanaWallet, be32, customErrorCode, decodePool, encodeSpendArgs, escrowPda,
   fieldOf, nullifierPda, poolPda, pullLenderShareIx, send, spendIx, vaultPda, type LocatedEvent, type SolOwnedAllowance,
+  U64_MAX, assetCapPda, configPda, decodeAssetCaps, decodeConfig, setAssetCapsIx, setConfigAuthorityIx, setDefaultCapsIx, setDepositsPausedIx,
 } from '../../src/solana/index.js';
+import { LOCALNET_CONFIG_AUTHORITY } from './config-authority.js';
 
 const RPC = process.env.SOLANA_RPC ?? 'http://127.0.0.1:8999';
 const connection = new Connection(RPC, 'confirmed');
@@ -104,7 +106,7 @@ beforeAll(async () => {
   const prog = await connection.getAccountInfo(pool.programId);
   if (!prog?.executable) throw new Error('stipend_pool is not loaded; run npm run solana:build and restart the validator');
   await airdrop(funder.publicKey, 100);
-  await pool.initialize(funder);
+  await pool.initialize(funder, { authority: LOCALNET_CONFIG_AUTHORITY.publicKey });
   usd = await createMint(connection, funder, funder.publicKey, funder.publicKey, 6, undefined, { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
   t22 = await createMint(connection, funder, funder.publicKey, funder.publicKey, 6, undefined, { commitment: 'confirmed' }, TOKEN_2022_PROGRAM_ID);
   [owner, agentA, agentB, agentC, shop] = await Promise.all([wallet(), wallet(), wallet(), wallet(), wallet()]);
@@ -598,6 +600,98 @@ describe('note consolidation', () => {
     expect(await nextIndex()).toBe(before + 2);
     expect(await bal(usd, merchant.publicKey)).toBe(merchantBefore + 35_000n);
     expect(w.balance(usd)).toBe(5_000n);
+  });
+});
+
+describe('deposit guard: per-asset caps and a deposit-only pause', () => {
+  const auth = LOCALNET_CONFIG_AUTHORITY;
+  const asAuth = (ix: TransactionInstruction) => send(connection, funder, [ix], { signers: [auth] });
+  const caps = async (mint: PublicKey) => decodeAssetCaps((await connection.getAccountInfo(assetCapPda(pool.programId, mint), 'confirmed'))!.data);
+  const config = async () => decodeConfig((await connection.getAccountInfo(configPda(pool.programId), 'confirmed'))!.data);
+  const vaultBal = () => pool.tokenBalance(vaultPda(pool.programId, usd));
+
+  it('starts from the defaults set at initialize; only the config authority changes anything', async () => {
+    const c = await config();
+    expect(c.authority.equals(auth.publicKey)).toBe(true);
+    expect(c.depositsPaused).toBe(false);
+    const k = await caps(usd);
+    expect(k.mint.equals(usd)).toBe(true);
+    expect(k.maxTotal).toBe(U64_MAX);
+    expect(k.maxPerDeposit).toBe(U64_MAX);
+    const mallory = Keypair.generate();
+    await airdrop(mallory.publicKey, 2);
+    const id = pool.programId, m = mallory.publicKey;
+    await expectCode(send(connection, mallory, [setAssetCapsIx(id, m, usd, 0n, 0n)]), POOL_ERROR.ConfigAuthority);
+    await expectCode(send(connection, mallory, [setDefaultCapsIx(id, m, 0n, 0n)]), POOL_ERROR.ConfigAuthority);
+    await expectCode(send(connection, mallory, [setDepositsPausedIx(id, m, true)]), POOL_ERROR.ConfigAuthority);
+    await expectCode(send(connection, mallory, [setConfigAuthorityIx(id, m, m)]), POOL_ERROR.ConfigAuthority);
+    expect((await config()).authority.equals(auth.publicKey)).toBe(true);
+  });
+
+  it('enforces the per-deposit and the total cap per asset', async () => {
+    const w = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, w.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 1_000_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    const base = await vaultBal();
+    await asAuth(setAssetCapsIx(pool.programId, auth.publicKey, usd, base + 15_000n, 10_000n));
+    expect(await caps(usd)).toMatchObject({ maxTotal: base + 15_000n, maxPerDeposit: 10_000n });
+    await expectCode(w.deposit(usd, 10_001n), POOL_ERROR.DepositTooLarge);
+    await w.deposit(usd, 10_000n);
+    expect(await vaultBal()).toBe(base + 10_000n);
+    await expectCode(w.deposit(usd, 5_001n), POOL_ERROR.DepositCapExceeded);
+    await w.deposit(usd, 5_000n); // exactly at the total cap
+    expect(await vaultBal()).toBe(base + 15_000n);
+    // a cap below the vault balance blocks deposits, never withdrawals
+    await asAuth(setAssetCapsIx(pool.programId, auth.publicKey, usd, 0n, 0n));
+    await expectCode(w.deposit(usd, 1n), POOL_ERROR.DepositTooLarge);
+    await w.withdraw(usd, 15_000n, w.signer.publicKey);
+    expect(await vaultBal()).toBe(base);
+    // another asset keeps its own caps
+    expect((await caps(t22)).maxTotal).toBe(U64_MAX);
+    await asAuth(setAssetCapsIx(pool.programId, auth.publicKey, usd, U64_MAX, U64_MAX));
+  });
+
+  it('a deposit without the asset cap account, or with another asset\'s, is rejected', async () => {
+    const dep = await capture(() => owner.deposit(usd, 1_000n));
+    const i = dep.mk(PublicKey.default);
+    const at = i.keys.findIndex((k) => k.pubkey.equals(assetCapPda(pool.programId, usd)));
+    expect(at).toBeGreaterThan(0);
+    await expectCode(replay(dep, dep.payload, withKey(dep.mk, at, pool.programId)), POOL_ERROR.WrongAssetCap);
+    await expectCode(replay(dep, dep.payload, withKey(dep.mk, at, assetCapPda(pool.programId, t22))), POOL_ERROR.WrongAssetCap);
+  });
+
+  it('pauses deposits only: withdrawals, transfers and spends still go through', async () => {
+    const w = await wallet();
+    const ata = await getOrCreateAssociatedTokenAccount(connection, funder, usd, w.signer.publicKey, false, 'confirmed', { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await mintTo(connection, funder, usd, ata.address, funder, 100_000n, [], { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await w.deposit(usd, 50_000n);
+    await asAuth(setDepositsPausedIx(pool.programId, auth.publicKey, true));
+    try {
+      expect((await config()).depositsPaused).toBe(true);
+      await expectCode(w.deposit(usd, 1_000n), POOL_ERROR.DepositsPaused);
+      await w.transfer(usd, 10_000n, shop.address);
+      await w.withdraw(usd, 40_000n, w.signer.publicKey);
+      expect(w.balance(usd)).toBe(0n);
+      expect(await bal(usd, w.signer.publicKey)).toBe(90_000n);
+    } finally {
+      await asAuth(setDepositsPausedIx(pool.programId, auth.publicKey, false));
+    }
+    await w.deposit(usd, 1_000n);
+    expect(w.balance(usd)).toBe(1_000n);
+  });
+
+  it('changes default caps for new vaults and hands the authority over', async () => {
+    await asAuth(setDefaultCapsIx(pool.programId, auth.publicKey, 7n, 3n));
+    expect(await config()).toMatchObject({ defaultMaxTotal: 7n, defaultMaxPerDeposit: 3n });
+    const mint = await createMint(connection, funder, funder.publicKey, null, 6, undefined, { commitment: 'confirmed' }, TOKEN_PROGRAM_ID);
+    await pool.ensureVault(funder, mint);
+    expect(await caps(mint)).toMatchObject({ maxTotal: 7n, maxPerDeposit: 3n });
+    await asAuth(setDefaultCapsIx(pool.programId, auth.publicKey, U64_MAX, U64_MAX));
+    const next = Keypair.generate();
+    await asAuth(setConfigAuthorityIx(pool.programId, auth.publicKey, next.publicKey));
+    await expectCode(asAuth(setDepositsPausedIx(pool.programId, auth.publicKey, true)), POOL_ERROR.ConfigAuthority);
+    await send(connection, funder, [setConfigAuthorityIx(pool.programId, next.publicKey, auth.publicKey)], { signers: [next] });
+    expect((await config()).authority.equals(auth.publicKey)).toBe(true);
   });
 });
 

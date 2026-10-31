@@ -3,7 +3,7 @@
 import { sha256 } from '@noble/hashes/sha2';
 import { PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import { be32, concatBytes, fromBe, u16le, u32le, u64le } from './field.js';
-import { bufferPda, poolPda } from './pda.js';
+import { assetCapPda, bufferPda, configPda, poolPda } from './pda.js';
 
 /** Localnet program ids (from solana/keys/, declared in programs/stipend_pool/src/lib.rs). */
 export const LOCALNET_POOL_PROGRAM_ID = new PublicKey('AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3');
@@ -21,6 +21,7 @@ export const POOL_ERROR = {
   MissingAccount: 6017, AlreadySpent: 6018, NullifierAccount: 6019, StaleTimestamp: 6020, Recipient: 6021, Lender: 6022,
   AmountOverflow: 6023, WrongMint: 6024, WrongTokenAccount: 6025, WrongVault: 6026, WrongEscrow: 6027, NothingOwed: 6028,
   DepositShortfall: 6029, FeeExceedsAmount: 6030, WrongTokenProgram: 6031, BufferAuthority: 6032, AccountInUse: 6033, LenderAccount: 6034,
+  DepositsPaused: 6035, DepositTooLarge: 6036, DepositCapExceeded: 6037, ConfigAuthority: 6038, WrongAssetCap: 6039,
 } as const;
 
 export const LEVELS = 20;
@@ -44,8 +45,55 @@ export function bufferGrowIx(programId: PublicKey, authority: PublicKey, seed: b
   return ix(programId, 'buffer_grow', [w(bufferPda(programId, authority, seed)), w(authority, true), r(SystemProgram.programId)], u64le(seed));
 }
 
-export function initializeIx(programId: PublicKey, payer: PublicKey): TransactionInstruction {
-  return ix(programId, 'initialize', [w(poolPda(programId)), w(payer, true), r(SystemProgram.programId)]);
+export const U64_MAX = (1n << 64n) - 1n;
+
+/** Deposit guard set at `initialize`: config authority and the caps every new vault starts with. */
+export interface DepositGuard {
+  /** Can change caps and pause deposits (never withdrawals). Default: the payer. */
+  authority?: PublicKey;
+  /** Largest vault balance a deposit may lead to, per asset (base units). Default: u64 max (no cap). */
+  maxTotal?: bigint;
+  /** Largest single deposit, per asset (base units). Default: u64 max (no cap). */
+  maxPerDeposit?: bigint;
+}
+
+export function initializeIx(programId: PublicKey, payer: PublicKey, guard: DepositGuard = {}): TransactionInstruction {
+  return ix(programId, 'initialize', [w(poolPda(programId)), w(payer, true), r(SystemProgram.programId), w(configPda(programId))],
+    (guard.authority ?? payer).toBytes(), u64le(guard.maxTotal ?? U64_MAX), u64le(guard.maxPerDeposit ?? U64_MAX));
+}
+
+/** Config authority only: one asset's caps. */
+export function setAssetCapsIx(programId: PublicKey, authority: PublicKey, mint: PublicKey, maxTotal: bigint, maxPerDeposit: bigint): TransactionInstruction {
+  return ix(programId, 'set_asset_caps', [r(configPda(programId)), r(authority, true), w(assetCapPda(programId, mint))], u64le(maxTotal), u64le(maxPerDeposit));
+}
+
+/** Config authority only: the caps future vaults start with. */
+export function setDefaultCapsIx(programId: PublicKey, authority: PublicKey, maxTotal: bigint, maxPerDeposit: bigint): TransactionInstruction {
+  return ix(programId, 'set_default_caps', [w(configPda(programId)), r(authority, true)], u64le(maxTotal), u64le(maxPerDeposit));
+}
+
+/** Config authority only: pause or resume deposits. Withdrawals are never affected. */
+export function setDepositsPausedIx(programId: PublicKey, authority: PublicKey, paused: boolean): TransactionInstruction {
+  return ix(programId, 'set_deposits_paused', [w(configPda(programId)), r(authority, true)], Uint8Array.of(paused ? 1 : 0));
+}
+
+/** Config authority only: hand over (PublicKey.default renounces). */
+export function setConfigAuthorityIx(programId: PublicKey, authority: PublicKey, newAuthority: PublicKey): TransactionInstruction {
+  return ix(programId, 'set_config_authority', [w(configPda(programId)), r(authority, true)], newAuthority.toBytes());
+}
+
+export interface PoolConfig { authority: PublicKey; depositsPaused: boolean; defaultMaxTotal: bigint; defaultMaxPerDeposit: bigint }
+export interface AssetCaps { mint: PublicKey; maxTotal: bigint; maxPerDeposit: bigint }
+const readU64 = (d: Uint8Array, o: number) => new DataView(d.buffer, d.byteOffset + o, 8).getBigUint64(0, true);
+
+/** Decodes the ["config"] account (after the 8-byte discriminator). */
+export function decodeConfig(data: Uint8Array): PoolConfig {
+  return { authority: new PublicKey(data.subarray(8, 40)), depositsPaused: data[40] === 1, defaultMaxTotal: readU64(data, 41), defaultMaxPerDeposit: readU64(data, 49) };
+}
+
+/** Decodes a ["cap", mint] account. */
+export function decodeAssetCaps(data: Uint8Array): AssetCaps {
+  return { mint: new PublicKey(data.subarray(8, 40)), maxTotal: readU64(data, 40), maxPerDeposit: readU64(data, 48) };
 }
 
 export function bufferOpenIx(programId: PublicKey, authority: PublicKey, seed: bigint, len: number): TransactionInstruction {

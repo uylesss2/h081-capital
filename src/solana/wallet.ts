@@ -38,7 +38,7 @@ import {
 } from './ops.js';
 import { vaultPda } from './pda.js';
 import {
-  DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, encodeDiscloseArgs, encodeStreamArgs, initializeIx, verifyDisclosureIx, verifyStreamIx,
+  DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, encodeDiscloseArgs, encodeStreamArgs, initializeIx, verifyDisclosureIx, verifyStreamIx,
 } from './program.js';
 import { poolPda } from './pda.js';
 
@@ -139,10 +139,10 @@ export class SolanaPool {
     return this;
   }
 
-  /** Creates the pool's Merkle state if it does not exist yet (permissionless). */
-  async initialize(payer: Keypair): Promise<void> {
+  /** Creates the pool's Merkle state and deposit guard if they do not exist yet (permissionless). */
+  async initialize(payer: Keypair, guard: DepositGuard = {}): Promise<void> {
     if (await this.connection.getAccountInfo(poolPda(this.programId), 'confirmed')) return;
-    await send(this.connection, payer, [initializeIx(this.programId, payer.publicKey)]);
+    await send(this.connection, payer, [initializeIx(this.programId, payer.publicKey, guard)]);
   }
 
   async tokenProgramOf(mint: PublicKey): Promise<PublicKey> {

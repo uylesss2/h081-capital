@@ -4,7 +4,8 @@ Owner decision 2026-10-26: **the bank moves to Solana**, the same chain as the H
 (the launchpad). Robinhood Chain is no longer the target. This document is binding for the port; where it is
 silent, follow `docs/PRD-V2-DESIGN.md` and the existing Solidity behaviour in `contracts/`.
 
-Non-negotiables (unchanged): no admin key, no pause, no upgrade path in program logic; programs are made
+Non-negotiables: no upgrade path in program logic, no admin key or pause except stipend_pool's deposit guard
+(per-asset caps and a pause of deposits only, set by a config authority; withdrawals can never be blocked); programs are made
 immutable (upgrade authority set to none) at deployment; nothing is deployed to devnet or mainnet by this
 work; no token is launched.
 
@@ -46,7 +47,8 @@ for localnet are generated with `solana-keygen` into `solana/keys/` (gitignored)
 
 Accounts:
 - `Pool` PDA `["pool"]`: Merkle state (filled subtrees, next index, root history ring of 128 like
-  ROOT_HISTORY_SIZE of the EVM pool), nothing else. Created once by `initialize` (permissionless, idempotent-refusing; no admin field).
+  ROOT_HISTORY_SIZE of the EVM pool), nothing else. Created once by `initialize` (permissionless, idempotent-refusing; no admin field). `initialize` also creates
+  `Config` `["config"]` (config authority, deposits_paused, default caps); `create_vault` creates `AssetCap` `["cap", mint]`.
 - `Nullifier` PDA `["nf", nullifier_be32]`: created on spend; existing account = double spend (`init` fails).
 - Per-asset vault: token account owned by PDA `["vault_auth"]`, one per mint, ATA-style PDA
   `["vault", mint]`. Supports SPL Token and Token-2022 (`anchor_spl::token_interface`); `transfer_checked`.

@@ -38,3 +38,13 @@ export function escrowPda(programId: PublicKey, mint: PublicKey, lenderField: bi
 export function eventAuthorityPda(programId: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync([enc('__event_authority')], programId)[0];
 }
+
+/** Deposit guard (config authority, pause flag, default caps): ["config"]. */
+export function configPda(programId: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([enc('config')], programId)[0];
+}
+
+/** Per-asset deposit caps: ["cap", mint]. */
+export function assetCapPda(programId: PublicKey, mint: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([enc('cap'), mint.toBytes()], programId)[0];
+}

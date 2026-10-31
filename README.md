@@ -7,7 +7,8 @@ Agents delegate slices of their allowance to sub-agents under provably tighter p
 a rate per second, and an owner can pledge a streamed allowance to a lender: a fixed share of every spend
 is routed to the lender inside the spend proof, and the lender can pull its share of what has vested.
 Owners, agents and lenders prove bounds on balances and rates without revealing amounts, counterparties
-or policies. There is no admin key, pause switch or upgrade path on any contract.
+or policies. There is no admin key, pause switch or upgrade path on any contract, with one exception: on Solana a
+config authority can cap and pause DEPOSITS into stipend_pool (never withdrawals or other outflows).
 
 Target chain: **Solana** (owner decision 2026-10-26), the same chain as the H081 token. Assets: USDG and
 tokenized stocks (xStocks; not available to US persons). The Solana programs (`solana/`: stipend_pool,
@@ -259,7 +260,8 @@ CI (`.github/workflows/ci.yml`) runs the same steps on Node 20 with the ptau cac
 | `safety_pool` | H081 stakers insure stream-backed loans; slash on shortfall, 14-day unbonding at risk | `SafetyPool.sol` |
 
 Circuits, zkeys and verifying keys are byte-identical to the EVM build. Solana pubkeys enter the circuits
-as `fieldOf(pubkey)` (first 160 bits of sha256). No program has an admin key, a pause or upgrade logic;
+as `fieldOf(pubkey)` (first 160 bits of sha256). No program has upgrade logic; the only admin power is
+stipend_pool's deposit guard (per-asset caps, deposit-only pause; withdrawals cannot be blocked);
 every per-mint pool is created permissionlessly. Layout, PDAs, the buffer flow and the deploy steps
 (including removing the upgrade authority, only on the owner's explicit go) are in `solana/README.md`.
 

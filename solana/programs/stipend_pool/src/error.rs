@@ -74,4 +74,14 @@ pub enum PoolError {
     AccountInUse,
     #[msg("lender token account is not the associated token account of its owner")]
     LenderAccount,
+    #[msg("deposits are paused")]
+    DepositsPaused,
+    #[msg("deposit exceeds the per-deposit cap")]
+    DepositTooLarge,
+    #[msg("deposit would exceed the asset's total deposit cap")]
+    DepositCapExceeded,
+    #[msg("only the config authority")]
+    ConfigAuthority,
+    #[msg("wrong asset cap account")]
+    WrongAssetCap,
 }

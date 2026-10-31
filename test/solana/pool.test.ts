@@ -10,6 +10,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { Allowance, Policy, SpendingKey, allowanceCommitment, initCrypto, lenderKey, randomField, randomKeys } from '../../src/crypto.js';
 import { MerkleTree } from '../../src/merkle.js';
+import { LOCALNET_CONFIG_AUTHORITY } from './config-authority.js';
 import { LEVELS, SPEND_PUBLIC, discloseInput, spendInput, streamInput } from '../../src/inputs.js';
 import { Prover, type ProofResult } from '../../src/prover.js';
 import {
@@ -86,7 +87,7 @@ describe('initialize', () => {
     const empty = new MerkleTree(LEVELS);
     for (const id of [POOL, PROBE]) {
       const fresh = !(await connection.getAccountInfo(poolPda(id)));
-      if (fresh) await send(connection, payer, [initializeIx(id, payer.publicKey)]);
+      if (fresh) await send(connection, payer, [initializeIx(id, payer.publicKey, { authority: LOCALNET_CONFIG_AUTHORITY.publicKey })]);
       const s = await readPool(id);
       // the e2e suite shares this validator and may have used the production pool already
       if (id.equals(POOL) && fresh) {

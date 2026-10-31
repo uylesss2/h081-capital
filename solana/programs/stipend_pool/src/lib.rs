@@ -1,5 +1,6 @@
 //! stipend_pool: the H0.81 Capital shielded pool on Solana. Port of contracts/StipendPool.sol.
-//! No admin key, no pause, no upgrade logic. See docs/SOLANA-PORT.md.
+//! No upgrade logic. One config authority can cap and pause DEPOSITS only (never withdrawals or other
+//! outflows); see state::Config. See docs/SOLANA-PORT.md.
 #![allow(unexpected_cfgs)]
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenInterface};
@@ -17,7 +18,7 @@ pub mod tokens;
 use error::PoolError;
 use generated::vk;
 use groth16::{Proof, VerifyingKey};
-use state::{Buffer, Pool, BUFFER_SEED, ESCROW_SEED, POOL_SEED, VAULT_AUTH_SEED, VAULT_SEED};
+use state::{AssetCap, Buffer, Config, Pool, ASSET_CAP_SEED, BUFFER_SEED, CONFIG_SEED, ESCROW_SEED, POOL_SEED, VAULT_AUTH_SEED, VAULT_SEED};
 
 #[cfg(not(feature = "merkle-probe"))]
 declare_id!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
@@ -117,10 +118,47 @@ pub fn require_proof(circuit: u8, proof: &Proof, inputs: &[[u8; 32]]) -> Result<
 pub mod stipend_pool {
     use super::*;
 
-    /// Creates the pool's Merkle state. Permissionless; the `init` constraint makes a second call fail.
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    /// Creates the pool's Merkle state and its deposit guard (config authority, default per-asset caps).
+    /// Permissionless; the `init` constraints make a second call fail.
+    pub fn initialize(ctx: Context<Initialize>, config_authority: Pubkey, default_max_total: u64, default_max_per_deposit: u64) -> Result<()> {
         let mut pool = ctx.accounts.pool.load_init()?;
         merkle::init_tree(&mut pool);
+        let c = &mut ctx.accounts.config;
+        c.authority = config_authority;
+        c.deposits_paused = false;
+        c.default_max_total = default_max_total;
+        c.default_max_per_deposit = default_max_per_deposit;
+        c.bump = ctx.bumps.config;
+        Ok(())
+    }
+
+    /// Changes one asset's deposit caps. Config authority only. A cap below the vault balance only blocks
+    /// further deposits; withdrawals are never affected.
+    pub fn set_asset_caps(ctx: Context<SetAssetCaps>, max_total: u64, max_per_deposit: u64) -> Result<()> {
+        let cap = &mut ctx.accounts.asset_cap;
+        cap.max_total = max_total;
+        cap.max_per_deposit = max_per_deposit;
+        Ok(())
+    }
+
+    /// Changes the caps future vaults start with. Config authority only.
+    pub fn set_default_caps(ctx: Context<SetConfig>, max_total: u64, max_per_deposit: u64) -> Result<()> {
+        let c = &mut ctx.accounts.config;
+        c.default_max_total = max_total;
+        c.default_max_per_deposit = max_per_deposit;
+        Ok(())
+    }
+
+    /// Pauses or resumes DEPOSITS (transact with extAmount > 0). Config authority only. Withdrawals, spends,
+    /// delegations and lender pulls never read this flag.
+    pub fn set_deposits_paused(ctx: Context<SetConfig>, paused: bool) -> Result<()> {
+        ctx.accounts.config.deposits_paused = paused;
+        Ok(())
+    }
+
+    /// Hands the config authority to `new_authority` (the default pubkey renounces it). Config authority only.
+    pub fn set_config_authority(ctx: Context<SetConfig>, new_authority: Pubkey) -> Result<()> {
+        ctx.accounts.config.authority = new_authority;
         Ok(())
     }
 
@@ -138,7 +176,14 @@ pub mod stipend_pool {
             &a.token_program.to_account_info(),
             &a.system_program.to_account_info(),
             &[VAULT_SEED, mint_key.as_ref(), &[ctx.bumps.vault]],
-        )
+        )?;
+        let (max_total, max_per_deposit) = (a.config.default_max_total, a.config.default_max_per_deposit);
+        let cap = &mut ctx.accounts.asset_cap;
+        cap.mint = mint_key;
+        cap.max_total = max_total;
+        cap.max_per_deposit = max_per_deposit;
+        cap.bump = ctx.bumps.asset_cap;
+        Ok(())
     }
 
     /// Opens a staging buffer for a payload of `len` bytes owned by the payer. Up to 10 KiB is
@@ -260,6 +305,24 @@ pub struct Initialize<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
+    #[account(init, payer = payer, space = Config::SIZE, seeds = [CONFIG_SEED], bump)]
+    pub config: Account<'info, Config>,
+}
+
+#[derive(Accounts)]
+pub struct SetConfig<'info> {
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = authority @ PoolError::ConfigAuthority)]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetAssetCaps<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = authority @ PoolError::ConfigAuthority)]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [ASSET_CAP_SEED, asset_cap.mint.as_ref()], bump = asset_cap.bump)]
+    pub asset_cap: Account<'info, AssetCap>,
 }
 
 #[derive(Accounts)]
@@ -275,6 +338,10 @@ pub struct CreateVault<'info> {
     pub vault: UncheckedAccount<'info>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(init, payer = payer, space = AssetCap::SIZE, seeds = [ASSET_CAP_SEED, mint.key().as_ref()], bump)]
+    pub asset_cap: Box<Account<'info, AssetCap>>,
 }
 
 #[derive(Accounts)]
@@ -372,6 +439,11 @@ pub struct Transact<'info> {
     pub fee_token: Option<UncheckedAccount<'info>>,
     pub token_program: Option<Interface<'info, TokenInterface>>,
     pub system_program: Program<'info, System>,
+    /// Deposit guard; read on deposits only.
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+    /// PDA ["cap", mint]; required on a deposit, checked in the handler.
+    pub asset_cap: Option<Box<Account<'info, AssetCap>>>,
 }
 
 #[event_cpi]

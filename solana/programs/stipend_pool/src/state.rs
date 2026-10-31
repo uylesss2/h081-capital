@@ -63,3 +63,37 @@ pub struct Nullifier {}
 impl Nullifier {
     pub const SIZE: usize = 8;
 }
+
+pub const CONFIG_SEED: &[u8] = b"config";
+pub const ASSET_CAP_SEED: &[u8] = b"cap";
+
+/// Deposit guard. PDA ["config"], created by `initialize`. The authority can change deposit caps and pause
+/// DEPOSITS only; nothing it controls can block a withdrawal, a spend or any other outflow, or move funds.
+/// Setting the authority to the default pubkey renounces it (caps and pause state are then final).
+#[account]
+pub struct Config {
+    pub authority: Pubkey,
+    pub deposits_paused: bool,
+    /// Caps a new vault's `AssetCap` starts with (`create_vault`).
+    pub default_max_total: u64,
+    pub default_max_per_deposit: u64,
+    pub bump: u8,
+}
+
+impl Config {
+    pub const SIZE: usize = 8 + 32 + 1 + 8 + 8 + 1;
+}
+
+/// Per-asset deposit caps. PDA ["cap", mint], created with the vault. A deposit must not exceed
+/// `max_per_deposit`, and the vault balance after it must not exceed `max_total`.
+#[account]
+pub struct AssetCap {
+    pub mint: Pubkey,
+    pub max_total: u64,
+    pub max_per_deposit: u64,
+    pub bump: u8,
+}
+
+impl AssetCap {
+    pub const SIZE: usize = 8 + 32 + 8 + 8 + 1;
+}

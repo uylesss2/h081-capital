@@ -4,7 +4,7 @@
 import { keccak_256 } from '@noble/hashes/sha3';
 import { PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import { FIELD_R, be32, concatBytes, fromBe, u32le, u64le } from './field.js';
-import { escrowPda, eventAuthorityPda, nullifierPda, poolPda, vaultAuthorityPda, vaultPda } from './pda.js';
+import { assetCapPda, configPda, escrowPda, eventAuthorityPda, nullifierPda, poolPda, vaultAuthorityPda, vaultPda } from './pda.js';
 import { ix, r, w } from './program.js';
 
 export const DEFAULT_PUBKEY = PublicKey.default;
@@ -123,6 +123,7 @@ const eventAccounts = (programId: PublicKey) => [r(eventAuthorityPda(programId))
 export function createVaultIx(programId: PublicKey, payer: PublicKey, mint: PublicKey, tokenProgram: PublicKey): TransactionInstruction {
   return ix(programId, 'create_vault', [
     w(payer, true), r(mint), r(vaultAuthorityPda(programId)), w(vaultPda(programId, mint)), r(tokenProgram), r(SystemProgram.programId),
+    r(configPda(programId)), w(assetCapPda(programId, mint)),
   ]);
 }
 
@@ -144,7 +145,10 @@ export function transactIx(programId: PublicKey, a: TransactAccounts): Transacti
     r(vaultAuthorityPda(programId)),
     opt(programId, a.token?.mint, false), opt(programId, a.token ? vaultPda(programId, a.token.mint) : undefined, true),
     opt(programId, a.depositorToken, true), opt(programId, a.recipientToken, true), opt(programId, a.feeToken, true),
-    opt(programId, a.token?.tokenProgram, false), r(SystemProgram.programId), ...eventAccounts(programId),
+    opt(programId, a.token?.tokenProgram, false), r(SystemProgram.programId),
+    // deposit guard: the config always, the asset's caps on a deposit
+    r(configPda(programId)), opt(programId, a.token && a.depositorToken ? assetCapPda(programId, a.token.mint) : undefined, false),
+    ...eventAccounts(programId),
   ]);
 }
 

@@ -33,7 +33,15 @@ const step = async (label: string, exists: PublicKey, run: () => Promise<unknown
   await run();
   console.log(`${label}: done (${exists.toBase58()})`);
 };
-await step('pool initialize', poolPda(POOL), () => send(conn, payer, [initializeIx(POOL, payer.publicKey)]));
+// Deposit guard: the config authority (default: the deployer) can lower or raise per-asset caps and pause
+// deposits; it can never block withdrawals. Caps are in base units (USDG: 6 decimals); start small.
+const guard = {
+  authority: process.env.CONFIG_AUTHORITY ? new PublicKey(process.env.CONFIG_AUTHORITY) : payer.publicKey,
+  maxTotal: BigInt(process.env.MAX_TOTAL_DEPOSITS ?? 10_000_000_000), // 10,000 USDG per asset
+  maxPerDeposit: BigInt(process.env.MAX_PER_DEPOSIT ?? 1_000_000_000), // 1,000 USDG
+};
+console.log(`deposit guard: authority ${guard.authority.toBase58()}, max total ${guard.maxTotal}, max per deposit ${guard.maxPerDeposit}`);
+await step('pool initialize', poolPda(POOL), () => send(conn, payer, [initializeIx(POOL, payer.publicKey, guard)]));
 await step('USDG vault', vaultPda(POOL, USDG), () => send(conn, payer, [createVaultIx(POOL, payer.publicKey, USDG, TOKEN_2022)]));
 const registry = registryPda(LOAN);
 await step('loan registry initialize', registry, () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));

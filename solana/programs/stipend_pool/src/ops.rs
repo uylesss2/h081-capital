@@ -288,6 +288,29 @@ pub(crate) fn is_ata(account: &Pubkey, owner: &Pubkey, mint: &Pubkey, token_prog
     ata == *account
 }
 
+// ------------------------------------------------------------------ deposit guard
+
+/// Deposit-only guard: not paused, the asset's cap account given, amount <= per-deposit cap and the vault
+/// balance after the deposit <= the total cap. Called only when tokens flow INTO the vault; no outflow path
+/// reads the config, so it cannot block a withdrawal.
+fn check_deposit(
+    config: &crate::state::Config,
+    asset_cap: &Option<Box<Account<crate::state::AssetCap>>>,
+    v: &VaultCtx,
+    amount: u64,
+) -> Result<()> {
+    require!(!config.deposits_paused, PoolError::DepositsPaused);
+    let cap = asset_cap.as_ref().ok_or(error!(PoolError::WrongAssetCap))?;
+    require_keys_eq!(cap.mint, *v.mint.key, PoolError::WrongAssetCap);
+    let (expected, _) = Pubkey::find_program_address(&[crate::state::ASSET_CAP_SEED, v.mint.key.as_ref()], &crate::ID);
+    require_keys_eq!(cap.key(), expected, PoolError::WrongAssetCap);
+    require!(amount <= cap.max_per_deposit, PoolError::DepositTooLarge);
+    let balance = tokens::token_account_of(v.vault, v.mint.key, v.token_program.key)?.amount;
+    let after = balance.checked_add(amount).ok_or(error!(PoolError::DepositCapExceeded))?;
+    require!(after <= cap.max_total, PoolError::DepositCapExceeded);
+    Ok(())
+}
+
 // ------------------------------------------------------------------ transact
 
 pub fn transact<'info>(ctx: Context<'info, Transact<'info>>) -> Result<()> {
@@ -338,7 +361,9 @@ pub fn transact<'info>(ctx: Context<'info, Transact<'info>>) -> Result<()> {
     if ext.ext_amount > 0 {
         let v = vault.as_ref().unwrap();
         let from = opt_info(&a.depositor_token).ok_or(error!(PoolError::MissingAccount))?;
-        v.receive(&from, &payer, token_amount(ext.ext_amount as u128)?)?;
+        let amount = token_amount(ext.ext_amount as u128)?;
+        check_deposit(&a.config, &a.asset_cap, v, amount)?;
+        v.receive(&from, &payer, amount)?;
     }
 
     insert_with_memo(&mut pool, &args.output_commitments[0], ext.outputs[0], &mut emitter)?;
