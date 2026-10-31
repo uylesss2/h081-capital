@@ -164,7 +164,11 @@ public trusted-setup ceremony.
    Run `npm run solana:preflight` (local only, sends nothing) before any deploy.
 4. Deploy: `solana/scripts/mainnet-deploy.sh` (refuses any cluster but mainnet and an underfunded deployer), or
    per program `solana program deploy --program-id <program-keypair.json> --upgrade-authority <deployer> <name>.so -u <cluster>`.
-5. Initialize: `scripts/mainnet-init.mts` (pool, vault, loan registry, smoke test), or by hand: stipend_pool
+5. Initialize right after the deploy: `scripts/mainnet-init.mts` (pool + grow_pool, vault, loan registry, smoke
+   test). It takes the program id from `POOL_PROGRAM_ID` and/or `KEYS_DIR` (never the localnet default) and,
+   before signing, checks the upgradeable loader, that `DEPLOYER_KEY` is the upgrade authority and that the
+   deployed code equals `POOL_SO`; `LOAN_PROGRAM_ID` is optional. `scripts/mainnet-init-h081.mts` needs
+   `CAPACITY_PROGRAM_ID` and `SAFETY_PROGRAM_ID`. By hand: stipend_pool
    `initialize` (sets the deposit caps and the config authority), `create_vault` per mint; stream_loan
    `initialize`; safety_pool `init_pool` and capacity_stake `init_config` per H081 mint.
 6. **Make every program immutable** by removing its upgrade authority, irreversibly:

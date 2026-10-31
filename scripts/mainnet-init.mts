@@ -6,7 +6,13 @@
 //  4. A real disclose proof is uploaded to a buffer and checked by verify_proof through simulateTransaction
 //     (no state change), a tampered copy must fail, then the buffer is closed (rent refunded).
 // H081 staking (capacity_stake init_config, safety_pool init_pool) waits for the H081 mint to exist.
-// Usage (Windows): DEPLOYER_KEY=C:/Users/Joseph/H081-keys/h081-deployer-upgrade-authority.json npx tsx scripts/mainnet-init.mts
+// Program ids are never the SDK's LOCALNET_* defaults: the mainnet build has its own id patched in.
+//   POOL_PROGRAM_ID   the deployed stipend_pool id, and/or KEYS_DIR holding stipend_pool-keypair.json (both must agree)
+//   POOL_SO           the deployed stipend_pool.so; its executable hash must equal the chain's (required on mainnet)
+//   LOAN_PROGRAM_ID   optional; without it the loan registry step is skipped
+// Usage (Windows, Git Bash):
+//   DEPLOYER_KEY=solana/keys/mainnet/deployer-keypair.json KEYS_DIR=solana/keys/mainnet \
+//   POOL_SO=../h081-deploy-staging/so-mainnet/stipend_pool.so CONFIG_AUTHORITY=<pubkey> npx tsx scripts/mainnet-init.mts
 import { readFileSync } from 'node:fs';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { allowanceCommitment, initCrypto, randomField, randomKeys } from '../src/crypto.js';
@@ -14,10 +20,11 @@ import { MerkleTree } from '../src/merkle.js';
 import { LEVELS, discloseInput } from '../src/inputs.js';
 import { Prover } from '../src/prover.js';
 import {
-  LOCALNET_POOL_PROGRAM_ID as POOL, SolanaPool, closeBuffer, concatBytes, configPda, createVaultIx, decodeConfig, encodeFieldVec, encodeProof, fieldOf,
-  programDataAddress, send, simulate, uploadBuffer, vaultPda, verifyProofIx,
+  SolanaPool, closeBuffer, concatBytes, configPda, createVaultIx, decodeConfig, encodeFieldVec, encodeProof, fieldOf,
+  send, simulate, uploadBuffer, vaultPda, verifyProofIx,
 } from '../src/solana/index.js';
-import { LOCALNET_LOAN_PROGRAM_ID as LOAN, loanInitializeIx, registryPda } from '../src/solana/lender.js';
+import { MAINNET_GENESIS, resolvePoolTarget } from '../src/solana/deploy-target.js';
+import { loanInitializeIx, registryPda } from '../src/solana/lender.js';
 
 const RPC = process.env.MAINNET_RPC ?? 'https://api.mainnet-beta.solana.com';
 // USDG on Solana (Token-2022, 6 decimals). USDG_MINT may override it ONLY for a local dry run.
@@ -26,11 +33,20 @@ const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 const conn = new Connection(RPC, 'confirmed');
 const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(process.env.DEPLOYER_KEY!, 'utf8'))));
 
-if ((await conn.getGenesisHash()) !== '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d' && process.env.REHEARSE_LOCAL !== '1') throw new Error('not mainnet-beta');
-if (!(await conn.getAccountInfo(POOL))?.executable) throw new Error(`stipend_pool ${POOL.toBase58()} is not deployed`);
+const genesis = await conn.getGenesisHash();
+if (genesis !== MAINNET_GENESIS && process.env.REHEARSE_LOCAL !== '1') throw new Error('not mainnet-beta');
+// The deployed stipend_pool, checked before anything is signed: id given explicitly (never the localnet one on
+// mainnet), upgradeable loader, upgrade authority = DEPLOYER_KEY, executable = POOL_SO.
+const target = await resolvePoolTarget(conn, {
+  programId: process.env.POOL_PROGRAM_ID, keysDir: process.env.KEYS_DIR, genesis, payer: payer.publicKey,
+  expectSo: process.env.POOL_SO ? readFileSync(process.env.POOL_SO) : undefined,
+});
+const POOL = target.programId;
+console.log(`stipend_pool ${POOL.toBase58()}: upgrade authority ${target.upgradeAuthority!.toBase58()}, executable ${target.executableHash}`);
 // stream_loan is optional (the first mainnet release ships stipend_pool only; loans come later)
-const loanDeployed = !!(await conn.getAccountInfo(LOAN))?.executable;
-if (!loanDeployed) console.log(`stream_loan ${LOAN.toBase58()} is not deployed: skipping the loan registry`);
+const LOAN = process.env.LOAN_PROGRAM_ID ? new PublicKey(process.env.LOAN_PROGRAM_ID) : null;
+const loanDeployed = !!LOAN && !!(await conn.getAccountInfo(LOAN))?.executable;
+if (!loanDeployed) console.log(`stream_loan ${LOAN ? `${LOAN.toBase58()} is not deployed` : 'not given (LOAN_PROGRAM_ID)'}: skipping the loan registry`);
 const step = async (label: string, exists: PublicKey, run: () => Promise<unknown>) => {
   if (await conn.getAccountInfo(exists)) return console.log(`${label}: already done (${exists.toBase58()})`);
   await run();
@@ -44,17 +60,13 @@ const guard = {
   maxPerDeposit: BigInt(process.env.MAX_PER_DEPOSIT ?? 1_000_000_000), // 1,000 USDG
 };
 console.log(`deposit guard: authority ${guard.authority.toBase58()}, max total ${guard.maxTotal}, max per deposit ${guard.maxPerDeposit}`);
-// initialize requires the upgrade authority: check it before sending (ProgramData: tag u32 | slot u64 | Option<Pubkey>)
-const pd = (await conn.getAccountInfo(programDataAddress(POOL)))?.data;
-if (!pd || pd[12] !== 1 || !new PublicKey(pd.subarray(13, 45)).equals(payer.publicKey)) throw new Error('DEPLOYER_KEY is not the upgrade authority of stipend_pool');
 // one transaction (initialize + grow_pool); a pool left short of full size is finished
 await new SolanaPool(conn, POOL).initialize(payer, guard);
 const config = decodeConfig((await conn.getAccountInfo(configPda(POOL), 'confirmed'))!.data);
 if (!config.authority.equals(guard.authority)) throw new Error(`config.authority is ${config.authority.toBase58()}, expected ${guard.authority.toBase58()}`);
 console.log(`pool initialize: done; config.authority ${config.authority.toBase58()} verified on chain`);
 await step('USDG vault', vaultPda(POOL, USDG), () => send(conn, payer, [createVaultIx(POOL, payer.publicKey, USDG, TOKEN_2022)]));
-const registry = registryPda(LOAN);
-if (loanDeployed) await step('loan registry initialize', registry, () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));
+if (LOAN && loanDeployed) await step('loan registry initialize', registryPda(LOAN), () => send(conn, payer, [loanInitializeIx(payer.publicKey, LOAN)]));
 
 // Smoke test: real proof checked by the live program, without changing any state.
 await initCrypto();
