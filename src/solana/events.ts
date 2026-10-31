@@ -130,10 +130,11 @@ export class PoolEventLog {
   }
 
   /**
-   * Fetches transactions newer than the last refresh; returns the number of new events. All-or-nothing:
-   * the cursor and the event list only advance after every new transaction was fetched and decoded, so a
-   * failed refresh (RPC error, a transaction not yet available) loses nothing and the next one retries it.
-   * Concurrent calls (many wallets share one log) run one after another.
+   * Fetches transactions newer than the last refresh; returns the number of new events. Progress is kept
+   * per chunk of 25 transactions, oldest first: the cursor and the event list advance only after a whole
+   * chunk was fetched and decoded, so a failed refresh (RPC error, a transaction not yet available) keeps
+   * the chunks before it, loses nothing, and the next refresh resumes where it stopped. Concurrent calls
+   * (many wallets share one log) run one after another.
    */
   refresh(): Promise<number> {
     const run = this.inflight.catch(() => 0).then(() => this.refreshOnce());
@@ -161,23 +162,90 @@ export class PoolEventLog {
     }
     if (sigs.length === 0) return 0;
     const ordered = sigs.filter((s) => !s.err && !this.byTx.has(s.signature)).reverse();
-    const staged: Array<[string, LocatedEvent[]]> = [];
+    let added = 0;
     for (let i = 0; i < ordered.length; i += 25) {
       const chunk = ordered.slice(i, i + 25);
       const txs = await Promise.all(chunk.map((s) => this.fetchTx(s.signature)));
+      const staged: Array<[string, LocatedEvent[]]> = [];
       txs.forEach((tx, j) => {
         const evs = eventsOfTransaction(tx, this.programId).map((e, seq) => ({ ...e, signature: chunk[j].signature, slot: tx.slot, seq }));
         if (evs.length > 0) staged.push([chunk[j].signature, evs]);
       });
-    }
-    // commit: nothing above can have touched the log
-    let added = 0;
-    for (const [sig, evs] of staged) {
-      this.byTx.set(sig, evs);
-      this.events.push(...evs);
-      added += evs.length;
+      // commit the whole chunk (every older transaction is already in); nothing above touched the log
+      for (const [sig, evs] of staged) {
+        this.byTx.set(sig, evs);
+        this.events.push(...evs);
+        added += evs.length;
+      }
+      this.newest = chunk[chunk.length - 1].signature;
     }
     this.newest = sigs[0].signature;
     return added;
   }
+
+  /**
+   * The log as plain JSON (public chain data only, no secrets), so a client can cache it (IndexedDB, a file,
+   * a same-origin snapshot) and `restore` it instead of rescanning the pool's whole history. Check what a
+   * restored log produces against the chain (`SolanaWallet.matchesChain`) and drop the cache when it does
+   * not match (a reset localnet reuses program ids).
+   */
+  snapshot(): PoolEventLogSnapshot {
+    return {
+      v: 1, programId: this.programId.toBase58(), newest: this.newest,
+      events: this.events.map((e) => Object.fromEntries(Object.entries(e).map(([k, v]) => [k, packValue(v)]))),
+    };
+  }
+
+  /**
+   * Loads a `snapshot` into an empty log; the next refresh fetches only what is newer. Returns false and
+   * loads nothing when the log is not empty or the snapshot is for another program or malformed.
+   */
+  restore(snap: PoolEventLogSnapshot): boolean {
+    if (this.events.length > 0 || this.newest !== undefined) return false;
+    try {
+      if (snap?.v !== 1 || snap.programId !== this.programId.toBase58() || !Array.isArray(snap.events)) return false;
+      if (snap.newest !== undefined && typeof snap.newest !== 'string') return false;
+      if (snap.events.length > 0 && snap.newest === undefined) return false;
+      const events = snap.events.map((raw) => {
+        const e = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, unpackValue(v)])) as unknown as LocatedEvent;
+        if (!NAMES.includes(e.name) || typeof e.signature !== 'string' || typeof e.slot !== 'number' || typeof e.seq !== 'number') throw new Error('bad event');
+        return e;
+      });
+      for (const e of events) {
+        const list = this.byTx.get(e.signature);
+        if (list) list.push(e); else this.byTx.set(e.signature, [e]);
+      }
+      this.events.push(...events);
+      this.newest = snap.newest;
+      return true;
+    } catch {
+      this.events.length = 0;
+      this.byTx.clear();
+      this.newest = undefined;
+      return false;
+    }
+  }
+}
+
+/** JSON form of a PoolEventLog (`PoolEventLog.snapshot`). Values: bigint "n:<decimal>", bytes "b:<hex>", keys "k:<base58>". */
+export interface PoolEventLogSnapshot { v: 1; programId: string; newest?: string; events: Array<Record<string, string | number>> }
+
+function packValue(v: unknown): string | number {
+  if (typeof v === 'bigint') return `n:${v}`;
+  if (v instanceof Uint8Array) return `b:${hex(v)}`;
+  if (v instanceof PublicKey) return `k:${v.toBase58()}`;
+  if (typeof v === 'string' || typeof v === 'number') return v;
+  throw new Error('unexpected event value');
+}
+
+function unpackValue(v: unknown): unknown {
+  if (typeof v === 'number') return v;
+  if (typeof v !== 'string') throw new Error('bad snapshot value');
+  if (v.startsWith('n:')) return BigInt(v.slice(2));
+  if (v.startsWith('b:')) {
+    if (!/^(?:[0-9a-f]{2})*$/.test(v.slice(2))) throw new Error('bad hex');
+    return Uint8Array.from(Buffer.from(v.slice(2), 'hex'));
+  }
+  if (v.startsWith('k:')) return new PublicKey(v.slice(2));
+  return v;
 }

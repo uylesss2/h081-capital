@@ -38,7 +38,7 @@ import {
 } from './ops.js';
 import { vaultPda } from './pda.js';
 import {
-  DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, encodeDiscloseArgs, encodeStreamArgs, growPoolIx, initializePoolIxs, isPoolComplete,
+  DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, decodePool, encodeDiscloseArgs, encodeStreamArgs, growPoolIx, initializePoolIxs, isPoolComplete,
   poolGrowsNeeded, verifyDisclosureIx, verifyStreamIx,
 } from './program.js';
 import { poolPda } from './pda.js';
@@ -175,6 +175,30 @@ export class SolanaPool {
 
   ata(mint: PublicKey, owner: PublicKey, tokenProgram: PublicKey): PublicKey {
     return getAssociatedTokenAddressSync(mint, owner, true, tokenProgram);
+  }
+
+  /**
+   * Public payouts (withdraw, pay to a Solana key) go to the recipient's associated token account, and only
+   * the recipient's signature can move them out. Off-curve recipients (PDAs) are refused unless this is set:
+   * a PDA's program may sign for it, but often nothing ever will.
+   */
+  allowOffCurveRecipients = false;
+
+  /**
+   * Refuses a public recipient that could never move a payout out of its associated token account: a token
+   * account or mint (an exchange deposit address is often a token account), a program, or, unless
+   * `allowOffCurve` (default `allowOffCurveRecipients`), an off-curve address. Read only.
+   */
+  async checkRecipient(recipient: PublicKey, opts: { allowOffCurve?: boolean } = {}): Promise<void> {
+    const info = await this.connection.getAccountInfo(recipient, 'confirmed');
+    const k = recipient.toBase58();
+    if (info && (info.owner.equals(TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID))) {
+      throw new Error(`recipient ${k} is a token account or mint, not a wallet: a payout to it could never be moved. Use the wallet address that owns it.`);
+    }
+    if (info?.executable) throw new Error(`recipient ${k} is a program, not a wallet`);
+    if (!PublicKey.isOnCurve(recipient.toBytes()) && !(opts.allowOffCurve ?? this.allowOffCurveRecipients)) {
+      throw new Error(`recipient ${k} is a program-derived address (no private key): a payout to it may never be movable`);
+    }
   }
 
   /** The owner's associated token account for `mint`, created (idempotently, paid by `payer`) when missing. */
@@ -406,6 +430,19 @@ abstract class Scanner {
 
   isSpent(nullifier: bigint): boolean {
     return this.nullifierSet.has(nullifier);
+  }
+
+  /**
+   * Whether the tree built from the event log is one the pool has committed: its root is in the on-chain
+   * root history and it has no more leaves than the pool. False means the events (e.g. a cached
+   * `PoolEventLog.snapshot` from another chain) do not belong to this pool: drop them and sync from scratch.
+   * Read only.
+   */
+  async matchesChain(): Promise<boolean> {
+    const info = await this.pool.connection.getAccountInfo(poolPda(this.pool.programId), 'confirmed');
+    if (!info) return this.tree.size === 0;
+    const st = decodePool(info.data);
+    return this.tree.size <= st.nextIndex && st.roots.includes(this.tree.root);
   }
 }
 
@@ -670,6 +707,7 @@ export class SolanaWallet extends Scanner {
 
   /** Unshield: `amount` leaves the pool to `recipient`'s associated token account; it gets amount - fee. */
   async withdraw(mint: PublicKey, amount: bigint, recipient: PublicKey, relay: SolRelay = {}): Promise<SolTxResult> {
+    await this.pool.checkRecipient(recipient);
     await this.sync();
     const asset = this.registerMint(mint);
     const fee = relay.fee ?? 0n;
@@ -747,6 +785,7 @@ export class SolanaWallet extends Scanner {
 
   /** Builds and proves a spend without sending it. `now` defaults to the chain clock. */
   async prepareSpend(owned: SolOwnedAllowance, amount: bigint, to: PublicKey | StipendAddress, relay: SolRelay = {}, opts: { now?: bigint } = {}): Promise<PreparedSpend> {
+    if (to instanceof PublicKey) await this.pool.checkRecipient(to);
     await this.sync();
     const a = owned.allowance;
     if (a.policy.pledgeBps !== 0n && !owned.lender) throw new Error('pledged allowance without its lender info');

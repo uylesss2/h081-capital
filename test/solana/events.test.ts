@@ -85,6 +85,45 @@ describe('PoolEventLog.refresh', () => {
     expect(nullifiers(log)).toEqual([1n, 2n]);
   });
 
+  it('keeps whole chunks fetched before a failure, and resumes after them', async () => {
+    const rpc = new FakeRpc();
+    const log = new PoolEventLog(rpc as unknown as Connection, programId, { fetchAttempts: 1 });
+    for (let i = 1; i <= 60; i++) rpc.add(`S${i}`, BigInt(i));
+    rpc.missing.add('S30'); // in the second chunk of 25
+    await expect(log.refresh()).rejects.toThrow(/not found/);
+    expect(nullifiers(log)).toEqual(Array.from({ length: 25 }, (_, i) => BigInt(i + 1)));
+    rpc.missing.clear();
+    let fetched = 0;
+    const orig = rpc.getTransaction.bind(rpc);
+    rpc.getTransaction = async (s: string) => { fetched++; return orig(s); };
+    expect(await log.refresh()).toBe(35);
+    expect(fetched).toBe(35); // the first 25 are not fetched again
+    expect(nullifiers(log)).toEqual(Array.from({ length: 60 }, (_, i) => BigInt(i + 1)));
+  });
+
+  it('snapshot/restore: a restored log fetches only what is newer and matches a full scan', async () => {
+    const rpc = new FakeRpc();
+    for (let i = 1; i <= 7; i++) rpc.add(`S${i}`, BigInt(i));
+    const a = new PoolEventLog(rpc as unknown as Connection, programId);
+    await a.refresh();
+    const snap = JSON.parse(JSON.stringify(a.snapshot()));
+    rpc.add('S8', 8n);
+    const b = new PoolEventLog(rpc as unknown as Connection, programId);
+    expect(b.restore(snap)).toBe(true);
+    expect(b.restore(snap)).toBe(false); // only into an empty log
+    let fetched = 0;
+    const orig = rpc.getTransaction.bind(rpc);
+    rpc.getTransaction = async (s: string) => { fetched++; return orig(s); };
+    expect(await b.refresh()).toBe(1);
+    expect(fetched).toBe(1);
+    expect(nullifiers(b)).toEqual([1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n]);
+    expect(b.byTx.size).toBe(8);
+    expect(new PoolEventLog(rpc as unknown as Connection, Keypair.generate().publicKey).restore(snap)).toBe(false); // other program
+    const bad = new PoolEventLog(rpc as unknown as Connection, programId);
+    expect(bad.restore({ ...snap, events: [{ name: 'Nope', signature: 'x', slot: 1, seq: 0 }] })).toBe(false);
+    expect(bad.events).toHaveLength(0);
+  });
+
   it('concurrent refreshes do not duplicate events', async () => {
     const rpc = new FakeRpc();
     const log = new PoolEventLog(rpc as unknown as Connection, programId);
