@@ -1,0 +1,49 @@
+{
+  "ceremony": "H0.81 Capital (stipend) Groth16 phase 2",
+  "protocol": "groth16",
+  "curve": "bn128",
+  "ptau": {
+    "file": "powersOfTau28_hez_final_17.ptau",
+    "blake2b": "6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345",
+    "sha256": "6b662a324867139fb1a20a324d90b6ff61856dfb23f59326909f14b0e2483ae0",
+    "verified": false,
+    "expected": "6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345"
+  },
+  "circuits": {
+    "transact": {
+      "r1cs": "build/circuits/transact/transact.r1cs",
+      "r1csSha256": "a6ca965d2a452a98c6d3721810fc48e20a73fe068bf3609c1f9a128574aedc49",
+      "circuitHash": "4c2b6c97c19ea5c1fdff30a288ec20a47c9b429cc987f5e399b3559b606d1aca3d03152e10391bcd98287964ff7fdba534bd8a65abb7a5430ca81bd5e4a5ace2",
+      "constraints": 27950,
+      "publicInputs": 8,
+      "contributions": [
+        {
+          "index": 1,
+          "name": "H0.81 project team, contribution 1",
+          "at": "2026-10-31T00:41:10.890Z",
+          "contributionHash": "14dc59a407c5074a7a8a5a5d92ae4260495c9913bb5d039d92259038657c4ea5b2ae2a561a800e605f5ee06f78b880ca794c16dca757c1cf889df508df2c4169"
+        },
+        {
+          "index": 2,
+          "name": "H0.81 project team, contribution 2",
+          "at": "2026-10-31T00:41:13.863Z",
+          "contributionHash": "0136fd69dcde771c9e7d4be09f30a76ac833a423a3b1565947bf58c74789edd9eb7662b75d34ce60347c0c15060d11bf6634a5e81a1173c6a5d5041e7c8cde59"
+        },
+        {
+          "index": 3,
+          "name": "H0.81 project team, contribution 3",
+          "at": "2026-10-31T00:41:17.046Z",
+          "contributionHash": "1c01a14447ce70154edf4a43b2f9c854b4a03ec46517f8c273b59caf8cf4a9cc5a7d75e18f985ca6d2b989bb47e003e7690930d769ae4f0d087d45413bb862b5"
+        }
+      ],
+      "beacon": {
+        "value": "f7aa63083f307cb8ec4b548e4a50893cd8248c097a1ebf85bb0675639ea7485b",
+        "source": "Solana mainnet-beta block hash HfnPkpVKUZ2enGWZo7zjMh6xCZWNyDetvejnhnMaXW4S (slot 463490557, block height 441512795), base58-decoded to 32 bytes",
+        "iterationsExp": 10,
+        "contributionHash": "9944c6e519e6d73db202eebe9b904478831c2a24a3283519ec04f16d18dcd15c3af4c7ad6a9be32a6d1ed72550fdc2aef81b954c3378a829c6ac5033df411880"
+      },
+      "finalZkeySha256": "19115cc60b47b8ba71a8bd2ec0eb7d1973801df78d5eee52550c1daca8ca940f",
+      "vkeySha256": "ea4def715d6fe7c4dd834ee973f491d80fac913b7c0a10e2a505faa0091259bb"
+    }
+  }
+}
