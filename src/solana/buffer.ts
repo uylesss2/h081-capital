@@ -5,18 +5,20 @@ import {
 import { randomBytes } from '@noble/hashes/utils';
 import { bufferCloseIx, bufferGrowIx, bufferOpenIx, bufferWriteIx, BUFFER_GROW_STEP, BUFFER_MAX_INIT, BUFFER_MAX_LEN } from './program.js';
 import { bufferPda } from './pda.js';
+import { sendLegacy } from './send.js';
 
 /** Bytes per buffer_write; keeps each transaction well under the 1,232-byte limit. */
 export const WRITE_CHUNK = 900;
 
 export interface SentTx { signature: string; computeUnits: number; logs: string[] }
 
-/** Sends `ixs` (with a compute-unit limit) and returns the consumed compute units from the confirmed tx. */
+/**
+ * Sends `ixs` with a measured compute-unit limit and a priority fee, rebroadcasting until confirmed (send.ts),
+ * and returns the consumed compute units from the confirmed tx. `opts.cuLimit` is accepted for callers; the
+ * limit is measured by simulation.
+ */
 export async function send(connection: Connection, payer: Keypair, ixs: TransactionInstruction[], opts: { cuLimit?: number; signers?: Keypair[] } = {}): Promise<SentTx> {
-  const tx = new Transaction();
-  if (opts.cuLimit) tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: opts.cuLimit }));
-  tx.add(...ixs);
-  const signature = await sendAndConfirmTransaction(connection, tx, [payer, ...(opts.signers ?? [])], { commitment: 'confirmed' });
+  const signature = await sendLegacy(connection, payer, [payer, ...(opts.signers ?? [])], ixs);
   const info = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
   return { signature, computeUnits: info?.meta?.computeUnitsConsumed ?? -1, logs: info?.meta?.logMessages ?? [] };
 }

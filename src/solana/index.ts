@@ -8,6 +8,7 @@ export * from './events.js';
 export * from './wallet.js';
 export * from './alt.js';
 export * from './relay.js';
+export * from './send.js';
 // stream_loan (lender side of stream-backed loans) and Phase 2 staking (capacity_stake, safety_pool).
 // Namespaced: they carry their own program ids, PDAs and error tables.
 export * as loan from './lender.js';

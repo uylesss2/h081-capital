@@ -18,6 +18,7 @@ import {
 } from '@solana/web3.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { randomSeed } from './buffer.js';
+import { budgetReserve, encodeSig, sendSigned, withBudget } from './send.js';
 import { eventAuthorityPda, poolPda, vaultAuthorityPda, vaultPda, bufferPda } from './pda.js';
 import { BUFFER_GROW_STEP, BUFFER_MAX_INIT, BUFFER_MAX_LEN, bufferCloseIx, bufferGrowIx, bufferOpenIx, bufferWriteIx } from './program.js';
 
@@ -85,8 +86,9 @@ export function v0Size(payer: PublicKey, instructions: TransactionInstruction[],
   }
 }
 
+/** Whether `instructions` fit in one transaction together with the compute-budget instructions sendV0 adds. */
 export const fits = (payer: PublicKey, instructions: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = []) =>
-  v0Size(payer, instructions, lookupTables) <= PACKET_DATA_SIZE;
+  v0Size(payer, [...budgetReserve(), ...instructions.filter((ix) => !ix.programId.equals(ComputeBudgetProgram.programId))], lookupTables) <= PACKET_DATA_SIZE;
 
 /** Largest n in [lo, hi] with ok(n), or lo - 1 when ok(lo) is false. ok must be monotone (true then false). */
 function largest(lo: number, hi: number, ok: (n: number) => boolean): number {
@@ -189,12 +191,12 @@ export function legacyTransactions(payloadLength: number, writeChunk = 900): num
 export interface SentV0 { signature: string; computeUnits: number; logs: string[] }
 
 export async function sendV0(connection: Connection, payer: Keypair, instructions: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = [], signers: Keypair[] = []): Promise<SentV0> {
+  const full = await withBudget(connection, payer.publicKey, instructions, lookupTables);
   const latest = await connection.getLatestBlockhash('confirmed');
-  const tx = buildV0Transaction(payer.publicKey, instructions, latest.blockhash, lookupTables);
+  const tx = buildV0Transaction(payer.publicKey, full, latest.blockhash, lookupTables);
   tx.sign([payer, ...signers]);
-  const signature = await connection.sendTransaction(tx, { skipPreflight: false, preflightCommitment: 'confirmed' });
-  const res = await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
-  if (res.value.err) throw new Error(`transaction ${signature} failed: ${JSON.stringify(res.value.err)}`);
+  const signature = encodeSig(tx.signatures[0]);
+  await sendSigned(connection, tx.serialize(), signature, latest.lastValidBlockHeight);
   const info = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
   return { signature, computeUnits: info?.meta?.computeUnitsConsumed ?? -1, logs: info?.meta?.logMessages ?? [] };
 }
