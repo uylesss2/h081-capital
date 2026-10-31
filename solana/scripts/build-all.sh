@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds every program with cargo build-sbf and copies the .so files into solana/target-so/ (gitignored):
-#   stipend_pool.so, stipend_pool_probe.so (feature merkle-probe, localnet only),
+#   stipend_pool.so (feature no-log-ix-name, as on mainnet), stipend_pool_probe.so (feature merkle-probe, localnet only),
 #   stream_loan.so,
 #   capacity_stake.so, capacity_stake_fast.so, safety_pool.so, safety_pool_fast.so (feature fast, localnet only).
 # Build artifacts live in $CARGO_TARGET_DIR (WSL home, for speed).
@@ -25,7 +25,7 @@ build() { # <program> <out-name> [features]
   ls -l "$dir/$p.so" | awk '{print "   " $5 " bytes"}'
   if [ "${NO_COPY:-}" != "1" ]; then cp "$dir/$p.so" "target-so/$name.so"; fi
 }
-build stipend_pool stipend_pool
+build stipend_pool stipend_pool no-log-ix-name   # production .so: same features as the mainnet build
 build stipend_pool stipend_pool_probe merkle-probe
 build stream_loan stream_loan
 build capacity_stake capacity_stake

@@ -3,6 +3,9 @@ members = ["programs/*"]
 resolver = "2"
 
 [profile.release]
+# Size-optimized: keeps mainnet deploy rent low.
+opt-level = "z"
+strip = true
 overflow-checks = true
 lto = "fat"
 codegen-units = 1
