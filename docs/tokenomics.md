@@ -4,9 +4,10 @@
 > Official contract: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (SPL token, 1,000,000,000 fixed supply, no mint or
 > freeze authority, flat 2% trade fee: 0.4% Meteora, 1.6% creator; no presale, no dev buy). Website https://h081.xyz,
 > X https://x.com/H081CAP. The launchpad route, fee split and vault described below are superseded; the Phase 2
-> staking and insurance design still stands and is not deployed.
+> staking (capacity_stake `CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`) and safety pool (safety_pool
+> `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`) are live on Solana mainnet since 2026-10-31.
 
-Status 2026-10-26: **no token is launched, and nothing in this repository is deployed to any chain.**
+Status 2026-10-26 (historical; superseded by the note above): no token was launched and nothing was deployed at that date.
 **Route decided: the main trading token H081 launches on Solana through the launchpad** (owner decision of
 2026-10-26; guide in the launch guide). It is a Token-2022 coin with a fixed 1,000,000,000 supply. The
 the EVM launchpad plan for Robinhood Chain is superseded. The bank product itself now also moves to Solana (owner decision

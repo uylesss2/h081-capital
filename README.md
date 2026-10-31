@@ -1,23 +1,24 @@
 # H0.81 Capital protocol (codename Stipend)
 
 Private, programmable treasuries for AI agents on Solana, and the first private cashflow a lender
-can lend against. One shielded pool holds any SPL Token or Token-2022 asset (USDG, xStocks). Owners fund up to sixteen agents per proof; each
+can lend against. One shielded pool holds any SPL Token or Token-2022 asset (live on mainnet: USDG). Owners fund up to sixteen agents per proof; each
 agent's spending policy lives inside its note, so a payment that breaks the policy has no valid proof.
 Agents delegate slices of their allowance to sub-agents under provably tighter policy, budgets stream at
 a rate per second, and an owner can pledge a streamed allowance to a lender: a fixed share of every spend
 is routed to the lender inside the spend proof, and the lender can pull its share of what has vested.
 Owners, agents and lenders prove bounds on balances and rates without revealing amounts, counterparties
-or policies. There is no admin key, pause switch or upgrade path on any contract, with one exception: on Solana a
-config authority can cap and pause DEPOSITS into stipend_pool (never withdrawals or other outflows).
+or policies. On Solana mainnet a config authority can cap and pause deposits, safety-pool deposits and new stakes
+(never withdrawals, unbonding or unstaking), and the team holds the upgrade key of every program
+(see "Deployed on Solana mainnet").
 
-Target chain: **Solana** (owner decision 2026-10-26), the same chain as the H081 token. Assets: USDG and
-tokenized stocks (xStocks; not available to US persons). The Solana programs (`solana/`: stipend_pool,
+Target chain: **Solana** (owner decision 2026-10-26), the same chain as the H081 token. Asset live on mainnet: USDG. The Solana programs (`solana/`: stipend_pool,
 stream_loan, capacity_stake, safety_pool) are built and tested on a local validator per
 `docs/SOLANA-PORT.md`; see "Solana programs" below and `solana/README.md`. The EVM contracts in
 `contracts/` were built for Robinhood Chain and are kept as the reference implementation. Robinhood Chain is
 no longer the target.
-**The H081 token is live on Solana (below). The protocol programs in this repository are not deployed to
-any public chain yet.**
+**Live on Solana mainnet since 2026-10-31: the H081 token and all four protocol programs (bank, loans,
+safety pool, capacity staking). Program ids, authorities and build hashes are under "Deployed on Solana
+mainnet" below. The programs have not had an external audit yet; deposits are capped.**
 
 ## H081 token: the official contract
 
@@ -36,8 +37,8 @@ any public chain yet.**
 
 This is the only official H081 contract. Any other token named H081 or "H0 81 Capital" is not ours.
 The token's on-chain metadata carries only its name and ticker, so this README and https://h081.xyz/token
-are where the contract is published. Today H081 is a trading token; the staking and insurance uses
-described under "Phase 2" need the Solana programs to be deployed first.
+are where the contract is published. H081 can be staked in capacity_stake and deposited in safety_pool, both live on Solana mainnet
+(see "Deployed on Solana mainnet").
 
 ## The six circuits
 
@@ -156,7 +157,7 @@ loan `opaque` to the lender's wallet, which then relies on the routed shares and
 `claim(loanRef, amount?)`, `fund(loanRef, streamProof, asset, principal, payoutTo)` (refuses a proof that
 does not restate a live note it holds), `collect`, `settle`, `loan`, `shortfall`, `opaque(loanRef)`.
 
-## Phase 2 contracts (`contracts/token/`, built and tested, not deployed)
+## Phase 2 EVM reference contracts (`contracts/token/`; the Solana versions are live, see above)
 
 - `StipendToken` (EVM reference only; the real H081 is the Solana token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`): plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
   commitment), 18 decimals, whole supply minted once to the deployer. No mint, no owner.
@@ -288,31 +289,41 @@ Measured compute units (local validator): deposit 191k, withdraw 188k, grant 565
 spend 180k, shielded spend 169k, pledged spend 198k, lender claim 181k, delegate 237k; Groth16 spend verify
 121k. All are asserted against budgets in the tests and written to `solana/target-so/compute-units*.json`.
 
-## What is not deployed
+## Deployed on Solana mainnet
 
-- No contract or program in this repository is deployed to Solana (devnet or mainnet), Robinhood Chain,
-  its testnet, or any other public chain. The Solana programs have only run on private local
-  `solana-test-validator` instances, loaded as immutable programs at localnet ids whose keypairs live in the
-  gitignored `solana/keys/` and must never be used for a public cluster.
-- No Solana program has been given an upgrade authority on any cluster, and none has been made final;
-  removing the upgrade authority (`solana program set-upgrade-authority <ID> --final`) is part of a future
-  deployment and happens only on the owner's explicit go (`solana/README.md`, "Deploying").
-- The H081 token is the one deployed piece: `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` on Solana
-  (see "H081 token" above). `StipendToken.sol` is an EVM reference contract in the repo, not the token; the
-  the EVM launchpad and the launchpad launch plans are superseded.
-- **Superseded for the protocol (2026-10-26):** the EVM deploy below targets Robinhood Chain and is kept
-  only for the reference implementation; the bank ships as Solana programs (`docs/SOLANA-PORT.md`).
-- `scripts/deploy.mjs` deploys the hasher, the six verifiers, the pool and the `StreamLoan` registry to
-  the named network and writes `deployments/<network>.json`; mainnet additionally needs `STIPEND_ALLOW_MAINNET=1`.
-  It does not deploy the Phase 2 contracts.
-- Mainnet only after an external audit and a public trusted-setup ceremony.
+Deployed and initialized 2026-10-31. Every program is upgradeable; the upgrade authority is the team's deployer
+key `5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1`. The config authority (caps, deposit pause, safety-pool
+underwriting) is `4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2`. No program has had an external audit yet.
 
+| Program | Program id | `.so` sha256 |
+|---|---|---|
+| stipend_pool (private bank) | [`E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM`](https://solscan.io/account/E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM) | `4e1fbbc3d1c7d094824ce323f34bbc671f68334b15a2467da4533e11052c1a51` |
+| stream_loan (loans) | [`8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`](https://solscan.io/account/8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4) | `d8cfbca52d22b231e0c9e376a613847157676c275bb9852ee02a2f7d7205d3c0` |
+| safety_pool (H081 safety pool) | [`HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`](https://solscan.io/account/HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt) | `6415fd13484703f1e31950abfcd17c1edf6edf8a5c9ff95646ca2df0ae10bce7` |
+| capacity_stake (H081 staking) | [`CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`](https://solscan.io/account/CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU) | `bbe8b1a2450dc6275b0229954d6b2f1fdb706cb27ab643697aa5f6b22a1082f2` |
+
+Accounts: USDG vault `FaRG7DV8e7XF3RyoZrBb3h1oLiFFWFFCuYDSXsDoyyzG` (USDG mint `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH`),
+loan registry `5MMWdQWZB3JWTCZXZsEGSLWegi9bk9iSitT9avdLo4Kt`, safety pool `91QLL95oPgJF8yjWeKb41yMs5Z48UPd9mTXMH7xppoQA`,
+capacity config `7QuqMc95ry9sjeem5gsS4SNQzoQfoHqVwSvAcSFq8uKS`. Loan fee treasury (0.25% origination):
+`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`.
+
+Limits: 1,000 USDG per deposit and 10,000 USDG in the bank in total; 100,000 H081 per safety-pool deposit or
+stake and 1,000,000 H081 in total. The safety pool covers no loan until the config authority enables
+underwriting. Live transactions: https://h081.xyz/proof. Full deploy procedure: `docs/MAINNET-RUNBOOK.md`.
+
+Check that what runs on chain is this code (read-only):
+
+```bash
+npx tsx scripts/solana-program-hash.mts --program E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM   --cluster mainnet-beta --so <your build of stipend_pool.so>          # prints MATCH or MISMATCH
 ```
-DEPLOYER_KEY=0x... npm run deploy -- robinhoodTestnet
-STIPEND_ALLOW_MAINNET=1 DEPLOYER_KEY=0x... npm run deploy -- robinhood
-```
 
-The pool has no owner, so redeploying is just a new address.
+Other notes:
+
+- The H081 token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` (see "H081 token" above). `StipendToken.sol` is
+  an EVM reference contract in the repo, not the token.
+- The EVM contracts (`contracts/`, Robinhood Chain) are a reference implementation and are not deployed.
+  `scripts/deploy.mjs` deploys them to a named EVM network; mainnet additionally needs `STIPEND_ALLOW_MAINNET=1`.
+- An external audit is planned. The trusted setup was run by the team (`docs/CEREMONY.md`), not a public ceremony.
 
 ## Using the SDK
 

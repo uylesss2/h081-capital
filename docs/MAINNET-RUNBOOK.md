@@ -350,7 +350,7 @@ solana program close E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM \
 
 ---
 
-# Phase 2: stream_loan, safety_pool, capacity_stake (prepared 2026-10-31, NOT deployed)
+# Phase 2: stream_loan, safety_pool, capacity_stake (deployed and initialized on mainnet 2026-10-31)
 
 Nothing below has been sent to mainnet. Every MAINNET TX step needs the owner's explicit go on the exact SOL
 figure first (owner cap for all four programs: **7.5 SOL peak in the deployer**).

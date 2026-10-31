@@ -148,10 +148,11 @@ the scripts stop only validators matched by their own ledger path. Compute units
 go to `solana/target-so/compute-units*.json` and are checked against budgets in the tests.
 Single suites: `npm run test:solana:pool`, `npm run test:solana:loan`, `npm run test:staking`.
 
-## Deploying (owner's explicit go only; not done)
+## Deploying (owner's explicit go only)
 
-Nothing below has been run against any public cluster. Mainnet comes only after an external audit and a
-public trusted-setup ceremony.
+Done on Solana mainnet on 2026-10-31 for all four programs; ids and hashes are in the top-level README
+("Deployed on Solana mainnet") and the exact procedure in `docs/MAINNET-RUNBOOK.md`. An external audit is planned.
+The programs keep their upgrade authority (none is made final).
 
 1. Generate the real program keypairs offline (never the localnet ones in `solana/keys/`). Put their ids in
    every `declare_id!`, in `stream_loan/src/pool.rs` (`POOL_PROGRAM_ID`), in
