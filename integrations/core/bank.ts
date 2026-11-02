@@ -3,11 +3,16 @@
 //   - one Solana keypair signs (buffer staging takes several transactions per operation), holds the public
 //     USDG/SOL/H081, and derives the shielded account (keys.ts);
 //   - deposits are checked against the program's caps and the wallet's balances before a proof is made;
-//   - withdrawals go through the relayer when it accepts USDG (fee to the treasury), else the signer sends;
+//   - withdrawals go through the relayer (fee to the treasury's USDG account, checked here before anything is
+//     proven); when the relayer is configured but unavailable the withdrawal is refused, never silently sent
+//     by the agent key (that would link the wallet to the recipient on chain); `direct: true` or an empty
+//     H081_RELAYER_URL is the only way the signer sends. Above the relayer's anonymous free tier the agent
+//     wallet is named as capacity operator (H081 staked in capacity_stake);
 //   - loans are the site's two-party flow (pledge + lender proof code), there is no matching here;
 //   - every program error is explained (errors.ts).
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ed25519 } from '@noble/curves/ed25519';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, type TransactionInstruction } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { Account } from '../../src/account.js';
@@ -23,9 +28,9 @@ import { createAtaIdempotentIx, readCapacity, requestUnstakeIx, stakeIx, unstake
 import type { PoolEventLogSnapshot } from '../../src/solana/events.js';
 import { FlatDirProver } from './circuits.js';
 import { decodeTerms, encodeProofCode } from './codes.js';
-import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, checkCluster } from './constants.js';
+import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, checkCluster, isMainnetConfig, rpcHost } from './constants.js';
 import { type ProgramKind, explained } from './errors.js';
-import { deriveAgentSk } from './keys.js';
+import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk } from './keys.js';
 import { fromUnits } from './units.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
@@ -52,6 +57,16 @@ export interface BalanceView {
 export interface DepositResult { signature: string; amount: bigint; amountUsdg: string; shielded: bigint; shieldedUsdg: string; computeUnits: number }
 export interface WithdrawResult {
   signature: string; amount: bigint; fee: bigint; received: bigint; receivedUsdg: string; to: string; via: 'relayer' | 'direct'; shielded: bigint; shieldedUsdg: string;
+  /** the agent wallet, when it was named to the relayer as capacity operator (public amount above the free tier) */
+  operator?: string;
+}
+
+/** The relayer is configured but cannot be used: unreachable, wrong pool or asset, or a fee account that is not the treasury's. */
+export class RelayerUnavailableError extends Error {
+  constructor(readonly reason: 'unreachable' | 'no_solana' | 'asset_not_accepted' | 'wrong_pool' | 'wrong_fee_account', message: string) {
+    super(message);
+    this.name = 'RelayerUnavailableError';
+  }
 }
 export interface StakeView {
   signer: string; walletH081: bigint; staked: bigint; pending: bigint; readyAt: bigint; now: bigint; desks: bigint; shieldCap: bigint;
@@ -75,6 +90,10 @@ export interface BankOptions {
   signer: Keypair;
   /** the shielded account secret (keys.ts accountSkFromEnv) */
   accountSk: bigint;
+  /** how sub-accounts are derived from the signer (keys.ts; default `seed`) */
+  derivation?: AccountDerivation;
+  /** where `accountSk` came from, for protocolInfo (default: `derivation`) */
+  accountSource?: AccountSource;
   connection?: Connection;
   /** default: FlatDirProver over config.circuitsDir */
   prover?: Prover;
@@ -103,12 +122,16 @@ export class H081Bank {
   private readonly agents = new Map<number, { account: Account; wallet: SolanaWallet }>();
   private readonly log: (line: string) => void;
   private readonly cacheFile?: string;
+  private readonly derivation: AccountDerivation;
+  private readonly accountSource: AccountSource;
 
   private constructor(opts: BankOptions, connection: Connection, prover: Prover) {
     this.config = opts.config;
     this.connection = connection;
     this.prover = prover;
     this.signer = opts.signer;
+    this.derivation = opts.derivation ?? 'seed';
+    this.accountSource = opts.accountSource ?? this.derivation;
     this.usdg = opts.config.usdgMint;
     this.stakeMint = opts.config.stakeMint;
     this.decimals = opts.config.decimals;
@@ -261,21 +284,56 @@ export class H081Bank {
 
   // ---- withdraw
 
-  /** The relayer's terms for USDG, or undefined when there is no relayer or it does not accept USDG. */
+  /**
+   * The relayer's terms for USDG. Undefined only when no relayer is configured (H081_RELAYER_URL empty).
+   * Throws RelayerUnavailableError when the relayer is unreachable, does not serve this pool or USDG, or
+   * names a fee account that is not the treasury's: on mainnet exactly the treasury's USDG account
+   * (MAINNET.treasuryUsdgAccount, owned by MAINNET.loanTreasury); elsewhere the ATA of the treasury it names.
+   * Nothing else is ever bound into a proof as fee recipient.
+   */
   async relayTerms(): Promise<RelayTerms | undefined> {
     if (!this.relayer) return undefined;
+    const url = this.relayer.url, sym = MAINNET.usdg.symbol;
     let info: RelayerInfo & { solana?: { feeBps?: number; treasury?: string; capacity?: { freeTier?: string } } };
-    try { info = await this.relayer.info(); } catch (e) { this.log(`relayer unreachable: ${(e as Error).message}`); return undefined; }
+    try { info = await this.relayer.info(); } catch (e) {
+      throw new RelayerUnavailableError('unreachable', `the relayer ${url} is unreachable (${(e as Error).message})`);
+    }
     const sol = info.solana;
-    if (!sol) return undefined;
+    if (!sol) throw new RelayerUnavailableError('no_solana', `the relayer ${url} does not relay Solana operations`);
     const mint = this.usdg.toBase58();
     const minFee = sol.minFees?.[mint], feeRecipient = sol.feeAccounts?.[mint];
-    if (minFee === undefined || !feeRecipient) return undefined;
-    if (sol.programId && sol.programId !== this.config.poolProgramId.toBase58()) { this.log(`relayer serves ${sol.programId}, not ${mint}`); return undefined; }
+    if (minFee === undefined || !feeRecipient) throw new RelayerUnavailableError('asset_not_accepted', `the relayer ${url} does not accept ${sym} (${mint})`);
+    if (sol.programId && sol.programId !== this.config.poolProgramId.toBase58()) {
+      throw new RelayerUnavailableError('wrong_pool', `the relayer ${url} serves pool ${sol.programId}, not ${this.config.poolProgramId.toBase58()}`);
+    }
+    let feeAccount: PublicKey, relayerKey: PublicKey;
+    try { feeAccount = new PublicKey(feeRecipient); relayerKey = new PublicKey(sol.relayer); } catch {
+      throw new RelayerUnavailableError('wrong_fee_account', `the relayer ${url} names an invalid fee account or relayer key`);
+    }
+    const wrong = (why: string) => new RelayerUnavailableError('wrong_fee_account',
+      `the relayer ${url} names ${feeRecipient} as its ${sym} fee account (treasury ${sol.treasury ?? 'unset'}), ${why}; H081 relay fees go only to the protocol treasury, so this relayer is refused and nothing was signed`);
+    if (isMainnetConfig(this.config)) {
+      if (feeRecipient !== MAINNET.treasuryUsdgAccount || sol.treasury !== MAINNET.loanTreasury) {
+        throw wrong(`not the treasury's ${sym} account ${MAINNET.treasuryUsdgAccount} owned by ${MAINNET.loanTreasury}`);
+      }
+    } else {
+      let treasury: PublicKey;
+      try { treasury = sol.treasury ? new PublicKey(sol.treasury) : this.config.loanTreasury; } catch { throw wrong('which is not a valid treasury'); }
+      const want = getAssociatedTokenAddressSync(this.usdg, treasury, true, await this.tokenProgram());
+      if (!feeAccount.equals(want)) throw wrong(`not the treasury's associated ${sym} account ${want.toBase58()}`);
+    }
     return {
-      url: this.relayer.url, relayer: new PublicKey(sol.relayer), feeRecipient: new PublicKey(feeRecipient), minFee: BigInt(minFee),
+      url, relayer: relayerKey, feeRecipient: feeAccount, minFee: BigInt(minFee),
       feeBps: sol.feeBps ?? 0, treasury: sol.treasury, freeTier: sol.capacity?.freeTier === undefined ? undefined : BigInt(sol.capacity.freeTier),
     };
+  }
+
+  /** The agent wallet's shieldCap from capacity_stake (undefined when it cannot be read). */
+  private async shieldCap(): Promise<{ staked: bigint; shieldCap: bigint } | undefined> {
+    try {
+      const c = await readCapacity(this.connection, this.config.capacityProgramId, this.stakeMint, this.signer.publicKey);
+      return { staked: c.stake.staked, shieldCap: c.shieldCap };
+    } catch (e) { this.log(`capacity_stake not readable: ${(e as Error).message}`); return undefined; }
   }
 
   /**
@@ -299,15 +357,43 @@ export class H081Bank {
     await this.sync();
     const shielded = this.owner.balance(this.usdg);
     if (amount > shielded) throw new Error(`the shielded balance is ${fromUnits(shielded, d)} ${sym}, less than ${fromUnits(amount, d)}.`);
-    const terms = direct ? undefined : await this.relayTerms();
+    const me = this.signer.publicKey.toBase58();
+    const directHint = `pass direct: true to have the agent wallet ${me} send it itself (no relay fee; the chain then links the agent wallet to ${dest.toBase58()})`;
+    let terms: RelayTerms | undefined;
+    if (!direct) {
+      if (!this.relayer) {
+        this.log('no relayer configured (H081_RELAYER_URL is empty): the agent key sends the withdrawal itself');
+      } else {
+        // fail closed: a configured relayer that cannot be used never turns into a direct send
+        try { terms = await this.relayTerms(); } catch (e) {
+          throw new Error(`${(e as Error).message}. The withdrawal was not sent: retry later, or ${directHint}.`);
+        }
+      }
+    }
     let relay: SolRelay = {};
     let fee = 0n;
+    let operator: string | undefined;
     if (terms) {
       fee = H081Bank.relayFee(amount, terms);
       if (fee >= amount) throw new Error(`the relay fee ${fromUnits(fee, d)} ${sym} is not below the amount; withdraw more or use direct: true.`);
       relay = { via: this.relayer, relayer: terms.relayer, feeRecipient: terms.feeRecipient, fee };
-    } else if (!direct) {
-      this.log('no relayer for USDG: the agent key sends the withdrawal itself');
+      const pub = amount - fee;
+      if (terms.freeTier !== undefined && pub > terms.freeTier) {
+        // above the anonymous free tier the relayer wants a capacity operator: the agent wallet, with its H081 stake
+        const cap = await this.shieldCap();
+        const tier = fromUnits(terms.freeTier, d);
+        if (cap && pub > terms.freeTier + cap.shieldCap) {
+          throw new Error(
+            `${fromUnits(pub, d)} ${sym} is above the relayer's anonymous free tier (${tier} ${sym} per 30 days) plus the agent wallet's staked capacity ` +
+            `(${fromUnits(cap.shieldCap, d)} ${sym} from ${fromUnits(cap.staked, MAINNET.h081.decimals)} ${MAINNET.h081.symbol} in capacity_stake). Nothing was sent. ` +
+            `Stake more ${MAINNET.h081.symbol} (h081_stake), withdraw at most ${fromUnits(terms.freeTier + cap.shieldCap, d)} ${sym} per 30 days through the relayer, or ${directHint}.`,
+          );
+        }
+        const seed = this.signer.secretKey.subarray(0, 32);
+        relay.operator = { operator: this.signer.publicKey, sign: (m) => ed25519.sign(m, seed) };
+        operator = me;
+        this.log(`${fromUnits(pub, d)} ${sym} is above the free tier of ${tier}: the agent wallet is named to the relayer as capacity operator`);
+      }
     }
     try {
       const r = await this.owner.withdraw(this.usdg, amount, dest, relay);
@@ -315,7 +401,7 @@ export class H081Bank {
       const left = this.owner.balance(this.usdg);
       return {
         signature: r.tx.signature, amount, fee, received: amount - fee, receivedUsdg: fromUnits(amount - fee, d), to: dest.toBase58(),
-        via: terms ? 'relayer' : 'direct', shielded: left, shieldedUsdg: fromUnits(left, d),
+        via: terms ? 'relayer' : 'direct', shielded: left, shieldedUsdg: fromUnits(left, d), ...(operator ? { operator } : {}),
       };
     } catch (e) {
       this.saveCache();
@@ -430,7 +516,7 @@ export class H081Bank {
   agent(i: number): { account: Account; wallet: SolanaWallet } {
     let a = this.agents.get(i);
     if (!a) {
-      const account = new Account(deriveAgentSk(this.signer, i));
+      const account = new Account(deriveAgentSk(this.signer, i, this.derivation));
       const wallet = new SolanaWallet(account, this.pool, this.signer);
       wallet.registerMint(this.usdg);
       a = { account, wallet };
@@ -500,10 +586,17 @@ export class H081Bank {
 
   // ---- info
 
+  /** Facts about the deployment and this agent. Never the RPC URL (its path/query may carry an API key): only its host. */
   async protocolInfo(): Promise<Record<string, unknown>> {
-    const [caps, terms, genesis] = await Promise.all([this.caps().catch(() => null), this.relayTerms(), this.connection.getGenesisHash().catch(() => undefined)]);
+    let terms: RelayTerms | undefined, relayerStatus: string;
+    const [caps, genesis] = await Promise.all([this.caps().catch(() => null), this.connection.getGenesisHash().catch(() => undefined)]);
+    if (!this.relayer) relayerStatus = 'no relayer configured (H081_RELAYER_URL is empty): withdrawals are sent by the agent key';
+    else {
+      try { terms = await this.relayTerms(); relayerStatus = 'ok'; } catch (e) { relayerStatus = `unavailable: ${(e as Error).message}; relayed withdrawals are refused until it is (direct: true still works)`; }
+    }
+    const host = rpcHost(this.config.rpcUrl);
     return {
-      cluster: this.config.cluster, genesis, rpc: this.config.rpcUrl,
+      cluster: this.config.cluster, genesis, rpc: host, rpcIsPublic: PUBLIC_RPC_HOSTS.has(host),
       programs: { pool: this.config.poolProgramId.toBase58(), loan: this.config.loanProgramId.toBase58(), safety: this.config.safetyProgramId.toBase58(), capacity: this.config.capacityProgramId.toBase58() },
       usdg: { mint: this.usdg.toBase58(), decimals: this.decimals, symbol: MAINNET.usdg.symbol },
       h081: { mint: this.stakeMint.toBase58(), decimals: MAINNET.h081.decimals, symbol: MAINNET.h081.symbol },
@@ -512,7 +605,9 @@ export class H081Bank {
       stakeCaps: { perStake: MAINNET.stakeCaps.perStake, total: MAINNET.stakeCaps.total, cooldownDays: 30 },
       fees: { relayBps: terms?.feeBps ?? null, relayMin: terms?.minFee ?? null, loanOriginationBps: 25 },
       relayer: terms ? { url: terms.url, relayer: terms.relayer.toBase58(), minFee: terms.minFee, feeBps: terms.feeBps, feeAccount: terms.feeRecipient.toBase58(), treasury: terms.treasury, freeTier: terms.freeTier } : null,
+      relayerStatus,
       signer: this.signer.publicKey.toBase58(), shieldedAddress: this.shieldedAddress(), circuitsDir: this.config.circuitsDir,
+      account: { source: this.accountSource, note: ACCOUNT_SOURCE_NOTES[this.accountSource] },
       notice: NOTICE,
     };
   }

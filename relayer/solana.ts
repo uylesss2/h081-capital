@@ -10,7 +10,6 @@
 // the token's trading creator fees are the team's and are not part of this; only relay fees are.
 // Capacity (capacity_stake): an operation above the free tier must name a staking operator, signed, whose
 // 30-day relayed volume stays within free tier + shieldCap(staked).
-import { sha256 } from '@noble/hashes/sha2';
 import { ed25519 } from '@noble/curves/ed25519';
 import {
   AddressLookupTableAccount, Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, TransactionInstruction,
@@ -24,7 +23,7 @@ import { createVaultIx, delegateIx, grantIx, spendIx, transactIx, type SpendAcco
 import { nullifierPda, poolPda, vaultPda } from '../src/solana/pda.js';
 import { BUFFER_MAX_LEN, LOCALNET_POOL_PROGRAM_ID, decodePool } from '../src/solana/program.js';
 import {
-  type DecodedOp, type FeeTerms, SOLANA_OPS, type SolanaOp, type SolanaRelayRequest, checkFee, decodeRelayPayload, fromB64, nullifiersOf,
+  type DecodedOp, type FeeTerms, SOLANA_OPS, type SolanaOp, type SolanaRelayRequest, capacityMessage, checkFee, decodeRelayPayload, fromB64, nullifiersOf,
 } from '../src/solana/relay.js';
 import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, readCapacity } from '../src/solana/token.js';
 import { OP_CU_LIMIT } from '../src/solana/wallet.js';
@@ -99,14 +98,8 @@ export function solanaRelayerOptions(
 /** 30 days, the period shieldCap is measured over. */
 export const CAPACITY_WINDOW_SECS = 30 * 86400;
 
-/** What an operator signs (ed25519) to put an operation on its capacity: a domain tag and sha256 of the payload. */
-export function capacityMessage(payload: Uint8Array): Uint8Array {
-  const tag = new TextEncoder().encode('h081-relay-capacity:v1:');
-  const out = new Uint8Array(tag.length + 32);
-  out.set(tag);
-  out.set(sha256(payload), tag.length);
-  return out;
-}
+/** What an operator signs to put an operation on its capacity: defined in src/solana/relay.ts so the SDK signs the same bytes. */
+export { capacityMessage };
 
 export interface CapacityOptions {
   /** an operation whose public amount is at most this needs no operator (anonymous free tier); also added to every operator's allowance */

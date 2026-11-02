@@ -11,7 +11,11 @@ export interface RelayerInfo {
   };
 }
 
-export interface SolanaRelayBody { op: 'transact' | 'spend' | 'grant' | 'delegate'; payload: string; mint?: string; recipientOwner?: string; lenderToken?: string }
+export interface SolanaRelayBody {
+  op: 'transact' | 'spend' | 'grant' | 'delegate'; payload: string; mint?: string; recipientOwner?: string; lenderToken?: string;
+  /** capacity operator (base58) and its ed25519 signature (base64) over capacityMessage(payload) (src/solana/relay.ts) */
+  operator?: string; operatorSig?: string;
+}
 
 /** A refusal or failure reported by the relayer: HTTP status, a stable code and a message. */
 export class RelayerError extends Error {

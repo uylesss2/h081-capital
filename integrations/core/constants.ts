@@ -117,9 +117,10 @@ export interface H081Config {
 export const ENV_VARS = {
   H081_SOLANA_KEYPAIR: 'path to a Solana keypair JSON file (the agent key: pays fees, holds USDG, derives the shielded account)',
   H081_SOLANA_KEY: 'the same key as a base58 secret (or a JSON byte array); H081_SOLANA_KEYPAIR wins when both are set',
-  H081_ACCOUNT_SK: 'optional shielded account secret (decimal or 0x hex field element); default: derived from the Solana key',
-  H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com; the public RPC rate-limits history scans)',
-  H081_RELAYER_URL: 'relayer for withdrawals (default https://h081-relayer.vercel.app; empty = the signer sends directly)',
+  H081_ACCOUNT_SK: 'optional shielded account secret (decimal or 0x hex field element); default: derived from the Solana key\'s secret seed',
+  H081_DERIVE_ACCOUNT: 'optional; 1 = derive the account from the key\'s signature over the label instead (one such signature then equals the key)',
+  H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com; the public RPC rate-limits history scans); only its host is ever reported',
+  H081_RELAYER_URL: 'relayer for withdrawals (default https://h081-relayer.vercel.app; empty = the signer sends directly, relayed withdrawals are not attempted)',
   H081_CIRCUITS_DIR: 'where proving artifacts are stored (default ~/.h081/circuits)',
   H081_CIRCUITS_URL: 'where they are downloaded from (default https://www.h081.xyz/circuits/)',
   H081_POOL_PROGRAM_ID: 'stipend_pool program id (default mainnet E16DK…)',
@@ -161,6 +162,17 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
   };
 }
 
+/** Solana's own public endpoints: no API key in the URL. */
+export const PUBLIC_RPC_HOSTS = new Set(['api.mainnet-beta.solana.com', 'api.devnet.solana.com', 'api.testnet.solana.com']);
+
+/**
+ * The host of an RPC URL, for logs, errors and tool results. Private RPC URLs carry their API key in the path
+ * or query (…/v2/<key>, ?api-key=…), which must never reach a model transcript; only the host is reported.
+ */
+export function rpcHost(url: string): string {
+  try { return new URL(url).host; } catch { return url.replace(/[?#].*$/, '').replace(/^([a-z][a-z0-9+.-]*:\/\/[^/]+).*$/i, '$1'); }
+}
+
 /** True when every program id in `cfg` is the mainnet one. */
 export function isMainnetConfig(cfg: H081Config): boolean {
   return cfg.poolProgramId.toBase58() === MAINNET.programs.pool && cfg.loanProgramId.toBase58() === MAINNET.programs.loan
@@ -176,8 +188,8 @@ export function checkCluster(cfg: H081Config, genesis: string): void {
   const ids = [cfg.poolProgramId, cfg.loanProgramId, cfg.capacityProgramId].map((k) => k.toBase58());
   if (genesis === MAINNET_GENESIS) {
     const bad = ids.find((id) => localnet.includes(id));
-    if (bad) throw new Error(`${bad} is a localnet program id; the RPC ${cfg.rpcUrl} is mainnet-beta`);
+    if (bad) throw new Error(`${bad} is a localnet program id; the RPC ${rpcHost(cfg.rpcUrl)} is mainnet-beta`);
   } else if (isMainnetConfig(cfg)) {
-    throw new Error(`the RPC ${cfg.rpcUrl} is not mainnet-beta (genesis ${genesis}) but the program ids are the mainnet ones; set H081_*_PROGRAM_ID and H081_USDG_MINT for that cluster`);
+    throw new Error(`the RPC ${rpcHost(cfg.rpcUrl)} is not mainnet-beta (genesis ${genesis}) but the program ids are the mainnet ones; set H081_*_PROGRAM_ID and H081_USDG_MINT for that cluster`);
   }
 }

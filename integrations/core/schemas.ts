@@ -22,8 +22,12 @@ export const DESCRIPTIONS: Record<OpName, string> = {
   h081_bank_withdraw:
     'Withdraw USDG from the shielded account to a Solana wallet (default: the agent wallet). By default the relayer sends ' +
     'the transaction and takes its fee out of the amount: max(0.05 USDG, 0.20%) of the public amount, paid to the protocol ' +
-    'treasury; the chain then does not link the agent wallet to the withdrawal. `direct: true` has the agent key send it ' +
-    'instead (no relay fee, but the agent wallet is visible on chain as the sender). Give `amount` or `usdg`. ' + NOTICE_SHORT,
+    'treasury (checked before anything is proven); the chain then does not link the agent wallet to the withdrawal. If the ' +
+    'relayer is unreachable or refuses, the withdrawal is NOT sent and the error says why; it is never silently sent by the ' +
+    'agent key. Above the relayer\'s anonymous free tier (100 USDG per 30 days today) the agent wallet is named to the relayer ' +
+    'as capacity operator, which needs H081 staked in capacity_stake (`h081_stake`); otherwise split the withdrawal or go direct. ' +
+    '`direct: true` has the agent key send it instead (no relay fee, no limit, but the agent wallet is visible on chain as the ' +
+    'sender). Give `amount` or `usdg`. ' + NOTICE_SHORT,
   h081_bank_balance:
     'The shielded USDG balance of the agent\'s H081 bank account (visible only to this key), its agent allowances, the ' +
     'wallet\'s public USDG and SOL balances, and the current deposit caps. Read-only.',
@@ -42,14 +46,16 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'automatic matching: without a lender who funds, nothing is borrowed. Needs the grant (44 MB) and stream circuits. ' +
     NOTICE_SHORT,
   h081_stake:
-    'capacity_stake: stake H081 from the agent wallet to earn relayer capacity (desks and shield capacity), request ' +
+    'capacity_stake: stake H081 from the agent wallet to earn relayer capacity (desks and shield capacity: how much ' +
+    'the relayer relays for this wallet per 30 days above the anonymous free tier, used by h081_bank_withdraw), request ' +
     'unstake (30-day cooldown), unstake after the cooldown, or `view` the position. Caps: 100,000 H081 per stake, ' +
     '1,000,000 H081 total. Give `amount` (base units, 6 decimals) or `h081` (decimal) for stake / request_unstake. ' +
     NOTICE_SHORT,
   h081_protocol_info:
     'Static and live facts about the H081 Capital bank: cluster, program ids, USDG and H081 mints, deposit caps and ' +
-    'pause flag read from chain, relayer terms, the agent wallet and shielded address, where the proving artifacts ' +
-    'live, and the risk notice. Read-only.',
+    'pause flag read from chain, relayer terms and status, the agent wallet and shielded address, how the shielded ' +
+    'account secret is derived, where the proving artifacts live, and the risk notice. Reports only the RPC host, never ' +
+    'the full RPC URL. Read-only.',
 };
 
 // ------------------------------------------------------------------ zod
@@ -124,7 +130,7 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
     properties: {
       amount: amountJ, usdg: decimalJ('USDG'),
       to: { ...b58J, description: 'recipient wallet (default: the agent wallet); must be a wallet, not a token account or program' },
-      direct: { type: 'boolean', description: 'true: the agent key sends the withdrawal itself (no relay fee, sender visible on chain); default false: through the relayer' },
+      direct: { type: 'boolean', description: 'true: the agent key sends the withdrawal itself (no relay fee, no free-tier limit, sender visible on chain); default false: through the relayer, refused (not sent) when the relayer is unavailable' },
     },
     additionalProperties: false,
     description: 'exactly one of amount (base units) or usdg (decimal)',

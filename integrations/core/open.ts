@@ -5,7 +5,7 @@ import type { CircuitInput, CircuitName, ProofResult } from '../../src/prover.js
 import { H081Bank } from './bank.js';
 import { FlatDirProver, fetchCircuits, missingCircuits } from './circuits.js';
 import { type H081Config, configFromEnv } from './constants.js';
-import { accountSkFromEnv, loadKeypair } from './keys.js';
+import { type AccountSource, accountSkFromEnv, loadKeypair } from './keys.js';
 
 /** FlatDirProver that fetches a circuit's files on first use. */
 export class AutoFetchProver extends FlatDirProver {
@@ -50,16 +50,24 @@ export interface OpenOptions {
   skipClusterCheck?: boolean;
 }
 
-export interface Opened { bank: H081Bank; config: H081Config; accountDerived: boolean }
+export interface Opened {
+  bank: H081Bank; config: H081Config;
+  /** false only with H081_ACCOUNT_SK */
+  accountDerived: boolean;
+  /** `seed` (default), `signature` (H081_DERIVE_ACCOUNT=1) or `env` (H081_ACCOUNT_SK) */
+  accountSource: AccountSource;
+}
 
 /** Config + key + account + prover from the environment, then H081Bank.open. Sends nothing. */
 export async function openFromEnv(opts: OpenOptions = {}): Promise<Opened> {
   const env = opts.env ?? process.env;
   const config = opts.config ?? configFromEnv(env);
   const signer = opts.signer ?? loadKeypair(env);
-  const { sk, derived } = accountSkFromEnv(signer, env);
+  const { sk, derived, source, derivation } = accountSkFromEnv(signer, env);
   const prover = new AutoFetchProver(config.circuitsDir, config.circuitsUrl, opts.fetch, opts.log);
   for (const name of opts.prefetch ?? []) await prover.ensure(name);
-  const bank = await H081Bank.open({ config, signer, accountSk: sk, connection: opts.connection, prover, fetch: opts.fetch, log: opts.log, skipClusterCheck: opts.skipClusterCheck });
-  return { bank, config, accountDerived: derived };
+  const bank = await H081Bank.open({
+    config, signer, accountSk: sk, derivation, accountSource: source, connection: opts.connection, prover, fetch: opts.fetch, log: opts.log, skipClusterCheck: opts.skipClusterCheck,
+  });
+  return { bank, config, accountDerived: derived, accountSource: source };
 }

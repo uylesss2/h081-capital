@@ -1,14 +1,20 @@
 // H081Bank against a fake connection: caps and balances are checked before any proof, relay fees are
 // computed the way the relayer checks them, the cluster/id guard refuses mismatches. Nothing is proven or sent.
 import { describe, expect, it, vi } from 'vitest';
+import { ed25519 } from '@noble/curves/ed25519';
+import { TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { Prover } from '../../src/prover.js';
-import { H081Bank } from '../../integrations/core/bank.js';
-import { MAINNET, MAINNET_GENESIS, checkCluster, configFromEnv, isMainnetConfig } from '../../integrations/core/constants.js';
+import { capacityMessage, fromB64 } from '../../src/solana/relay.js';
+import { relayBody } from '../../src/solana/wallet.js';
+import { H081Bank, RelayerUnavailableError } from '../../integrations/core/bank.js';
+import { MAINNET, MAINNET_GENESIS, checkCluster, configFromEnv, isMainnetConfig, rpcHost } from '../../integrations/core/constants.js';
 import { deriveAccountSk } from '../../integrations/core/keys.js';
-import { RELAYER_INFO, fakeConnection, fakeRelayerFetch, testConfig } from './helpers.js';
+import { plain } from '../../integrations/core/operations.js';
+import { RELAYER_INFO, USDG, fakeConnection, fakeRelayerFetch, testConfig } from './helpers.js';
 
 const noProver = new Prover('C:/nonexistent');
+const RELAYER_INFO_TERMS = { minFee: BigInt(RELAYER_INFO.solana.minFees[MAINNET.usdg.mint]), feeBps: RELAYER_INFO.solana.feeBps };
 
 async function open(signer: Keypair, chain: Parameters<typeof fakeConnection>[1] = {}, relayer = false) {
   const conn = fakeConnection(signer, chain);
@@ -100,21 +106,147 @@ describe('H081Bank', () => {
     await expect(bank.withdraw(50_000n)).rejects.toThrow(/relay fee .* is not below the amount/);
   });
 
-  it('without a relayer (H081_RELAYER_URL empty) or when it does not take USDG, the signer sends', async () => {
+  it('relayTerms is undefined only without a relayer (H081_RELAYER_URL empty); unreachable, no USDG or another pool are errors', async () => {
     const signer = Keypair.generate();
     const { bank } = await open(signer, {}, false);
     expect(await bank.relayTerms()).toBeUndefined();
     const conn = fakeConnection(signer);
-    const other = await H081Bank.open({
+    const withInfo = (info: unknown, status = 200) => H081Bank.open({
       config: testConfig({ relayerUrl: MAINNET.relayer }), signer, accountSk: 1n, connection: conn as unknown as Connection, prover: noProver, cacheDir: null,
-      fetch: fakeRelayerFetch({ solana: { ...RELAYER_INFO.solana, minFees: {}, feeAccounts: {} } }),
+      fetch: fakeRelayerFetch(info, status),
     });
-    expect(await other.relayTerms()).toBeUndefined();
-    const down = await H081Bank.open({
+    await expect((await withInfo({ solana: { ...RELAYER_INFO.solana, minFees: {}, feeAccounts: {} } })).relayTerms()).rejects.toThrow(/does not accept USDG/);
+    await expect((await withInfo({ error: { code: 'down' } }, 503)).relayTerms()).rejects.toThrow(/is unreachable/);
+    await expect((await withInfo({ evm: {} })).relayTerms()).rejects.toThrow(/does not relay Solana/);
+    await expect((await withInfo({ solana: { ...RELAYER_INFO.solana, programId: Keypair.generate().publicKey.toBase58() } })).relayTerms()).rejects.toThrow(/serves pool/);
+  });
+
+  it('a relayed withdrawal fails closed: an unreachable relayer refuses it instead of sending it from the agent key', async () => {
+    const signer = Keypair.generate();
+    const conn = fakeConnection(signer);
+    const bank = await H081Bank.open({
       config: testConfig({ relayerUrl: MAINNET.relayer }), signer, accountSk: 1n, connection: conn as unknown as Connection, prover: noProver, cacheDir: null,
       fetch: fakeRelayerFetch({ error: { code: 'down' } }, 503),
     });
-    expect(await down.relayTerms()).toBeUndefined();
+    vi.spyOn(bank.owner, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(bank.owner, 'balance').mockReturnValue(500_000_000n);
+    const wd = vi.spyOn(bank.owner, 'withdraw').mockResolvedValue({ tx: { signature: 'sigW', computeUnits: 1, logs: [] }, proof: {} as never });
+    const to = Keypair.generate().publicKey;
+    await expect(bank.withdraw(500_000_000n, to)).rejects.toThrow(/is unreachable[\s\S]*The withdrawal was not sent[\s\S]*pass direct: true/);
+    expect(wd).not.toHaveBeenCalled();
+    // direct: true is the only way the agent key sends it
+    expect(await bank.withdraw(500_000_000n, to, true)).toMatchObject({ via: 'direct', fee: 0n, to: to.toBase58() });
+    expect(wd).toHaveBeenCalledTimes(1);
+    const info = await bank.protocolInfo();
+    expect(info.relayer).toBeNull();
+    expect(String(info.relayerStatus)).toMatch(/^unavailable: the relayer .* is unreachable/);
+
+    // no relayer configured at all: the signer sends, and says so
+    const none = await open(signer, {}, false);
+    vi.spyOn(none.bank.owner, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(none.bank.owner, 'balance').mockReturnValue(500_000_000n);
+    const wd2 = vi.spyOn(none.bank.owner, 'withdraw').mockResolvedValue({ tx: { signature: 'sigD', computeUnits: 1, logs: [] }, proof: {} as never });
+    expect(await none.bank.withdraw(500_000_000n, to)).toMatchObject({ via: 'direct', fee: 0n });
+    expect(wd2.mock.calls[0][3]).toEqual({});
+    expect(String((await none.bank.protocolInfo()).relayerStatus)).toMatch(/no relayer configured/);
+  });
+
+  it('a relayer whose fee account is not the treasury\'s is refused before anything is proven', async () => {
+    const signer = Keypair.generate();
+    const conn = fakeConnection(signer);
+    const lookalike = Keypair.generate().publicKey.toBase58();
+    const openWith = (solana: Record<string, unknown>) => H081Bank.open({
+      config: testConfig({ relayerUrl: MAINNET.relayer }), signer, accountSk: 1n, connection: conn as unknown as Connection, prover: noProver, cacheDir: null,
+      fetch: fakeRelayerFetch({ solana: { ...RELAYER_INFO.solana, ...solana } }),
+    });
+    const wrongAccount = await openWith({ feeAccounts: { [MAINNET.usdg.mint]: lookalike } });
+    vi.spyOn(wrongAccount.owner, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(wrongAccount.owner, 'balance').mockReturnValue(10_000_000n);
+    const wd = vi.spyOn(wrongAccount.owner, 'withdraw');
+    await expect(wrongAccount.relayTerms()).rejects.toThrow(RelayerUnavailableError);
+    await expect(wrongAccount.withdraw(10_000_000n)).rejects.toThrow(new RegExp(`names ${lookalike} as its USDG fee account .*not the treasury's USDG account ${MAINNET.treasuryUsdgAccount} owned by ${MAINNET.loanTreasury}`));
+    expect(wd).not.toHaveBeenCalled();
+    expect((await wrongAccount.protocolInfo()).relayer).toBeNull();
+    // the right account but another treasury owner is refused too
+    await expect((await openWith({ treasury: Keypair.generate().publicKey.toBase58() })).relayTerms()).rejects.toThrow(/not the treasury's USDG account/);
+    // the mainnet terms pass
+    expect((await (await openWith({})).relayTerms())!.feeRecipient.toBase58()).toBe(MAINNET.treasuryUsdgAccount);
+
+    // off mainnet (other program ids) the fee account must be the associated USDG account of the treasury the relayer names
+    const otherPool = Keypair.generate().publicKey, treasury = Keypair.generate().publicKey;
+    const ata = getAssociatedTokenAddressSync(USDG, treasury, true, TOKEN_2022_PROGRAM_ID).toBase58();
+    const openOff = (feeAccount: string) => H081Bank.open({
+      config: testConfig({ relayerUrl: MAINNET.relayer, poolProgramId: otherPool }), signer, accountSk: 1n, connection: conn as unknown as Connection, prover: noProver, cacheDir: null,
+      fetch: fakeRelayerFetch({ solana: { ...RELAYER_INFO.solana, programId: otherPool.toBase58(), treasury: treasury.toBase58(), feeAccounts: { [MAINNET.usdg.mint]: feeAccount } } }),
+    });
+    expect((await (await openOff(ata)).relayTerms())!.feeRecipient.toBase58()).toBe(ata);
+    await expect((await openOff(lookalike)).relayTerms()).rejects.toThrow(/not the treasury's associated USDG account/);
+  });
+
+  it('above the free tier the agent wallet is named as capacity operator (signed), or the withdrawal is refused before proving', async () => {
+    const signer = Keypair.generate();
+    // 500 H081 staked at 100 H081 per unit: shieldCap = 5 x 10,000 USDG
+    const staked = await open(signer, { stake: { staked: 500_000_000n, pending: 0n, readyAt: 0n } }, true);
+    vi.spyOn(staked.bank.owner, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(staked.bank.owner, 'balance').mockReturnValue(100_000_000_000n);
+    const wd = vi.spyOn(staked.bank.owner, 'withdraw').mockResolvedValue({ tx: { signature: 'sigW', computeUnits: 1, logs: [] }, proof: {} as never });
+    const fee = H081Bank.relayFee(150_000_000n, RELAYER_INFO_TERMS);
+    const r = await staked.bank.withdraw(150_000_000n);
+    expect(r).toMatchObject({ via: 'relayer', fee, received: 150_000_000n - fee, operator: signer.publicKey.toBase58() });
+    const relay = wd.mock.calls[0][3]!;
+    expect(relay.operator!.operator.equals(signer.publicKey)).toBe(true);
+    // what relayThrough sends: the operator and its signature over capacityMessage(payload), as relayer/solana.ts verifies it
+    const payload = new Uint8Array([1, 2, 3, 4]);
+    const body = await relayBody({ op: 'transact', mint: MAINNET.usdg.mint }, payload, relay.operator);
+    expect(body).toMatchObject({ op: 'transact', mint: MAINNET.usdg.mint, operator: signer.publicKey.toBase58() });
+    expect(ed25519.verify(fromB64(body.operatorSig!), capacityMessage(payload), signer.publicKey.toBytes())).toBe(true);
+    expect(ed25519.verify(fromB64(body.operatorSig!), capacityMessage(new Uint8Array([9])), signer.publicKey.toBytes())).toBe(false);
+    expect((await relayBody({ op: 'transact' }, payload)).operator).toBeUndefined();
+
+    // at the free tier (public amount 99.8004 USDG) nobody is named
+    const atTier = await staked.bank.withdraw(100_000_000n);
+    expect(atTier.operator).toBeUndefined();
+    expect(wd.mock.calls[1][3]!.operator).toBeUndefined();
+
+    // over the free tier plus the staked capacity: refused before any proof, naming the stake, the limit and direct: true
+    await expect(staked.bank.withdraw(60_000_000_000n)).rejects.toThrow(
+      /above the relayer's anonymous free tier \(100 USDG per 30 days\) plus the agent wallet's staked capacity \(50000 USDG from 500 H081 in capacity_stake\)\. Nothing was sent\. Stake more H081 \(h081_stake\), withdraw at most 50100 USDG per 30 days through the relayer, or pass direct: true/,
+    );
+    expect(wd).toHaveBeenCalledTimes(2);
+
+    // nothing staked: 150 USDG is refused, direct: true still works
+    const none = await open(signer, {}, true);
+    vi.spyOn(none.bank.owner, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(none.bank.owner, 'balance').mockReturnValue(200_000_000n);
+    const wd2 = vi.spyOn(none.bank.owner, 'withdraw').mockResolvedValue({ tx: { signature: 'sigW', computeUnits: 1, logs: [] }, proof: {} as never });
+    await expect(none.bank.withdraw(150_000_000n)).rejects.toThrow(/staked capacity \(0 USDG from 0 H081 in capacity_stake\)[\s\S]*direct: true/);
+    expect(wd2).not.toHaveBeenCalled();
+    expect(await none.bank.withdraw(150_000_000n, undefined, true)).toMatchObject({ via: 'direct', fee: 0n });
+  });
+
+  it('protocolInfo and the cluster guard report the RPC host only, never a private RPC URL\'s key', async () => {
+    const signer = Keypair.generate();
+    const conn = fakeConnection(signer);
+    const rpcUrl = 'https://solana-mainnet.g.alchemy.com/v2/SECRETKEY123?api-key=ALSOSECRET';
+    const bank = await H081Bank.open({ config: testConfig({ rpcUrl }), signer, accountSk: 1n, connection: conn as unknown as Connection, prover: noProver, cacheDir: null });
+    const info = await bank.protocolInfo();
+    expect(info).toMatchObject({ rpc: 'solana-mainnet.g.alchemy.com', rpcIsPublic: false, account: { source: 'seed' } });
+    expect(String((info.account as { note: string }).note)).toMatch(/no signature the key makes reveals it/);
+    const text = JSON.stringify(plain(info));
+    expect(text).not.toContain('SECRET');
+    expect(text).not.toContain('/v2/');
+    expect(text).not.toContain('api-key');
+    expect((await (await open(signer)).bank.protocolInfo()).rpcIsPublic).toBe(true);
+    expect(rpcHost('https://rpc.helius.xyz/?api-key=KEY')).toBe('rpc.helius.xyz');
+    expect(rpcHost('http://127.0.0.1:8899')).toBe('127.0.0.1:8899');
+    const err = (() => { try { checkCluster({ ...configFromEnv({}), rpcUrl }, 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'); return ''; } catch (e) { return (e as Error).message; } })();
+    expect(err).toMatch(/the RPC solana-mainnet\.g\.alchemy\.com is not mainnet-beta/);
+    expect(err).not.toContain('SECRET');
+    // the account note follows the derivation
+    const sig = await H081Bank.open({ config: testConfig(), signer, accountSk: 1n, derivation: 'signature', connection: conn as unknown as Connection, prover: noProver, cacheDir: null });
+    expect((await sig.protocolInfo()).account).toMatchObject({ source: 'signature', note: expect.stringMatching(/never let a message-signing tool sign it/) });
+    const env = await H081Bank.open({ config: testConfig(), signer, accountSk: 1n, accountSource: 'env', connection: conn as unknown as Connection, prover: noProver, cacheDir: null });
+    expect((await env.protocolInfo()).account).toMatchObject({ source: 'env' });
   });
 
   it('balance and protocolInfo read the chain; stake checks caps and cooldown before sending', async () => {
@@ -128,7 +260,8 @@ describe('H081Bank', () => {
 
     const info = await bank.protocolInfo();
     expect(info).toMatchObject({
-      cluster: 'mainnet-beta', programs: { pool: MAINNET.programs.pool, loan: MAINNET.programs.loan, capacity: MAINNET.programs.capacity },
+      cluster: 'mainnet-beta', rpc: 'api.mainnet-beta.solana.com', rpcIsPublic: true, relayerStatus: 'ok',
+      programs: { pool: MAINNET.programs.pool, loan: MAINNET.programs.loan, capacity: MAINNET.programs.capacity },
       usdg: { mint: MAINNET.usdg.mint, decimals: 6 }, h081: { mint: MAINNET.h081.mint }, loanTreasury: MAINNET.loanTreasury,
       caps: { perDepositUsdg: '1000', totalUsdg: '10000', paused: false }, fees: { relayBps: 20, relayMin: 50_000n, loanOriginationBps: 25 },
       relayer: { feeAccount: MAINNET.treasuryUsdgAccount, treasury: MAINNET.loanTreasury, freeTier: 100_000_000n },

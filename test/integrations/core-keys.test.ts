@@ -2,10 +2,18 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { ed25519 } from '@noble/curves/ed25519';
+import { hmac } from '@noble/hashes/hmac';
+import { sha256 } from '@noble/hashes/sha2';
 import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { FIELD } from '../../src/crypto.js';
-import { accountSkFromEnv, deriveAccountSk, deriveAgentSk, hasKeyInEnv, loadKeypair, parseFieldElement, parseSecret } from '../../integrations/core/keys.js';
+import { FIELD, mod } from '../../src/crypto.js';
+import { DERIVE_LABEL } from '../../integrations/core/constants.js';
+import {
+  accountDerivationFromEnv, accountSkFromEnv, deriveAccountSk, deriveAccountSkFromSignature, deriveAgentSk, hasKeyInEnv, loadKeypair, parseFieldElement, parseSecret,
+} from '../../integrations/core/keys.js';
+
+const field = (h: Uint8Array) => { const k = mod(BigInt('0x' + Buffer.from(h).toString('hex'))); return k === 0n ? 1n : k; };
 
 describe('keys', () => {
   it('derives the same shielded secret from the same Solana key, a different one from another key', () => {
@@ -18,6 +26,28 @@ describe('keys', () => {
     expect(deriveAgentSk(a, 0)).not.toBe(deriveAgentSk(a, 1));
     expect(deriveAgentSk(a, 3)).toBe(deriveAgentSk(a, 3));
     expect(() => deriveAgentSk(a, 16)).toThrow(/0\.\.15/);
+  });
+
+  it('the default secret is bound to the seed: a signature of the label by the key does not reproduce it; H081_DERIVE_ACCOUNT=1 is the signature construction', () => {
+    const kp = Keypair.generate();
+    const seed = kp.secretKey.subarray(0, 32);
+    const label = new TextEncoder().encode(DERIVE_LABEL);
+    // what a message-signing tool could be talked into producing
+    const sig = ed25519.sign(label, seed);
+    const fromSig = field(sha256(sig));
+    expect(deriveAccountSk(kp)).toBe(field(hmac(sha256, seed, label)));
+    expect(deriveAccountSk(kp)).not.toBe(fromSig);
+    expect(deriveAccountSkFromSignature(kp)).toBe(fromSig);
+    expect(deriveAgentSk(kp, 0, 'signature')).toBe(field(sha256(ed25519.sign(new TextEncoder().encode(`${DERIVE_LABEL}/agent/0`), seed))));
+    expect(deriveAgentSk(kp, 0, 'signature')).not.toBe(deriveAgentSk(kp, 0));
+    expect(deriveAgentSk(kp, 0, 'seed')).toBe(deriveAgentSk(kp, 0));
+    expect(accountDerivationFromEnv({})).toBe('seed');
+    expect(accountDerivationFromEnv({ H081_DERIVE_ACCOUNT: '0' })).toBe('seed');
+    expect(accountDerivationFromEnv({ H081_DERIVE_ACCOUNT: '1' })).toBe('signature');
+    expect(accountDerivationFromEnv({ H081_DERIVE_ACCOUNT: 'signature' })).toBe('signature');
+    expect(() => accountDerivationFromEnv({ H081_DERIVE_ACCOUNT: 'maybe' })).toThrow(/H081_DERIVE_ACCOUNT/);
+    expect(accountSkFromEnv(kp, { H081_DERIVE_ACCOUNT: '1' })).toEqual({ sk: fromSig, derived: true, source: 'signature', derivation: 'signature' });
+    expect(accountSkFromEnv(kp, { H081_DERIVE_ACCOUNT: '1', H081_ACCOUNT_SK: '7' })).toEqual({ sk: 7n, derived: false, source: 'env', derivation: 'signature' });
   });
 
   it('loads a keypair from a JSON file (H081_SOLANA_KEYPAIR) or a base58 / JSON secret (H081_SOLANA_KEY)', () => {
@@ -42,9 +72,9 @@ describe('keys', () => {
 
   it('H081_ACCOUNT_SK overrides the derived secret (decimal or hex) and is validated', () => {
     const kp = Keypair.generate();
-    expect(accountSkFromEnv(kp, {})).toEqual({ sk: deriveAccountSk(kp), derived: true });
-    expect(accountSkFromEnv(kp, { H081_ACCOUNT_SK: '12345' })).toEqual({ sk: 12345n, derived: false });
-    expect(accountSkFromEnv(kp, { H081_ACCOUNT_SK: '0xff' })).toEqual({ sk: 255n, derived: false });
+    expect(accountSkFromEnv(kp, {})).toEqual({ sk: deriveAccountSk(kp), derived: true, source: 'seed', derivation: 'seed' });
+    expect(accountSkFromEnv(kp, { H081_ACCOUNT_SK: '12345' })).toEqual({ sk: 12345n, derived: false, source: 'env', derivation: 'seed' });
+    expect(accountSkFromEnv(kp, { H081_ACCOUNT_SK: '0xff' })).toEqual({ sk: 255n, derived: false, source: 'env', derivation: 'seed' });
     expect(() => parseFieldElement('0')).toThrow(/in 1\.\./);
     expect(() => parseFieldElement(FIELD.toString())).toThrow(/in 1\.\./);
     expect(() => parseFieldElement('abc')).toThrow(/decimal or 0x hex/);

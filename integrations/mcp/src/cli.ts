@@ -7,7 +7,7 @@
 //
 // stdout carries only JSON-RPC; everything else goes to stderr.
 import { circuitsSize, fetchCircuits, verifyCircuits } from '../../core/circuits.js';
-import { AGENT_CIRCUITS, ENV_VARS, NOTICE, configFromEnv } from '../../core/constants.js';
+import { AGENT_CIRCUITS, ENV_VARS, NOTICE, configFromEnv, rpcHost } from '../../core/constants.js';
 import { hasKeyInEnv, KEY_HELP } from '../../core/keys.js';
 import { type BankLike, plain } from '../../core/operations.js';
 import { openFromEnv } from '../../core/open.js';
@@ -37,8 +37,8 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
 
   if (cmd === 'info') {
     if (!hasKeyInEnv(env)) { err(`no agent key: ${KEY_HELP}`); return 1; }
-    const { bank, accountDerived } = await openFromEnv({ env, log: err });
-    process.stdout.write(JSON.stringify(plain({ ...(await bank.protocolInfo()), accountDerived }), null, 2) + '\n');
+    const { bank, accountDerived, accountSource } = await openFromEnv({ env, log: err });
+    process.stdout.write(JSON.stringify(plain({ ...(await bank.protocolInfo()), accountDerived, accountSource }), null, 2) + '\n');
     return 0;
   }
 
@@ -47,8 +47,10 @@ export async function main(argv: string[] = process.argv.slice(2), env: NodeJS.P
   let opened: Promise<BankLike> | undefined;
   const bank = (): Promise<BankLike> => {
     if (!opened) {
-      opened = openFromEnv({ env, log: err }).then(({ bank: b, accountDerived }) => {
-        err(`h081-mcp: agent ${b.signer.publicKey.toBase58()}, shielded account ${accountDerived ? 'derived from the agent key' : 'from H081_ACCOUNT_SK'}, rpc ${config.rpcUrl}`);
+      opened = openFromEnv({ env, log: err }).then(({ bank: b, accountSource }) => {
+        // only the RPC host: a private RPC URL carries its API key in the path or query
+        const account = accountSource === 'env' ? 'from H081_ACCOUNT_SK' : accountSource === 'signature' ? 'derived from the agent key\'s signature (H081_DERIVE_ACCOUNT=1)' : 'derived from the agent key\'s seed';
+        err(`h081-mcp: agent ${b.signer.publicKey.toBase58()}, shielded account ${account}, rpc ${rpcHost(config.rpcUrl)}`);
         return b;
       }).catch((e: Error) => { opened = undefined; throw e; });
     }
