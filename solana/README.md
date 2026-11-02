@@ -171,11 +171,10 @@ The programs keep their upgrade authority (none is made final).
    `CAPACITY_PROGRAM_ID` and `SAFETY_PROGRAM_ID`. By hand: stipend_pool
    `initialize` (sets the deposit caps and the config authority), `create_vault` per mint; stream_loan
    `initialize`; safety_pool `init_pool` and capacity_stake `init_config` per H081 mint.
-6. **Make every program immutable** by removing its upgrade authority, irreversibly:
-   `solana program set-upgrade-authority <PROGRAM_ID> --final -u <cluster>`, then check that
-   `solana program show <PROGRAM_ID>` prints `Authority: none`. This step runs only on the owner's explicit
-   go; until then the deployer key can replace the program code, which the design does not allow in
-   production.
+6. **Keep the upgrade authority.** Never run `set-upgrade-authority --final`: the upgrade authority is what
+   ships fixes and what closes a program to return its rent (`solana program close`). Check with
+   `solana program show <PROGRAM_ID>` that the authority is the deployer key. Because that key can replace the
+   program code, keep it backed up offline; moving it to a multisig later is an owner decision.
 
 Mint-level powers stay with the mint: a Token-2022 mint with a permanent delegate, a freeze authority or a
 transfer hook can move, freeze or block vault balances. Only list mints whose authorities are acceptable.

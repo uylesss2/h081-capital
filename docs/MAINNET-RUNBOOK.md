@@ -298,8 +298,9 @@ pause deposits, take the site's Live mode down, tell users. The program cannot p
 RiskNotice); caps keep the exposure at most 10,000 USDG.
 
 **Upgrade key.** The deployer is a single hot key that can replace the program code, including code that
-moves the vault. Keep `solana/keys/mainnet/` backed up offline and off shared machines. Later, move the
-authority to a multisig (e.g. a Squads vault) or make the program immutable; both are owner decisions:
+moves the vault. Keep `solana/keys/mainnet/` backed up offline and off shared machines. The programs are never
+made immutable: the upgrade authority is also what closes a program and returns its rent. Later, the authority
+can move to a multisig (e.g. a Squads vault); that is an owner decision:
 
 ```bash
 solana program set-upgrade-authority E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM \
