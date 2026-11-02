@@ -199,7 +199,7 @@ async function plan() {
     const sp = new PublicKey(args['safety-program']);
     assertNotDenied(deny, 'safety program', sp);
     // The top-up hands this program the treasury as signer and its H081 account as writable: on mainnet only the
-    // pinned safety_pool id is accepted (none until it is deployed), like the mint and the pool.
+    // pinned safety_pool id is accepted, like the mint and the pool.
     if (cluster === 'mainnet-beta') {
       if (!H081_SAFETY_POOL_PROGRAM) throw new Error('safety_pool is not deployed on mainnet yet (H081_SAFETY_POOL_PROGRAM in common.mts is unset); run without --safety-program (100% burn)');
       if (!sp.equals(H081_SAFETY_POOL_PROGRAM)) throw new Error(`on mainnet only the official safety_pool program ${H081_SAFETY_POOL_PROGRAM.toBase58()} is allowed`);

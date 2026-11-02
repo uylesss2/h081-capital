@@ -19,10 +19,10 @@ export const H081_MINT = new PublicKey('EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqA
 /** The H081/SOL Meteora DAMM v2 pool the buyback trades on. */
 export const H081_POOL = new PublicKey('CryBbh9QQttrUrfLVXLLEuhkM5wZ8W1DUZFYNhUEhYqs');
 /**
- * The mainnet safety_pool program the top-up may call. null until safety_pool is deployed (an owner go): until then
- * buyback.mts refuses --safety-program on mainnet (100% burn). Set it to the deployed program id, nothing else.
+ * The mainnet safety_pool program the top-up may call (live since 2026-10-31). buyback.mts accepts only this id for
+ * --safety-program on mainnet, and still burns 100% while the pool has no stakers or holds less than its floor.
  */
-export const H081_SAFETY_POOL_PROGRAM: PublicKey | null = null;
+export const H081_SAFETY_POOL_PROGRAM: PublicKey | null = new PublicKey('HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt');
 export const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
 
 /** Hard cap on slippage per chunk: 1%. The CLI may tighten it, never loosen it. */
