@@ -65,6 +65,12 @@ Rules: `stake(amount)` counts at once; `requestUnstake(amount)` removes the amou
 starts the cooldown (a second request adds to the pending amount and restarts the cooldown for all of it);
 `unstake()` pays the whole pending amount after the cooldown. No owner, no slashing, no rewards.
 
+**On Solana mainnet** (`capacity_stake` `CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`, live since 2026-10-31) the
+curve is the same: 100 H081 per desk and per 10,000 USDG of shielding every 30 days. The unstake cooldown is
+**30 days** (one full capacity window, so capacity cannot be reused by unstaking and restaking). Our relayer
+serves a free tier of 100 USDG per 30 days without any stake. Caps: 100,000 H081 per stake and 1,000,000 H081
+staked in total. The config authority can pause new stakes; unstake requests and unstaking are never paused.
+
 ## 4. Safety pool (`SafetyPool.sol`)
 
 A proof-settled insurance market for stream-backed loans. Stakers put H081 at risk; a lender buys cover for
