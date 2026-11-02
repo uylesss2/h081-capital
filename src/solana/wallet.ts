@@ -9,7 +9,7 @@ import {
 import {
   TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, unpackAccount,
 } from '@solana/spl-token';
-import { Account, type StipendAddress, type TreasuryNode } from '../client.js';
+import { Account, type StipendAddress, type TreasuryNode } from '../account.js';
 import {
   Allowance, LenderRef, Note, addressKey, allowanceCommitment, allowanceNullifier, lenderKey, nextRho, noteCommitment, noteNullifier, randomField,
   spendAllowance,
@@ -28,7 +28,7 @@ import { MAX_INPUTS, nextMerge, selectNotes } from '../consolidate.js';
 import { planDelegation } from '../delegation.js';
 import { type SentTx, closeBuffer, customErrorCode, send, simulate, uploadBuffer } from './buffer.js';
 import { abandonPlan, planOperation, sendV0, simulateV0, stagePlan } from './alt.js';
-import { toB64 } from './relay.js';
+import { capacityMessage, toB64 } from './relay.js';
 import type { RelayerClient, SolanaRelayBody } from '../relayer-client.js';
 import { PoolEventLog, type LocatedEvent } from './events.js';
 import { concatBytes, encodeProof, fieldOf } from './field.js';
@@ -107,6 +107,18 @@ export interface SolRelay {
    * The wallet's signer then pays nothing: missing payout ATAs and vaults are created by the relayer.
    */
   via?: RelayerClient;
+  /**
+   * Capacity operator for a relayer that enforces capacity_stake: the operation is put on this wallet's
+   * staked capacity (it signs capacityMessage(payload); the relayer verifies and reads its shieldCap). Only
+   * needed when the public amount is above the relayer's anonymous free tier. The relayer learns the operator.
+   */
+  operator?: CapacityOperator;
+}
+
+export interface CapacityOperator {
+  operator: PublicKey;
+  /** ed25519 signature (64 bytes) by `operator` over the message */
+  sign: (message: Uint8Array) => Uint8Array | Promise<Uint8Array>;
 }
 
 /** Fetches a confirmed transaction's compute units and logs (as `send` returns them). */
@@ -115,9 +127,21 @@ async function sentOf(connection: Connection, signature: string): Promise<SentTx
   return { signature, computeUnits: info?.meta?.computeUnitsConsumed ?? -1, logs: info?.meta?.logMessages ?? [] };
 }
 
+/** The relay body with the operator's signature over capacityMessage(payload) added when an operator is named. */
+export async function relayBody(body: Omit<SolanaRelayBody, 'payload'>, payload: Uint8Array, operator?: CapacityOperator): Promise<SolanaRelayBody> {
+  const out: SolanaRelayBody = { ...body, payload: toB64(payload) };
+  if (operator) {
+    out.operator = operator.operator.toBase58();
+    out.operatorSig = toB64(await operator.sign(capacityMessage(payload)));
+  }
+  return out;
+}
+
 /** Sends a staged operation through a relayer and returns it as `send` would. */
-export async function relayThrough(connection: Connection, via: RelayerClient, body: Omit<SolanaRelayBody, 'payload'>, payload: Uint8Array): Promise<SentTx> {
-  const { signature } = await via.relaySolana({ ...body, payload: toB64(payload) });
+export async function relayThrough(
+  connection: Connection, via: RelayerClient, body: Omit<SolanaRelayBody, 'payload'>, payload: Uint8Array, operator?: CapacityOperator,
+): Promise<SentTx> {
+  const { signature } = await via.relaySolana(await relayBody(body, payload, operator));
   return sentOf(connection, signature);
 }
 
@@ -383,6 +407,8 @@ export interface PreparedSpend {
   signers: Keypair[];
   /** set when the spend goes through a relayer service */
   via?: RelayerClient;
+  /** the capacity operator named for the relay, if any */
+  operator?: CapacityOperator;
 }
 
 type SubRequest = { to: StipendAddress } & Omit<SubGrant, 'agentPk'>;
@@ -668,7 +694,7 @@ export class SolanaWallet extends Scanner {
     const token = moves ? { mint, tokenProgram: await this.pool.tokenProgramOf(mint) } : undefined;
     if (relay.via) {
       if (extAmount > 0n) throw new Error('a deposit cannot be relayed: the depositor signs the token transfer');
-      const tx = await relayThrough(this.pool.connection, relay.via, { op: 'transact', mint: mint.toBase58(), recipientOwner: recipientOwner?.toBase58() }, payload);
+      const tx = await relayThrough(this.pool.connection, relay.via, { op: 'transact', mint: mint.toBase58(), recipientOwner: recipientOwner?.toBase58() }, payload, relay.operator);
       await this.sync();
       return { tx, proof };
     }
@@ -835,13 +861,13 @@ export class SolanaWallet extends Scanner {
       }
     }
     const payload = concatBytes(encodeProof(proof.proof), encodeSpendArgs(args), extBytes);
-    return { payload, accounts, args, next: built.next, proof, signers: [], via: relay.via };
+    return { payload, accounts, args, next: built.next, proof, signers: [], via: relay.via, operator: relay.operator };
   }
 
   /** Sends a prepared spend. If the lender's account cannot take the share, the spend goes through with the share escrowed. */
   async submitSpend(p: PreparedSpend): Promise<SolTxResult & { next: Allowance }> {
     if (p.via) {
-      const tx = await relayThrough(this.pool.connection, p.via, { op: 'spend', lenderToken: p.accounts.lenderToken?.toBase58() }, p.payload);
+      const tx = await relayThrough(this.pool.connection, p.via, { op: 'spend', lenderToken: p.accounts.lenderToken?.toBase58() }, p.payload, p.operator);
       await this.sync();
       return { tx, proof: p.proof, next: p.next };
     }
