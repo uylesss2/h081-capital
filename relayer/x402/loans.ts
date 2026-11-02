@@ -1,7 +1,10 @@
 // Loan-market data for the x402 `loans-market` service: the stream_loan registry and every slot, read
 // straight from the chain (no indexer) and cached for a short while. Numbers are decimal strings.
 import { Connection, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js';
-import { GRACE, ORIGINATION_FEE_BPS, type SlotAccount, decodeRegistry, decodeSlot, registryPda, shortfallOf } from '../../src/solana/lender.js';
+import { GRACE, ORIGINATION_FEE_BPS, type SlotAccount, decodeRegistry, decodeSlot, registryPda, shortfallOf, slotPda } from '../../src/solana/lender.js';
+
+/** Slot addresses per getMultipleAccountsInfo call (the RPC limit is 100). */
+const SLOT_BATCH = 100;
 import { RelayError } from '../errors.js';
 
 /** Treasury of the loan origination fee (stream_loan's compile-time TREASURY on mainnet; docs/MAINNET-RUNBOOK.md). */
@@ -67,14 +70,27 @@ export class LoanMarketReader {
     return this.pending;
   }
 
+  /**
+   * Reads the registry and the clock, then every slot by its derived address (["slot", loan_ref] for
+   * loan_ref 1..nextLoanRef-1, fetched in batches): public RPC endpoints refuse indexed queries such as
+   * getProgramAccounts, and the registry counter makes them unnecessary.
+   */
   private async read(): Promise<LoanMarketSnapshot> {
-    let registryInfo, slots, clock;
+    let registryInfo, clock;
+    const slots: Array<{ data: Uint8Array } | null> = [];
     try {
-      [registryInfo, slots, clock] = await Promise.all([
+      [registryInfo, clock] = await Promise.all([
         this.connection.getAccountInfo(registryPda(this.programId), 'confirmed'),
-        this.connection.getProgramAccounts(this.programId, { commitment: 'confirmed', filters: [{ dataSize: SLOT_ACCOUNT_BYTES }] }),
         this.connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY, 'confirmed'),
       ]);
+      if (registryInfo) {
+        const next = decodeRegistry(registryInfo.data).nextLoanRef;
+        const keys: PublicKey[] = [];
+        for (let ref = 1n; ref < next; ref++) keys.push(slotPda(ref, this.programId));
+        for (let i = 0; i < keys.length; i += SLOT_BATCH) {
+          slots.push(...await this.connection.getMultipleAccountsInfo(keys.slice(i, i + SLOT_BATCH), 'confirmed'));
+        }
+      }
     } catch (e) {
       throw new RelayError(503, 'rpc', `stream_loan not readable: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -82,7 +98,8 @@ export class LoanMarketReader {
     if (!clock) throw new RelayError(503, 'rpc', 'clock sysvar not readable');
     const now = Buffer.from(clock.data).readBigInt64LE(32);
     const decoded: SlotAccount[] = [];
-    for (const { account } of slots) {
+    for (const account of slots) {
+      if (!account || account.data.length !== SLOT_ACCOUNT_BYTES) continue; // closed slot, or not a slot
       try { decoded.push(decodeSlot(account.data)); } catch { /* not a slot */ }
     }
     decoded.sort((a, b) => (a.loanRef < b.loanRef ? -1 : a.loanRef > b.loanRef ? 1 : 0));
