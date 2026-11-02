@@ -178,10 +178,14 @@ rate-limit token.
 
 ## 5. Open points for the owner
 
-- Accept USDC next to USDG? The hosted facilitator documents "SPL tokens on Solana"; the open-source
-  `@x402/svm` facilitator accepts any SPL / Token-2022 mint, but the hosted service's policy for an unlisted
-  Token-2022 asset such as USDG is not published. The first real `verify` with USDG will tell; USDC is the
-  fallback every Solana listing in the Bazaar uses today.
+- **Payment asset: USDC only (settled 2026-11-02).** The hosted CDP facilitator refuses USDG at its preflight
+  (`verify` answers `preflight_validation_failed` for a payload that is otherwise identical to a USDC one, which
+  passes preflight and reaches simulation), and CDP's public validator requires `accepts[0].asset` to be USDC for a
+  Bazaar listing. Production runs `RELAYER_X402_ASSETS=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` with the
+  treasury USDC account `4WdndFn46EUEt5gY4kC2D2LA1Nsos9YzvPi1bMNQuLiT` pinned (created 2026-11-02, tx
+  `5cCqQEc7HGpwhyWbVBiNFkJKvcsuQLsQtZ5RM6BXepDVQk7KSx8eNRGM8tAfD5jv4fKLmFpfe9LoeyHuPD8ji6c1`). Relay fees and
+  loan fees stay in USDG; only the x402 per-call payments are USDC. Diagnostics: `scripts/x402-facilitator-debug.mts`
+  (`/supported` and a raw `verify`), `scripts/x402-pay.mts --dry-run --dump`.
 - Prices and the priority-lane SOL caps (section 1).
 - Reconciliation policy for `settlement_pending`: today the result is served and the signature logged; for
   prove-disclose the opposite (withhold the result) is a one-line change in `relayer/x402/seller.ts`.
