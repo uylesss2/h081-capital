@@ -40,7 +40,9 @@ None yet (the protocol is live on Solana mainnet, not audited yet; use at your o
 https://h081.xyz
 
 ##### Logo (High resolution, will be shown with rounded borders):
-<!-- TODO owner: attach the same square PNG/SVG used in the TVL PR -->
+![H081 Capital](https://h081.xyz/brand/h081-512.png)
+
+(512x512 PNG, the same one as the TVL PR)
 
 ##### Current TVL:
 ~$29 (29 USDG) plus 3,000 H081 staked; TVL adapter: DefiLlama-Adapters `projects/h081` (PR link: <!-- TODO owner: paste the TVL PR URL -->)

@@ -40,7 +40,9 @@ None yet (the protocol is live on Solana mainnet, not audited yet; use at your o
 https://h081.xyz
 
 ##### Logo (High resolution, will be shown with rounded borders):
-<!-- TODO owner: attach a square PNG/SVG, at least 512x512 -->
+![H081 Capital](https://h081.xyz/brand/h081-512.png)
+
+(512x512 PNG; the same file is attached to this PR)
 
 ##### Current TVL:
 ~$29 (29 USDG in the bank vault) plus 3,000 H081 staked (reported under staking)
