@@ -130,8 +130,9 @@ and anyone may run their own relayer or submit proofs directly.
 
 Fees collect in a Squads 2-of-3 treasury multisig that is distinct from every launch wallet. Once a week the
 treasury buys H081 on the official DAMM v2 pool (`CryBbh9QQttrUrfLVXLLEuhkM5wZ8W1DUZFYNhUEhYqs`) in
-randomised small chunks with at most 1% slippage. Until the safety pool (section 4) is live, 100% of the
-bought H081 is burned; after that, 50% is burned and 50% goes to `safety_pool.top_up`, which adds insurance
+randomised small chunks with at most 1% slippage. The safety pool (section 4) is live, so 50% of the bought H081
+is burned and 50% goes to `safety_pool.top_up` (100% burned while the pool has no stakers or holds less than
+10,000 H081). The top-up adds insurance
 capital for lenders without minting shares. Because no shares are minted, a top-up raises what every
 safety-pool share redeems for, so stakers who back loans benefit pro rata in return for carrying slashing
 risk (section 4); it is not a fixed or promised return. Holding H081 outside the safety pool pays nothing. Every run is recorded in the public ledger `flywheel-ledger.json`.
