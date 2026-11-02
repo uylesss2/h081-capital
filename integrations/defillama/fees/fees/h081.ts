@@ -18,7 +18,7 @@ import { METRIC } from "../helpers/metrics";
  *
  * The treasury's USDG token account is fee-only: the protocol sends nothing else to it and the team
  * never tops it up from an unlisted wallet. Every wallet the team controls (deployer, config
- * authority, fee / launch wallets, the Squads multisig and its members, the relayer hot wallet) is
+ * authority, the Squads multisig and its members, the relayer hot wallet) is
  * excluded as a sender below, and every wallet that could sign a team transfer is excluded as a
  * signer; the relayer hot wallet is excluded as a sender only, because it signs the relay-fee
  * transactions (the fee itself comes from the vault, not from the hot wallet).
@@ -44,11 +44,6 @@ const H081 = "EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo";
 // Team wallets: transfers from them (top-ups, tests) or signed by them are not fees.
 const DEPLOYER = "5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1"; // deployer / upgrade authority
 const CONFIG_AUTHORITY = "4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2"; // stipend_pool config authority
-const TEAM_WALLETS = [
-  "2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP", // fee wallet (funds deploys)
-  "FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ",
-  "5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw",
-];
 // Treasury multisig (Squads v4): the multisig account, its create key and the current members
 const TREASURY_MULTISIG = [
   "G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6", // multisig
@@ -61,7 +56,7 @@ const TREASURY_MULTISIG = [
 // not be a blacklisted signer; it never holds protocol fees, so anything it sends is not a fee.
 const RELAYER_HOT_WALLET = "DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA";
 
-const INTERNAL = [TREASURY, TREASURY_USDG_ATA, DEPLOYER, CONFIG_AUTHORITY, ...TEAM_WALLETS, ...TREASURY_MULTISIG];
+const INTERNAL = [TREASURY, TREASURY_USDG_ATA, DEPLOYER, CONFIG_AUTHORITY, ...TREASURY_MULTISIG];
 const BLACKLIST_FROM = [...INTERNAL, RELAYER_HOT_WALLET];
 const BLACKLIST_SIGNERS = INTERNAL;
 
@@ -92,7 +87,7 @@ async function fetch(options: FetchOptions) {
 const methodology = {
   Fees:
     "USDG received by the H081 protocol treasury's fee-only USDG account: the 0.20% relay fee on relayed withdrawals and spends (sent out of the bank vault by the stipend_pool program) plus the 0.25% loan origination fee on funded loans (sent by the lender in stream_loan::fund). " +
-    "The treasury's USDG account receives nothing else from the protocol; transfers from or signed by the team's wallets (deployer, config authority, launch wallets, treasury multisig and its members, relayer hot wallet) are excluded. " +
+    "The treasury's USDG account receives nothing else from the protocol; transfers from or signed by the team's wallets (deployer, config authority, treasury multisig and its members, relayer hot wallet) are excluded. " +
     "H081 token trading and creator fees are not protocol fees and are not counted (the H081 mint is excluded).",
   Revenue:
     "Same as Fees: 100% of the relay and origination fees go to the protocol treasury; there is no supply-side share.",

@@ -98,8 +98,8 @@ maintainers".
     the treasury USDG account received nothing. Offer the RPC cross-check
     (`scripts/fees-rpc-check.mjs`) if they want to see it.
   - *Treasury inflows that are not fees?* The treasury's USDG account is fee-only: the protocol sends
-    nothing else to it, and every team wallet (deployer, config authority, fee / launch wallets, the
-    Squads multisig, its create key and members, the relayer hot wallet) is excluded as a sender.
+    nothing else to it, and every team wallet (deployer, config authority, the Squads multisig, its
+    create key and members, the relayer hot wallet) is excluded as a sender.
     A third-party donation would count; the protocol has no such inflow path. Say so if asked.
   - *Audit?* "Not audited yet; live on Solana mainnet; use at your own risk." Never say an audit is
     not planned.
@@ -112,8 +112,8 @@ maintainers".
 
 - **Never fund the treasury's USDG account `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo` from a
   wallet that is not in the adapter's exclusion list** (`INTERNAL` / `RELAYER_HOT_WALLET` in
-  `fees/h081.ts`: deployer, config authority, fee / launch wallets, the Squads multisig, its create
-  key and members, the relayer hot wallet). Any USDG that reaches it from another address is
+  `fees/h081.ts`: deployer, config authority, the Squads multisig, its create key and members, the
+  relayer hot wallet). Any USDG that reaches it from another address is
   published as protocol fees and revenue. If a new team wallet may ever send USDG there (an exchange
   withdrawal, a new multisig member, a new hot wallet), add it to the list and get the
   dimension-adapters PR merged **before** the transfer. Keep `DENY_SIGNERS` / `DENY_FROM` in

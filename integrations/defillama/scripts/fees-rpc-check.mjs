@@ -19,9 +19,6 @@ const DENY_SIGNERS = new Set([
   TREASURY_USDG_ATA,
   '5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1', // deployer / upgrade authority
   '4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2', // config authority
-  '2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', // fee wallet
-  'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ',
-  '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw',
   'G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6', // treasury multisig
   '4ir9vPVqWZ28ja6eTZs75LqBduhL1R8AQ9irxBu16kAd', // multisig create key
   '3QxDPawgSmdPsvNa1xfsHuuF7cXWBaoBhPHgQgoBpnfi', // member 1

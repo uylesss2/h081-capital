@@ -75,5 +75,5 @@ All addresses are derived at runtime from the program ids and mints in `docs/MAI
 - Only the H081 project and its official token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo` are
   named in public text.
 - Wording: live on Solana mainnet, not audited yet, use at your own risk.
-- The treasury is the only fee recipient; never a launch wallet.
+- The treasury is the only fee recipient.
 - No package, lockfile or workspace file of either upstream repo is changed.

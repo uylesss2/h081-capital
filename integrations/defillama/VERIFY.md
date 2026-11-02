@@ -214,8 +214,8 @@ changed). Same result on the re-run after the review fixes (typecheck exit 0; re
 
 ## 7. Review fixes applied (2026-11-02)
 
-- Fees: every documented team wallet (deployer, config authority, fee / launch wallets, Squads
-  multisig + create key + members from `docs/MAINNET-RUNBOOK.md`) is excluded as sender and signer;
+- Fees: every documented team wallet (deployer, config authority, Squads multisig + create key +
+  members from `docs/MAINNET-RUNBOOK.md`) is excluded as sender and signer;
   the relayer hot wallet (`relayer/README.md`) as sender only, since it signs the fee-paying relays;
   the H081 mint is in `blacklist_mints`; the adapter comment, the methodology, the PR body and the
   owner guide state that the treasury's USDG account is fee-only and must never be funded from an

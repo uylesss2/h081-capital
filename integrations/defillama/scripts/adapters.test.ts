@@ -23,10 +23,9 @@ const RECEIVED_OPTIONS = ['options', 'balances', 'target', 'targets', 'mints', '
 // Documented wallets (docs/MAINNET-RUNBOOK.md, README.md, relayer/README.md)
 const DEPLOYER = '5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1';
 const CONFIG_AUTHORITY = '4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2';
-const LAUNCH_WALLETS = ['2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', 'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ', '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw'];
 const MULTISIG = ['G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6', '4ir9vPVqWZ28ja6eTZs75LqBduhL1R8AQ9irxBu16kAd', '3QxDPawgSmdPsvNa1xfsHuuF7cXWBaoBhPHgQgoBpnfi', '3TGGDFAtipTMSpkmSEfm1CTcREQYdTkzWhzdVCzLLa7N', '7815bY95r1E5FifAZMf5rM5Vjrper67BBY1wS8m216i1'];
 const RELAYER_HOT_WALLET = 'DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA';
-const TEAM_SIGNERS = [ADDR.TREASURY, derived.treasuryUsdg, DEPLOYER, CONFIG_AUTHORITY, ...LAUNCH_WALLETS, ...MULTISIG];
+const TEAM_SIGNERS = [ADDR.TREASURY, derived.treasuryUsdg, DEPLOYER, CONFIG_AUTHORITY, ...MULTISIG];
 
 /** Runs tvl/projects/h081/index.js (CommonJS) with `../helper/solana` replaced by a recorder. */
 function loadTvlAdapter() {
@@ -143,8 +142,8 @@ describe('fees adapter (dimension-adapters fees/h081.ts)', () => {
     // signers: every team wallet but NOT the relayer hot wallet (it signs the fee-paying relays)
     expect([...call.blacklist_signers].sort()).toEqual([...TEAM_SIGNERS].sort());
     expect(call.blacklist_signers).not.toContain(RELAYER_HOT_WALLET);
-    // no launch wallet is ever a fee destination
-    for (const w of LAUNCH_WALLETS) expect(call.targets).not.toContain(w);
+    // only the treasury is ever a fee destination
+    expect([...call.targets].sort()).toEqual([ADDR.TREASURY, derived.treasuryUsdg].sort());
   });
 
   it('books what the treasury received as fees = revenue = protocol revenue, labelled', async () => {
