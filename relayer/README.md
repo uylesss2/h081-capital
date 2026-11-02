@@ -54,7 +54,7 @@ which case Solana relaying must be configured):
 | `RELAYER_X402_FACILITATOR_TIMEOUT_MS` | per facilitator call (default 30000) |
 | `RELAYER_X402_NETWORK` | CAIP-2 id, default `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` (mainnet); checked against the RPC's genesis hash at startup |
 | `RELAYER_X402_PAY_TO` | owner of the payment token accounts; default = `RELAYER_SOLANA_TREASURY` and must equal it (`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`); never a launch wallet |
-| `RELAYER_X402_ASSETS` | comma-separated 6-decimal mints accepted for payment; default: the Solana fee mints (USDG `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH`); add `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` for USDC |
+| `RELAYER_X402_ASSETS` | comma-separated 6-decimal mints accepted for payment; default: the Solana fee mints (USDG); **set it to USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` with the CDP facilitator, which refuses USDG at verify preflight** (docs/X402-SELLER.md section 5) |
 | `RELAYER_X402_PAY_TO_TOKEN_ACCOUNTS` | `mint=tokenAccount,...` pins: startup asserts ATA(payTo, mint) equals each (USDG: `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo`); a mismatch refuses to start; a missing ATA leaves the seller off (`x402: seller off:` in the log, free relay API unaffected) until the owner creates it from the vault; the relayer never sends a transaction for it |
 | `RELAYER_X402_PRICES` | `service=amount,...` in 6-decimal base units; defaults `relay-priority=250000,preflight=2000,loans-market=1000,prove-disclose=20000`; `0` disables a service |
 | `RELAYER_X402_RESOURCE_BASE` | https origin the resource URLs advertise (default `https://h081-relayer.vercel.app`) |
