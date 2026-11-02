@@ -111,11 +111,11 @@ Caveats the pricing work must address before any deployment:
 - A loan on an allowance that never expires has no due date and never reports a shortfall, so it cannot be
   insured (`insure` requires an expiry).
 
-## 5. Fee capture: platform fees buy back H081 (designed, not live)
+## 5. Fee capture: platform fees buy back H081
 
-Status 2026-10-31: **no platform fee is charged today and no buyback has happened.** The design below is in
-build on branch `feat/flywheel`; the full specification is `docs/FLYWHEEL.md`. Every mainnet step needs an
-explicit go from the owner.
+Status 2026-11-02: **live on Solana mainnet since 2026-10-31.** The loan origination fee and our relayer's fee
+are charged and paid to the treasury; no buyback has run yet. The full specification is `docs/FLYWHEEL.md`.
+Every mainnet buyback needs an explicit go from the owner.
 
 **Only platform fees feed the flywheel.** These are fees the bank earns for services it provides:
 
