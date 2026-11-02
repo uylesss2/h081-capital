@@ -8,6 +8,7 @@ import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { toRelayError } from '../../relayer/errors.js';
 import { type RelayIo, SolanaRelayer } from '../../relayer/solana.js';
+import { MAX_DESCRIPTION_LENGTH } from '../../relayer/x402/catalog.js';
 import { LoanMarketReader, SLOT_ACCOUNT_BYTES } from '../../relayer/x402/loans.js';
 import { DiscloseProver, checkDiscloseRequest, discloseArtifacts, parseDiscloseRequest, rootOfPath } from '../../relayer/x402/prove.js';
 import { loansMarket, preflight, proveDisclose, relayPriority } from '../../relayer/x402/services.js';
@@ -23,6 +24,18 @@ import { clockAccount, encodeRegistry, encodeSlot } from './helpers/x402.js';
 
 const loanProgram = Keypair.generate().publicKey;
 const NOW = 1_800_000_000n;
+
+describe('service descriptions', () => {
+  it('every description (with the disclaimer) fits the facilitator\'s 500-character limit and names only H081', () => {
+    const none = undefined as never;
+    const services = [relayPriority(none), preflight(none), loansMarket(none), proveDisclose(undefined)];
+    for (const s of services) {
+      expect(s.description.length, `${s.id} description length`).toBeLessThanOrEqual(MAX_DESCRIPTION_LENGTH);
+      expect(s.description).toContain('live on Solana mainnet, not audited yet; use at your own risk');
+      expect(s.description).not.toMatch(/no audit planned/i);
+    }
+  });
+});
 
 describe('loan market reader', () => {
   const lender = Keypair.generate().publicKey;

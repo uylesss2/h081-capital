@@ -96,8 +96,9 @@ export function createRelayerHandler(opts: RelayerServerOptions): RequestListene
         const service = opts.x402.find(req.method, path);
         if (!service) return fail(res, new RelayError(503, 'service_disabled', 'this paid service is disabled (price 0)'));
         const key = clientKey(req, !!opts.trustProxy);
-        // the unpaid challenge is free; a paid call takes a limiter token, except on the priority lane (its own capacity)
-        if (req.headers['payment-signature'] && service.id !== 'relay-priority') {
+        // the unpaid challenge is free; every paid call takes a limiter token (the priority lane too: its own
+        // in-flight count caps the work, not the facilitator and RPC calls a flood of refused payments would cost)
+        if (req.headers['payment-signature']) {
           const wait = opts.limiter.take(key);
           if (wait > 0) return fail(res, new RelayError(429, 'rate_limited', `retry in ${Math.ceil(wait / 1000)} s`), { 'retry-after': String(Math.ceil(wait / 1000)) });
         }

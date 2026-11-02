@@ -5,11 +5,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Keypair, PublicKey } from '@solana/web3.js';
-import { LAUNCH_WALLET_DENYLIST } from '../../relayer/config.js';
+import { ConfigError, LAUNCH_WALLET_DENYLIST } from '../../relayer/config.js';
 import { RelayError } from '../../relayer/errors.js';
 import { RateLimiter } from '../../relayer/ratelimit.js';
 import { createRelayerServer } from '../../relayer/server.js';
-import { X402_ROUTES, type X402Asset, type X402Service } from '../../relayer/x402/catalog.js';
+import { MAX_DESCRIPTION_LENGTH, X402_ROUTES, type X402Asset, type X402Service } from '../../relayer/x402/catalog.js';
 import { X402Seller } from '../../relayer/x402/seller.js';
 import { type PaymentRequired, type PaymentRequirements, SOLANA_MAINNET_NETWORK, decodeHeader, encodeHeader } from '../../relayer/x402/types.js';
 import { FEE_PAYER, MockFacilitator, makePayment, paymentHeader } from './helpers/x402.js';
@@ -185,7 +185,36 @@ describe('verify and settle', () => {
     expect(await errorOf(res)).toMatchObject({ code: 'payment_invalid', reason: 'insufficient_funds' });
     expect(res.headers.get('PAYMENT-REQUIRED')).toBeTruthy();
     expect(facilitator.count('settle')).toBe(0);
-    expect(events).toEqual([]);
+    // the service's checks ran first (they cost no facilitator call) and what they reserved was released
+    expect(events).toEqual(['prepare loans-market', 'abort loans-market']);
+    // the facilitator itself failing on verify: 503, released, and the payment may be presented again
+    facilitator.reset(); events.length = 0;
+    facilitator.verifyResult = new Error('down');
+    const payment = makePayment(pr);
+    const down = await fetch(market(), { headers: paymentHeader(payment) });
+    expect(down.status).toBe(503);
+    expect(events).toEqual(['prepare loans-market', 'abort loans-market']);
+    facilitator.verifyResult = { isValid: true, payer: 'payer' };
+    expect((await fetch(market(), { headers: paymentHeader(payment) })).status).toBe(200);
+  });
+
+  it('forwards OUR resource and bazaar declaration to the facilitator, never the client\'s copy', async () => {
+    const pr = await challengeOf(await fetch(market()));
+    const forged = makePayment(pr, {
+      resource: { url: 'https://elsewhere.example/x', description: 'x'.repeat(600), serviceName: 'someone else' },
+      extensions: { bazaar: { info: { input: { type: 'http', method: 'GET' } }, schema: {} }, other: 1 },
+    });
+    const res = await fetch(market(), { headers: paymentHeader(forged) });
+    expect(res.status).toBe(200);
+    for (const name of ['verify', 'settle'] as const) {
+      const sent = facilitator.calls.find((c) => c.name === name)!.payload!;
+      expect(sent.resource).toEqual(pr.resource);
+      expect(sent.resource!.description).toBe('stub loans-market');
+      expect(sent.extensions!.bazaar).toEqual(pr.extensions!.bazaar);
+      expect(sent.extensions!.other).toBe(1); // unrelated client extensions pass through
+      expect(sent.accepted).toMatchObject({ amount: '1000', payTo: treasury.toBase58() });
+      expect(sent.payload.transaction).toBe(forged.payload.transaction);
+    }
   });
 
   it('settle-after: runs the handler, then settles with our requirements; a failing handler is not charged', async () => {
@@ -222,19 +251,26 @@ describe('verify and settle', () => {
     expect(events).toEqual(['prepare relay-priority', 'run relay-priority']);
     expect(facilitator.calls.map((c) => c.name)).toEqual(['verify', 'settle']);
     expect(settlementOf(ok).success).toBe(true);
-    // refused in prepare (fee too low etc.): nothing settled
+    // refused in prepare (fee too low etc.): the facilitator is never asked, nothing settled, and the same
+    // payment is still usable once the request is corrected
     facilitator.reset(); events.length = 0;
-    const refusing = { ...stub('relay-priority', 'settle-first'), prepare: async () => { throw new RelayError(402, 'fee_too_low', 'low'); } };
+    const refuse = { on: true };
+    const refusing = { ...stub('relay-priority', 'settle-first'), prepare: async (ctx: { body: unknown }) => { if (refuse.on) throw new RelayError(402, 'fee_too_low', 'low'); return ctx.body; } };
     const s2 = new X402Seller({ ...sellerOptions(), services: [refusing] });
     const srv = createRelayerServer({ x402: s2, limiter: new RateLimiter({ perMinute: 60, burst: 10 }) });
     await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const u2 = `http://127.0.0.1:${(srv.address() as AddressInfo).port}${X402_ROUTES['relay-priority'].path}`;
     try {
-      const refused = await fetch(u2, { method: 'POST', headers: paymentHeader(makePayment(pr)), body: '{}' });
+      const payment = makePayment(pr);
+      const refused = await fetch(u2, { method: 'POST', headers: paymentHeader(payment), body: '{}' });
       expect(refused.status).toBe(402);
       expect((await errorOf(refused)).code).toBe('fee_too_low');
       // (a fresh seller asks /supported once for its fee payer)
-      expect(facilitator.calls.map((c) => c.name).filter((n) => n !== 'supported')).toEqual(['verify']);
+      expect(facilitator.calls.map((c) => c.name).filter((n) => n !== 'supported')).toEqual([]);
+      refuse.on = false;
+      const retried = await fetch(u2, { method: 'POST', headers: paymentHeader(payment), body: '{}' });
+      expect(retried.status).toBe(200);
+      expect(facilitator.calls.map((c) => c.name).filter((n) => n !== 'supported')).toEqual(['verify', 'settle']);
     } finally {
       await new Promise<void>((r) => srv.close(() => r()));
     }
@@ -310,6 +346,16 @@ describe('guards', () => {
     for (const w of LAUNCH_WALLET_DENYLIST) expect(() => new X402Seller({ ...sellerOptions(), payTo: new PublicKey(w), treasury: new PublicKey(w) })).toThrow(/launch wallet/);
     expect(() => new X402Seller({ ...sellerOptions(), payTo: Keypair.generate().publicKey })).toThrow(/platform treasury/);
     expect(() => new X402Seller({ ...sellerOptions(), assets: [{ ...assets[0], decimals: 9 }] })).toThrow(/6-decimal/);
+    // all of these are deliberate refusals (ConfigError), so the relayer refuses to start rather than running without the seller
+    expect(() => new X402Seller({ ...sellerOptions(), payTo: Keypair.generate().publicKey })).toThrow(ConfigError);
+  });
+
+  it('refuses a service whose description is longer than the facilitator allows (500 characters)', () => {
+    const long = { ...stub('loans-market', 'settle-after'), description: 'x'.repeat(MAX_DESCRIPTION_LENGTH + 1) };
+    expect(() => new X402Seller({ ...sellerOptions(), services: [long] })).toThrow(ConfigError);
+    expect(() => new X402Seller({ ...sellerOptions(), services: [long] })).toThrow(/501 characters/);
+    const exact = { ...stub('loans-market', 'settle-after'), description: 'x'.repeat(MAX_DESCRIPTION_LENGTH) };
+    expect(() => new X402Seller({ ...sellerOptions(), services: [exact] })).not.toThrow();
   });
 
   it('CORS: the site may send payment-signature and read PAYMENT-REQUIRED / PAYMENT-RESPONSE', async () => {
@@ -321,11 +367,12 @@ describe('guards', () => {
     expect(res.headers.get('access-control-expose-headers')).toBe('PAYMENT-REQUIRED, PAYMENT-RESPONSE');
   });
 
-  it('paid calls take a rate-limit token; the unpaid challenge does not', async () => {
+  it('every paid call takes a rate-limit token, the priority lane included; the unpaid challenge does not', async () => {
     const seller = new X402Seller(sellerOptions());
     const s = createRelayerServer({ x402: seller, limiter: new RateLimiter({ perMinute: 1, burst: 1 }) });
     await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
     const u = `http://127.0.0.1:${(s.address() as AddressInfo).port}${X402_ROUTES['loans-market'].path}`;
+    const p = `http://127.0.0.1:${(s.address() as AddressInfo).port}${X402_ROUTES['relay-priority'].path}`;
     try {
       const pr = await challengeOf(await fetch(u));
       expect((await fetch(u)).status).toBe(402);
@@ -333,6 +380,13 @@ describe('guards', () => {
       const limited = await fetch(u, { headers: paymentHeader(makePayment(pr)) });
       expect(limited.status).toBe(429);
       expect((await fetch(u)).status).toBe(402);
+      // the priority lane: the challenge is free, a paid call is limited like any other (and costs no facilitator call when refused)
+      facilitator.reset(); events.length = 0;
+      const pp = await challengeOf(await fetch(p, { method: 'POST' }));
+      const pl = await fetch(p, { method: 'POST', headers: paymentHeader(makePayment(pp)), body: '{}' });
+      expect(pl.status).toBe(429);
+      expect(facilitator.count('verify')).toBe(0);
+      expect(events).toEqual([]);
     } finally {
       await new Promise<void>((r) => s.close(() => r()));
     }

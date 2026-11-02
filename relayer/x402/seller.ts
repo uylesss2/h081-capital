@@ -1,18 +1,19 @@
 // The x402 seller: answers a paid route with a 402 challenge until the request carries a PAYMENT-SIGNATURE,
-// then has the facilitator verify the payment, settles it (before or after the work, per service) and
-// answers with the result and a PAYMENT-RESPONSE header. The requirements sent to the facilitator are always
-// our own (price, asset, payTo = the treasury); the client's `accepted` is only matched against them.
+// runs the service's own checks (`prepare`), then has the facilitator verify the payment, settles it (before
+// or after the work, per service) and answers with the result and a PAYMENT-RESPONSE header. What goes to the
+// facilitator is always our own: the requirement (price, asset, payTo = the treasury), the resource and the
+// bazaar declaration; the client's `accepted` is only matched against ours.
 //
 // Without CDP credentials no seller exists (relayer/app.ts leaves it undefined) and the routes answer 503
 // x402_disabled: nothing ever pretends to settle.
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PublicKey } from '@solana/web3.js';
-import { isDenyListed } from '../config.js';
+import { ConfigError, isDenyListed } from '../config.js';
 import { RelayError, toRelayError } from '../errors.js';
 import { fail, header, json, readBody } from '../http.js';
 import {
-  type X402Asset, type X402Service, type X402ServiceId, buildPaymentRequired, catalogView, paymentRequirements,
+  MAX_DESCRIPTION_LENGTH, type X402Asset, type X402Service, type X402ServiceId, buildPaymentRequired, catalogView, paymentRequirements,
 } from './catalog.js';
 import { type Facilitator, FacilitatorError, type Settled, feePayerFor } from './facilitator.js';
 import { type PaymentPayloadV2, type PaymentRequired, type PaymentRequirements, X402_HEADERS, decodeHeader, encodeHeader } from './types.js';
@@ -50,11 +51,17 @@ export class X402Seller {
   private feePayer?: { at: number; value: string };
   private readonly log: (line: string) => void;
 
+  /** Every refusal here is deliberate (a ConfigError): the relayer must not start with a seller that pays the wrong party or cannot be indexed. */
   constructor(readonly opts: X402SellerOptions) {
-    if (isDenyListed(opts.payTo)) throw new Error(`x402 payTo ${opts.payTo.toBase58()} is an H081 launch wallet; paid services never pay a launch wallet`);
-    if (opts.treasury && !opts.treasury.equals(opts.payTo)) throw new Error('x402 payTo must be the platform treasury');
-    if (opts.assets.length === 0) throw new Error('x402: at least one payment asset is required');
-    for (const a of opts.assets) if (a.decimals !== 6) throw new Error(`x402 asset ${a.mint} has ${a.decimals} decimals; prices are in 6-decimal base units`);
+    if (isDenyListed(opts.payTo)) throw new ConfigError(`x402 payTo ${opts.payTo.toBase58()} is an H081 launch wallet; paid services never pay a launch wallet`);
+    if (opts.treasury && !opts.treasury.equals(opts.payTo)) throw new ConfigError('x402 payTo must be the platform treasury');
+    if (opts.assets.length === 0) throw new ConfigError('x402: at least one payment asset is required');
+    for (const a of opts.assets) if (a.decimals !== 6) throw new ConfigError(`x402 asset ${a.mint} has ${a.decimals} decimals; prices are in 6-decimal base units`);
+    for (const s of opts.services) {
+      if (s.description.length > MAX_DESCRIPTION_LENGTH) {
+        throw new ConfigError(`x402 service ${s.id}: description is ${s.description.length} characters; the facilitator allows ${MAX_DESCRIPTION_LENGTH}`);
+      }
+    }
     // a service priced at 0 is disabled: not advertised, not served
     this.services = opts.services.filter((s) => (opts.prices.get(s.id) ?? 0n) > 0n);
     this.log = opts.log ?? (() => undefined);
@@ -150,9 +157,14 @@ export class X402Seller {
     if (typeof tx !== 'string' || tx.length === 0 || tx.length > MAX_TRANSACTION_B64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(tx)) {
       return challenge('invalid_payload', 'payload.transaction must be a base64 transaction of at most 2 KiB');
     }
-    // the requirement we verify and settle against is ours, never the client's copy
+    // the requirement we verify and settle against is ours, never the client's copy; so are the resource and
+    // the bazaar declaration (the Bazaar indexes them from the settlement call; the SVM signature covers the
+    // transaction, not this JSON, so replacing them cannot break the payment)
     const requirement: PaymentRequirements = { ...ours, extra: { ...(ours.extra ?? {}), feePayer } };
-    const payload: PaymentPayloadV2 = { ...payment, accepted: requirement };
+    const payload: PaymentPayloadV2 = {
+      ...payment, resource: required.resource, accepted: requirement,
+      extensions: { ...(payment.extensions ?? {}), bazaar: required.extensions!.bazaar },
+    };
 
     // ---- the body (a malformed body is refused before any payment is touched)
     let body: unknown;
@@ -167,6 +179,20 @@ export class X402Seller {
     if (this.seen.has(key)) return fail(res, new RelayError(409, 'payment_replayed', 'this payment was already presented to this relayer'));
     this.remember(key);
 
+    // ---- the service's own checks, before the facilitator is asked anything: a refusal (bad body, low fee,
+    // unknown root, stale timestamp, lane full) costs no verify, and the priority lane holds its slot from here
+    const ctx = { body, url, clientKey, log: this.log };
+    const started = this.now();
+    let prepared: unknown;
+    try {
+      prepared = service.prepare ? await service.prepare(ctx) : undefined;
+    } catch (e) {
+      this.seen.delete(key); // never presented to the facilitator: the same payment may retry with a corrected request
+      const err = toRelayError(e);
+      this.log(`x402 ${service.id} refused before payment ${err.status} ${err.code} ${err.message.slice(0, 200)}`);
+      return fail(res, err);
+    }
+
     // ---- verify
     const facilitator = this.opts.facilitator;
     let verified;
@@ -174,25 +200,17 @@ export class X402Seller {
       verified = await facilitator.verify(payload, requirement);
     } catch (e) {
       this.seen.delete(key);
+      service.abort?.(prepared);
       return this.facilitatorFailed(res, service, 'verify', e);
     }
     this.logExtensions(service, 'verify', verified.extensionResponses);
     if (!verified.isValid) {
+      service.abort?.(prepared);
       this.log(`x402 ${service.id} payment invalid: ${verified.invalidReason ?? 'unknown'}`);
       return challenge('payment_invalid', `the payment did not verify: ${verified.invalidReason ?? 'unknown'}`, { reason: verified.invalidReason });
     }
 
     // ---- the work and the settlement, in the service's order
-    const ctx = { body, url, clientKey, log: this.log };
-    const started = this.now();
-    let prepared: unknown;
-    try {
-      prepared = service.prepare ? await service.prepare(ctx) : undefined;
-    } catch (e) {
-      const err = toRelayError(e);
-      this.log(`x402 ${service.id} refused before payment ${err.status} ${err.code} ${err.message.slice(0, 200)}`);
-      return fail(res, err);
-    }
     if (service.flow === 'settle-after') {
       let out: unknown;
       try {

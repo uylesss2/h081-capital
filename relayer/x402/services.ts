@@ -31,7 +31,7 @@ export function relayPriority(solana: SolanaRelayer): X402Service<{ prepared: Pr
   return {
     id: 'relay-priority', ...X402_ROUTES['relay-priority'], flow: 'settle-first', mimeType: 'application/json',
     description: 'Submits a stipend_pool operation (withdrawal, spend, grant or delegate; the same body as POST /v1/solana/relay) '
-      + 'through a dedicated priority lane: its own in-flight capacity, no per-client rate limit and a higher priority-fee cap on every transaction. '
+      + 'through a dedicated priority lane: its own in-flight capacity and a higher priority-fee cap on every transaction. '
       + 'The operation must still carry the in-proof relay fee to the treasury fee account. Returns the signature and compute units. ' + DISCLAIMER,
     inputExample: RELAY_EXAMPLE, inputSchema: RELAY_BODY_SCHEMA,
     outputExample: { signature: '5uGn7...', computeUnits: 210000, op: 'transact', fee: '50000', lane: 'priority', priorityFee: { maxLamports: 4000000, priceCeil: 5000000 } },
@@ -139,9 +139,9 @@ export const DISCLOSE_BODY_SCHEMA = {
 export function proveDisclose(prover: DiscloseProver | undefined): X402Service<DiscloseRequest | undefined> {
   return {
     id: 'prove-disclose', ...X402_ROUTES['prove-disclose'], flow: 'settle-first', mimeType: 'application/json',
-    description: 'Produces a Groth16 proof of the stipend_pool disclose circuit for an allowance: remaining balance at least a bound, lifetime spend at most a bound, '
-      + 'or window spend at most a bound, bound to an audience, as of a root the pool knows. Input: the allowance figures and policy, its Merkle path, the bound and the audience; '
-      + 'no spending key. Output: the proof, its six public signals and the base64 payload for verify_disclosure. The prover sees the allowance figures. ' + DISCLAIMER,
+    description: 'Proves a statement about a stipend_pool allowance (Groth16 disclose circuit): remaining at least, lifetime spend at most or window spend '
+      + 'at most a bound, for an audience, as of a root the pool knows. Input: the allowance figures and policy (the prover sees them), its Merkle path, '
+      + 'the bound and the audience; no spending key. Output: the proof, its public signals and the payload for verify_disclosure. ' + DISCLAIMER,
     inputExample: {
       root: '0x1a2b...', kind: 'remainingAtLeast', bound: '600', audience: '77',
       allowance: {

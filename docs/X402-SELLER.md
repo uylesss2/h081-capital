@@ -21,7 +21,7 @@ AI agents pay per call with x402 (HTTP 402, v2, scheme `exact`, Solana mainnet
 |---|---|
 | `payTo` (owner of the payment accounts) | `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq` (the Squads treasury vault; must equal `RELAYER_SOLANA_TREASURY`) |
 | USDG payment account (ATA of payTo) | `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo` (Token-2022; exists on mainnet, owned by the treasury) |
-| USDC payment account, if USDC is enabled | `4WdndFn46EUEt5gY4kC2D2LA1Nsos9YzvPi1bMNQuLiT` (derived ATA; created at first start if missing, or create it from the vault yourself and pin it) |
+| USDC payment account, if USDC is enabled | `4WdndFn46EUEt5gY4kC2D2LA1Nsos9YzvPi1bMNQuLiT` (derived ATA; create it from the vault yourself and pin it: the relayer never creates it, and while it is missing the seller stays off) |
 | USDG mint | `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH` (Token-2022, 6 decimals) |
 | USDC mint (optional) | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` (6 decimals) |
 | Facilitator | `https://api.cdp.coinbase.com/platform/v2/x402` (`/verify`, `/settle`, `/supported`, each with a CDP JWT) |
@@ -43,7 +43,7 @@ in code (`relayer/config.ts`, `relayer/x402/seller.ts`).
 
 | Route | Flow | Default price (6-decimal base units) | What it does |
 |---|---|---|---|
-| `POST /v1/x402/solana/relay-priority` | settle-first | `250000` (0.25) | The `/v1/solana/relay` body through a dedicated lane: its own in-flight count (`RELAYER_X402_PRIORITY_MAX_IN_FLIGHT`), no per-client rate limit, higher priority-fee caps on every transaction. The in-proof relay fee (0.20%, minimum 0.05 USDG, to the treasury fee account) is still required. Fee, root, nullifier, timestamp and capacity refusals happen **before** settlement and are never charged; a staging, simulation or send failure after settlement is answered with the receipt attached (`charged: true`): the charge buys the lane and the attempt. |
+| `POST /v1/x402/solana/relay-priority` | settle-first | `250000` (0.25) | The `/v1/solana/relay` body through a dedicated lane: its own in-flight count (`RELAYER_X402_PRIORITY_MAX_IN_FLIGHT`) and higher priority-fee caps on every transaction (a paid call still takes one token of the per-client rate limit, like every other paid call). The in-proof relay fee (0.20%, minimum 0.05 USDG, to the treasury fee account) is still required. Fee, root, nullifier, timestamp and capacity refusals happen **before** settlement and are never charged; a staging, simulation or send failure after settlement is answered with the receipt attached (`charged: true`): the charge buys the lane and the attempt. |
 | `POST /v1/x402/solana/preflight` | settle-after | `2000` (0.002) | "Would this relay land": fee rule, capacity, known root, unspent nullifiers, fresh timestamp, the accounts the final transaction needs, the transaction plan, and every refusal the relay API would answer with. A payload that does not decode is a 400 and not charged. |
 | `GET /v1/x402/loans/market` | settle-after | `1000` (0.001) | The stream_loan registry and every slot read from the chain, with shortfalls at chain time; cached 30 s. |
 | `POST /v1/x402/prove/disclose` | settle-first | `20000` (0.02) | A Groth16 proof of the `disclose` circuit for an allowance (remaining at least / spent at most / window spent at most a bound, bound to an audience, as of a known root), plus the base64 payload for `verify_disclosure`. Input shape, field ranges, the Merkle path and the root are checked before settlement (400 `bad_input` / `bad_path`, 409 `unknown_root`, not charged). Privacy: the agent sends its allowance figures, policy and Merkle path, never a spending key (disclose proofs need none), so the prover learns what the note holds but cannot spend it; the service description says so. Off (503 `service_disabled`) until the circuit artifacts ship with the function. |
@@ -94,7 +94,15 @@ artifacts the bundle ships.
 Rules the relayer enforces at startup: both CDP variables or neither (one alone refuses to start); Solana
 relaying must be configured; `payTo` must equal the treasury and is never a launch wallet; every payment
 asset must have 6 decimals; the derived ATA must equal the pinned one; the network must match the cluster.
-The facilitator is **not** called at startup: an outage there never blocks the free relay API.
+Those are configuration refusals and stop the relayer. Anything else that keeps the seller from starting (the
+RPC not answering, a payment account that does not exist yet, unusable disclose artifacts) only switches the
+seller (or just prove-disclose) off with an `x402: seller off:` / `x402: disclose prover off:` log line: the
+free relay API keeps working, the catalog says `enabled: false` and the paid routes answer 503
+`x402_disabled` until the next start. Nothing is sent on chain at startup for the seller, and the facilitator
+is **not** called at startup: an outage there never blocks the free relay API. A paid request runs the
+service's own checks (body, fee, root, nullifiers, timestamp, lane capacity) before the facilitator is asked
+to verify, so a refused request costs no facilitator call, and every paid call takes one per-client
+rate-limit token.
 
 ## 3. Go-live steps (owner only)
 
@@ -112,8 +120,9 @@ The facilitator is **not** called at startup: an outage there never blocks the f
    ```
    Then `curl https://h081-relayer.vercel.app/v1/x402/catalog` must show `"enabled": true`, the services with
    your prices, `payTo` = `EGvxic665…` and `assets[0].payToTokenAccount` = `DxpmCZ…`. `GET /v1/info` shows
-   `x402.enabled: true`. If the seller refused to start, the function answers 503 `unavailable` and `vercel logs`
-   shows the `config:` reason.
+   `x402.enabled: true`. If a configuration rule refused, the function answers 503 `unavailable` and `vercel logs`
+   shows the `config:` reason; if the catalog says `enabled: false` with the credentials set, the relay API is
+   up but the seller is off, and `vercel logs` shows the `x402: seller off:` reason (fix it and redeploy).
 5. **Prove-disclose (optional).** Put the official disclose artifacts (the ones behind
    `stipend-site/public/circuits/disclose.*`, which the deployed verifier matches) in a `build/circuits/disclose/`
    layout (`disclose.zkey`, `disclose.vkey.json`, `disclose_js/disclose.wasm`,

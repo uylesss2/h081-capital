@@ -15,6 +15,9 @@ export const X402_ROUTES: Record<X402ServiceId, { method: 'GET' | 'POST'; path: 
 };
 export const X402_CATALOG_PATH = '/v1/x402/catalog';
 
+/** The CDP facilitator refuses verify/settle when `resource.description` is longer than this (Bazaar listing text). */
+export const MAX_DESCRIPTION_LENGTH = 500;
+
 /** Default prices in 6-decimal base units (USDG/USDC): 0.25, 0.002, 0.001 and 0.02. Placeholders for the operator. */
 export const DEFAULT_X402_PRICES: Record<X402ServiceId, bigint> = {
   'relay-priority': 250_000n, preflight: 2_000n, 'loans-market': 1_000n, 'prove-disclose': 20_000n,
@@ -37,7 +40,7 @@ export interface X402Service<P = unknown> {
   id: X402ServiceId;
   method: 'GET' | 'POST';
   path: string;
-  /** plain statement of what the call returns, at most 500 characters (Bazaar limit) */
+  /** plain statement of what the call returns, at most MAX_DESCRIPTION_LENGTH characters (the seller refuses longer ones) */
   description: string;
   flow: 'settle-first' | 'settle-after';
   inputExample: unknown;
