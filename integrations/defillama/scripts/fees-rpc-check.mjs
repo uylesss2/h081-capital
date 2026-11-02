@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Independent cross-check of the DefiLlama fees adapter (fees/h081.ts), with no dependencies and no
 // API key: sums the USDG that reached the treasury's USDG token account per UTC day straight from
-// mainnet transactions, excluding transfers signed by the team's wallets, exactly like the adapter's
-// Allium query (to_address = treasury USDG ATA, mint = USDG, signer NOT IN team wallets).
+// mainnet transactions, excluding transfers sent or signed by the team's wallets, exactly like the
+// adapter's Allium query (to_address = treasury USDG ATA, mint = USDG, from_address NOT IN team wallets
+// + relayer hot wallet, signer NOT IN team wallets). Keep the two lists below equal to fees/h081.ts.
 //
 // Read-only JSON-RPC (getSignaturesForAddress + getTransaction); nothing is signed or sent.
 //   node integrations/defillama/scripts/fees-rpc-check.mjs [from YYYY-MM-DD] [to YYYY-MM-DD]
@@ -12,14 +13,24 @@ const TREASURY_USDG_ATA = 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo';
 const TREASURY = 'EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq';
 const USDG = '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH';
 const DECIMALS = 6;
+// = INTERNAL in fees/h081.ts (blacklist_signers)
 const DENY_SIGNERS = new Set([
   TREASURY,
   TREASURY_USDG_ATA,
-  '5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1', // deployer
-  '2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP',
+  '5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1', // deployer / upgrade authority
+  '4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2', // config authority
+  '2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', // fee wallet
   'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ',
   '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw',
+  'G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6', // treasury multisig
+  '4ir9vPVqWZ28ja6eTZs75LqBduhL1R8AQ9irxBu16kAd', // multisig create key
+  '3QxDPawgSmdPsvNa1xfsHuuF7cXWBaoBhPHgQgoBpnfi', // member 1
+  '3TGGDFAtipTMSpkmSEfm1CTcREQYdTkzWhzdVCzLLa7N', // member 2
+  '7815bY95r1E5FifAZMf5rM5Vjrper67BBY1wS8m216i1', // member 3
 ]);
+// = BLACKLIST_FROM in fees/h081.ts (blacklists): the signers plus the relayer hot wallet, which signs
+// the fee-paying relays (so it is not a denied signer) but never holds protocol fees.
+const DENY_FROM = new Set([...DENY_SIGNERS, 'DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA']);
 
 const RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com';
 const [fromArg, toArg] = process.argv.slice(2);
@@ -70,9 +81,19 @@ async function main() {
     const bal = (list) => BigInt((list || []).find((b) => b.accountIndex === idx && b.mint === USDG)?.uiTokenAmount?.amount ?? '0');
     const delta = bal(tx.meta.postTokenBalances) - bal(tx.meta.preTokenBalances);
     const d = day(s.blockTime);
-    const denied = signers.some((x) => DENY_SIGNERS.has(x));
-    console.log(`${d} ${s.signature} delta=${fmt(delta)} USDG signers=${signers.join(',')}${denied ? ' (EXCLUDED: team signer)' : ''}`);
-    if (denied) { excluded++; continue; }
+    // sender = address and owner of every USDG account whose balance went down in this transaction
+    const pre = new Map((tx.meta.preTokenBalances || []).filter((b) => b.mint === USDG).map((b) => [b.accountIndex, b]));
+    const senders = [];
+    for (const b of tx.meta.postTokenBalances || []) {
+      if (b.mint !== USDG || b.accountIndex === idx) continue;
+      const before = BigInt(pre.get(b.accountIndex)?.uiTokenAmount?.amount ?? '0');
+      if (BigInt(b.uiTokenAmount.amount) < before) senders.push(keys[b.accountIndex].pubkey, b.owner);
+    }
+    const deniedSigner = signers.some((x) => DENY_SIGNERS.has(x));
+    const deniedFrom = senders.some((x) => DENY_FROM.has(x));
+    const why = deniedSigner ? ' (EXCLUDED: team signer)' : deniedFrom ? ' (EXCLUDED: team sender)' : '';
+    console.log(`${d} ${s.signature} delta=${fmt(delta)} USDG signers=${signers.join(',')} from=${[...new Set(senders)].join(',') || '-'}${why}`);
+    if (deniedSigner || deniedFrom) { excluded++; continue; }
     if (delta > 0n) perDay.set(d, (perDay.get(d) ?? 0n) + delta);
   }
   console.log('');
@@ -80,7 +101,7 @@ async function main() {
     const d = day(t);
     console.log(`${d}  dailyFees = ${fmt(perDay.get(d) ?? 0n)} USDG`);
   }
-  console.log(`\n${inWindow} tx in window, ${excluded} excluded (team signer), ${failed} failed/skipped`);
+  console.log(`\n${inWindow} tx in window, ${excluded} excluded (team signer or sender), ${failed} failed/skipped`);
 }
 
 function fmt(v) {

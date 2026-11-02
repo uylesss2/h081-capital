@@ -51,18 +51,13 @@ Seeds confirmed in the program sources: stipend_pool `VAULT_AUTH_SEED = "vault_a
 
 ## 3. TVL adapter: DefiLlama-Adapters test
 
-First run on the public endpoint failed with the RPC's rate limit, not with the adapter:
+The first version (`owners` only, every mint) hit the public endpoint's rate limit on the batched
+owner sweep (`[429] Too many requests for a specific RPC call`) and had to be run on the project's
+RPC. The submitted version (`owners` + `tokens: [USDG]`, one `getTokenAccountsByOwner` per mint) runs
+on the public endpoint; re-run 2026-11-02 after the review fixes:
 
 ```
 $ node test.js projects/h081/index.js
-Error pulling TVL for solana: [Error: [host: https://api.mainnet-beta.solana.com] [429] [{"jsonrpc":"2.0","error":{"code":429,"message":"Too many requests for a specific RPC call"} ...
-Error: Protocol doesn't have total tvl, all the tvl functions above failed to run
-```
-
-Re-run with the project's RPC:
-
-```
-$ SOLANA_RPC=<SOLANA_RPC> node test.js projects/h081/index.js
 Building prices get queries for 1 tokens
 Building prices get queries for 1 tokens
 [callStats] tvl/h081: 4 http requests (2 not matching a known rpc, 0 getLogs, 0 indexer requests, 0 logs fetched)
@@ -103,8 +98,9 @@ tvl {"solana:2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH":"29000000"}
 staking {"solana:EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo":"3000000000"}
 ```
 
-= 29 USDG and 3,000 H081 (2,000 capacity_stake + 1,000 safety_pool). The staking bucket prices at
-$0 because DefiLlama has no price for H081:
+= 29 USDG and 3,000 H081 (2,000 capacity_stake + 1,000 safety_pool); the number is the same as the
+first version's, because the vault authority owns only the USDG vault today (section 2, `vault_auth
+owns` line). The staking bucket prices at $0 because DefiLlama has no price for H081:
 
 ```
 $ curl -s "https://coins.llama.fi/prices/current/solana:2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH,solana:EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo"
@@ -125,6 +121,8 @@ A historical date was not run: past timestamps route `sumTokens2` to Allium, whi
 DefiLlama's bot has.
 
 ## 4. Fees adapter: dimension-adapters checks
+
+Re-run 2026-11-02 on the submitted version (complete sender / signer exclusion lists, `blacklist_mints`):
 
 ```
 $ corepack pnpm run ts-check
@@ -160,17 +158,18 @@ key is only available to DefiLlama's CI bot, which executes the real query on th
 $ node integrations/defillama/scripts/fees-rpc-check.mjs 2026-10-31 2026-11-02
 RPC https://api.mainnet-beta.solana.com; window 2026-10-31 .. 2026-11-02 (UTC); account DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo (owner EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq, mint 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH)
 1 signature(s) touch the account in total
-2026-10-31 3z8YCJP8TY4kGEKK7t4xFSbjeQ2hf9qhSuUa48zwyzrdHBRYMmT3U1HqeM8gb81EkaG6sfqbSbktyEkmW7XKLZWP delta=0.000000 USDG signers=5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1 (EXCLUDED: team signer)
+2026-10-31 3z8YCJP8TY4kGEKK7t4xFSbjeQ2hf9qhSuUa48zwyzrdHBRYMmT3U1HqeM8gb81EkaG6sfqbSbktyEkmW7XKLZWP delta=0.000000 USDG signers=5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1 from=- (EXCLUDED: team signer)
 
 2026-10-31  dailyFees = 0.000000 USDG
 2026-11-01  dailyFees = 0.000000 USDG
 2026-11-02  dailyFees = 0.000000 USDG
 
-1 tx in window, 1 excluded (team signer), 0 failed/skipped
+1 tx in window, 1 excluded (team signer or sender), 0 failed/skipped
 ```
 
-The only transaction is the creation of the treasury's USDG account by the deployer (delta 0,
-excluded by the signer deny-list). Expected adapter result for every day so far: 0.
+The only transaction is the creation of the treasury's USDG account by the deployer (delta 0, no
+USDG sender, excluded by the signer deny-list). Expected adapter result for every day so far: 0.
+The script's `DENY_SIGNERS` / `DENY_FROM` equal the adapter's `INTERNAL` / `BLACKLIST_FROM`.
 
 ## 6. Worktree hygiene and tests
 
@@ -180,9 +179,23 @@ $ npm run typecheck
 (exit 0)                                    tsconfig include = ["src","test","scripts","relayer"]; integrations/ is outside it
 
 $ npx vitest run --config integrations/defillama/vitest.config.ts
- ✓ integrations/defillama/scripts/derive-addresses.test.ts (4 tests) 3ms
- Test Files  1 passed (1)
-      Tests  4 passed (4)
+ ✓ integrations/defillama/scripts/derive-addresses.test.ts (3 tests) 2ms
+ ✓ integrations/defillama/scripts/adapters.test.ts (9 tests) 5ms
+ Test Files  2 passed (2)
+      Tests  12 passed (12)
+```
+
+`adapters.test.ts` executes both adapter modules: `tvl/projects/h081/index.js` is run as CommonJS
+with `../helper/solana` replaced by a recorder (asserts exactly `{ owners: [vault authority],
+tokens: [USDG] }` and `{ tokenAccounts: [capacity vault, safety vault] }`, option names checked
+against the upstream `sumTokensExport` signature), and `fees/fees/h081.ts` is imported with its
+upstream-relative helper imports aliased to `scripts/stubs/` (asserts the exact `getSolanaReceived`
+arguments: targets, mints, blacklist_mints, the sender list = team wallets + relayer hot wallet, the
+signer list = team wallets only, and fees = revenue = protocol revenue with the `Protocol Fees`
+label). Mutation check done by hand: renaming `owners` to `owner` in the TVL adapter and dropping the
+relayer hot wallet from the fees sender list each failed exactly one test.
+
+```
 
 $ npm run test:relayer
  ✓ test/sdk/solana-alt.test.ts (11 tests)
@@ -196,4 +209,23 @@ $ npm run test:relayer
 
 The one failing relayer file needs the hardhat build artifacts (`build/artifacts/...`), which a
 fresh worktree does not have; it is unrelated to this track (nothing outside `integrations/defillama/`
-changed: `git status --short` -> `?? integrations/`).
+changed). Same result on the re-run after the review fixes (typecheck exit 0; relayer 39 passed,
+`evm-check.test.ts` ENOENT on the artifacts).
+
+## 7. Review fixes applied (2026-11-02)
+
+- Fees: every documented team wallet (deployer, config authority, fee / launch wallets, Squads
+  multisig + create key + members from `docs/MAINNET-RUNBOOK.md`) is excluded as sender and signer;
+  the relayer hot wallet (`relayer/README.md`) as sender only, since it signs the fee-paying relays;
+  the H081 mint is in `blacklist_mints`; the adapter comment, the methodology, the PR body and the
+  owner guide state that the treasury's USDG account is fee-only and must never be funded from an
+  unlisted wallet. The optional split of the relay-fee leg by `fromAddresses` was not done: the
+  origination-fee leg (sent by any lender) cannot be sender-restricted, so the sum would be the same
+  and Allium's `from_address` semantics for program-signed vault transfers were not verifiable
+  without a key.
+- TVL: `tokens: [USDG]` (a `DEPOSIT_MINTS` list) restricts the owner sweep to the accepted deposit
+  mints; the `getTokenAccountsByOwner` + mint path still finds the PDA vault and any lender escrow.
+- Methodology / README / PR body: loan principal goes lender -> borrower (`stream_loan::fund`,
+  `lender_source -> payout_to`) and never enters the vault; the "stays in the vault" wording is gone.
+- Tests: `adapters.test.ts` executes both adapters (above); `fees-rpc-check.mjs` mirrors the
+  adapter's sender and signer lists.

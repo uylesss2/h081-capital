@@ -97,8 +97,10 @@ maintainers".
   - *Why does the fees adapter return 0?* No relayed withdrawal or funded loan has paid a fee yet;
     the treasury USDG account received nothing. Offer the RPC cross-check
     (`scripts/fees-rpc-check.mjs`) if they want to see it.
-  - *Treasury inflows that are not fees?* The deployer, the treasury itself and the team's wallets
-    are excluded; a third-party donation would count. Say so if asked.
+  - *Treasury inflows that are not fees?* The treasury's USDG account is fee-only: the protocol sends
+    nothing else to it, and every team wallet (deployer, config authority, fee / launch wallets, the
+    Squads multisig, its create key and members, the relayer hot wallet) is excluded as a sender.
+    A third-party donation would count; the protocol has no such inflow path. Say so if asked.
   - *Audit?* "Not audited yet; live on Solana mainnet; use at your own risk." Never say an audit is
     not planned.
 - Listings usually appear within about 24 hours of the merge. Later metadata changes (logo, links,
@@ -108,8 +110,19 @@ maintainers".
 
 ## 4. Keeping the adapters current
 
-- A new deposit asset in the bank needs no change (the TVL adapter sums every account owned by the
-  vault authority).
-- If the relayer starts charging fees in another mint, add it to `mints` in `fees/h081.ts` and
-  re-submit a PR to dimension-adapters.
+- **Never fund the treasury's USDG account `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo` from a
+  wallet that is not in the adapter's exclusion list** (`INTERNAL` / `RELAYER_HOT_WALLET` in
+  `fees/h081.ts`: deployer, config authority, fee / launch wallets, the Squads multisig, its create
+  key and members, the relayer hot wallet). Any USDG that reaches it from another address is
+  published as protocol fees and revenue. If a new team wallet may ever send USDG there (an exchange
+  withdrawal, a new multisig member, a new hot wallet), add it to the list and get the
+  dimension-adapters PR merged **before** the transfer. Keep `DENY_SIGNERS` / `DENY_FROM` in
+  `scripts/fees-rpc-check.mjs` equal to the adapter's lists.
+- A new deposit asset in the bank needs a one-line PR to DefiLlama-Adapters: add the mint to
+  `DEPOSIT_MINTS` in `projects/h081/index.js` (the TVL adapter counts only listed mints, so a token
+  account a stranger creates for the vault authority is never TVL).
+- A new loan asset or relay-fee mint needs a PR to dimension-adapters: stream_loan charges the 0.25%
+  origination fee in the loan's own asset (to the treasury's token account for that mint) and the
+  relayer charges in the asset it relays, so add the mint to `mints` in `fees/h081.ts` or its fees
+  are silently dropped while TVL counts the asset.
 - If the treasury moves, both the fees adapter and the PR metadata must change (new PR + mail).

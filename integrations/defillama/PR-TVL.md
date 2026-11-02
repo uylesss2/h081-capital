@@ -79,7 +79,7 @@ Not applicable (no oracle).
 No
 
 ##### methodology (what is being counted as tvl, how is tvl being calculated):
-TVL = the balance of every token account owned by the stipend_pool vault authority PDA ["vault_auth"] of program E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM (today the USDG vault FaRG7DV8e7XF3RyoZrBb3h1oLiFFWFFCuYDSXsDoyyzG), read on-chain via getTokenAccountsByOwner (Token and Token-2022). Staking = the H081 (the protocol's own token) held by the capacity_stake vault PDA ["vault", H081] of CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU and the safety_pool vault PDA ["vault", H081] of HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt, reported in the staking bucket. Loans are allowances pledged inside the bank, so the lent funds stay in the vault and are not counted twice (no borrowed bucket). Every address is derived at runtime from the program ids and mints; no API is used.
+TVL = the balance of the bank's accepted deposit mints (USDG 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH today) in the token accounts owned by the stipend_pool vault authority PDA ["vault_auth"] of program E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM (the USDG vault FaRG7DV8e7XF3RyoZrBb3h1oLiFFWFFCuYDSXsDoyyzG plus any lender escrow of the same owner), read on-chain via getTokenAccountsByOwner with a mint filter (Token-2022). Only listed mints count, so a token account someone else creates for the vault authority is never TVL. Staking = the H081 (the protocol's own token) held by the capacity_stake vault PDA ["vault", H081] of CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU and the safety_pool vault PDA ["vault", H081] of HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt, reported in the staking bucket. Loan principal is paid by the lender directly to the borrower's named account and never passes through the bank vault; only the borrower's pledged deposit (already in the vault) is in TVL, so no borrowed bucket is reported. Every address is derived at runtime from the program ids and mints; no API is used.
 
 ##### Github org/user (Optional, if your code is open source, we can track activity):
 https://github.com/uylesss2/h081-capital
@@ -91,7 +91,7 @@ No
 ## Validation run before opening (see VERIFY.md)
 
 ```
-node test.js projects/h081/index.js    -> tvl USDG 29.00, staking 3,000 H081 (unpriced), total $29.00
+node test.js projects/h081/index.js    -> tvl USDG 29.00, staking 3,000 H081 (unpriced), total $29.00 (public RPC, 2 Solana calls)
 npx eslint -c eslint.config.js projects/h081/index.js    -> clean
 git status --short                      -> only projects/h081/ (no package/lockfile change)
 ```

@@ -79,7 +79,7 @@ Not applicable.
 No
 
 ##### methodology (what is being counted as tvl, how is tvl being calculated):
-Fees = USDG received by the protocol treasury (EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq, USDG token account DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo) via helpers/token.ts getSolanaReceived (Allium solana.assets.transfers, mint = USDG). These are the protocol's two fee sources: the 0.20% relay fee on relayed withdrawals and spends, and the 0.25% loan origination fee on funded loans (stream_loan::fund). Transfers from or signed by the treasury, the deployer and the team's wallets are excluded. Revenue = ProtocolRevenue = Fees: 100% goes to the treasury, there is no supply-side share. H081 token trading and creator fees are not protocol fees and are excluded.
+Fees = USDG received by the protocol treasury (EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq, USDG token account DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo) via helpers/token.ts getSolanaReceived (Allium solana.assets.transfers, mint = USDG, H081 mint blacklisted). These are the protocol's two fee sources: the 0.20% relay fee on relayed withdrawals and spends (transferred out of the bank vault FaRG7DV8e7XF3RyoZrBb3h1oLiFFWFFCuYDSXsDoyyzG by the stipend_pool program, transaction signed by the relayer hot wallet), and the 0.25% loan origination fee on funded loans (sent from the lender's own token account in stream_loan::fund). The treasury's USDG account is fee-only: the protocol sends nothing else to it and the team never funds it from an unlisted wallet. Transfers from any team wallet (treasury, deployer, config authority, fee / launch wallets, the Squads multisig, its create key and members, the relayer hot wallet) are excluded, as are transfers signed by any of them except the relayer hot wallet, which signs the fee-paying relays but never holds fees. Revenue = ProtocolRevenue = Fees: 100% goes to the treasury, there is no supply-side share. H081 token trading and creator fees are not protocol fees and are excluded.
 
 ##### Github org/user (Optional, if your code is open source, we can track activity):
 https://github.com/uylesss2/h081-capital
@@ -101,4 +101,8 @@ git status --short                        -> only fees/h081.ts (no package/lockf
 
 Note for reviewers (add as a PR comment if asked): the treasury has collected 0 fees so far; the adapter
 returns 0 until the first relayed withdrawal or funded loan. The ATA was created on 2026-10-31 by the
-deployer (excluded by the signer blacklist).
+deployer (excluded by the signer blacklist). The only fee paths into the treasury's USDG account are
+the bank vault (relay fee, via the stipend_pool program) and the lender's account (origination fee,
+via stream_loan::fund); the account receives nothing else from the protocol, and the team commits to
+never funding it from a wallet outside the adapter's exclusion list. A USDG transfer from an
+unrelated third party would be counted (there is no such inflow path today).
