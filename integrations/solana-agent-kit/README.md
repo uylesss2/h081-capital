@@ -1,4 +1,4 @@
-# @h081/solana-agent-kit-plugin
+# @h081lll/solana-agent-kit-plugin
 
 [Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) v2 plugin for H081 Capital, the private bank for AI agents on Solana. It gives an agent seven actions: shielded USDG deposits and withdrawals, the balance, loan quotes and loan pledges, H081 staking, and the protocol's facts. The actions work with every Agent Kit adapter (`createVercelAITools`, `createLangchainTools`, `createOpenAITools`) and are also plain methods on the agent.
 
@@ -7,7 +7,7 @@ H081 Capital is **live on Solana mainnet**. It is **not audited yet**. **Use at 
 ## Install
 
 ```sh
-npm install @h081/solana-agent-kit-plugin solana-agent-kit @solana/web3.js
+npm install @h081lll/solana-agent-kit-plugin solana-agent-kit @solana/web3.js
 ```
 
 Node 20.11 or newer. The proving artifacts (~75 MB) are not in the package: they are downloaded from `https://www.h081.xyz/circuits/` into `H081_CIRCUITS_DIR` (default `~/.h081/circuits`) the first time a circuit is needed, and every file's sha256 is checked against the hashes pinned in the package (the zkey/vkey hashes are the ceremony's, `docs/CEREMONY.md`) before it is written. A deposit or withdrawal needs `transact` (15 MB); a loan pledge also needs `grant` (44 MB) and `stream`.
@@ -22,7 +22,7 @@ import { Keypair } from '@solana/web3.js';
 import { SolanaAgentKit, KeypairWallet, createVercelAITools } from 'solana-agent-kit';
 import { generateText } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import H081Plugin from '@h081/solana-agent-kit-plugin';
+import H081Plugin from '@h081lll/solana-agent-kit-plugin';
 
 // a dedicated agent key: it pays fees, holds the USDG that goes in and out, and derives the shielded account
 const keypair = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(process.env.AGENT_KEYPAIR!, 'utf8'))));
@@ -119,9 +119,9 @@ stream_loan has no offer book and no matching. A loan starts with a lender who o
 
 The upstream repository is `github.com/sendaifun/solana-agent-kit` (branch `v2` is where the plugin layout lives; its `CONTRIBUTING.md` asks for PRs against `main`, pnpm, Conventional Commit messages and a recent Node). There is no separate third-party plugin registry: plugins live under `packages/plugin-*` in the monorepo and are published as `@solana-agent-kit/plugin-<name>`, and the README lists them. The steps, for the owner:
 
-1. Publish this package to npm first (`npm publish --access public` from `integrations/solana-agent-kit` after `npm run build`), so the PR can point at a working `@h081/solana-agent-kit-plugin`.
+1. Publish this package to npm first (`npm publish --access public` from `integrations/solana-agent-kit` after `npm run build`), so the PR can point at a working `@h081lll/solana-agent-kit-plugin`.
 2. Fork `sendaifun/solana-agent-kit`, `git checkout -b feat/plugin-h081`.
-3. Add `packages/plugin-h081/` mirroring `packages/plugin-token/`: the same `package.json` shape (`main`/`module`/`types`/`exports`, `build: tsup src/index.ts --dts --clean --format cjs,esm --out-dir dist`, `peerDependencies: { "solana-agent-kit": "workspace:*" }` inside the monorepo), `tsup` as a devDependency, and `src/` from this package. Either copy `integrations/solana-agent-kit/src`, `integrations/core` and the SDK modules they import into the new package, or make the new package a thin wrapper that depends on `@h081/solana-agent-kit-plugin` and re-exports `H081Plugin` (simplest; keeps one source of truth).
+3. Add `packages/plugin-h081/` mirroring `packages/plugin-token/`: the same `package.json` shape (`main`/`module`/`types`/`exports`, `build: tsup src/index.ts --dts --clean --format cjs,esm --out-dir dist`, `peerDependencies: { "solana-agent-kit": "workspace:*" }` inside the monorepo), `tsup` as a devDependency, and `src/` from this package. Either copy `integrations/solana-agent-kit/src`, `integrations/core` and the SDK modules they import into the new package, or make the new package a thin wrapper that depends on `@h081lll/solana-agent-kit-plugin` and re-exports `H081Plugin` (simplest; keeps one source of truth).
 4. Add a `README.md` in the package (this file, trimmed to install + the worked example + the actions table + the risk notice) and a row for the plugin in the root README's plugin list.
 5. `pnpm install && pnpm build && pnpm test` at the root; make sure `pnpm --filter @solana-agent-kit/plugin-h081 build` passes.
 6. Open the PR against `main`, titled `feat: add H081 Capital private bank plugin`, with a body that says what the seven actions do, that the protocol is live on Solana mainnet, not audited yet, use at your own risk, that it needs a `KeypairWallet` (or an env key) because the SDK signs multi-transaction proof staging, and links the npm package and `https://www.h081.xyz`.

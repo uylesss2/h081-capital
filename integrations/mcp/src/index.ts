@@ -1,4 +1,4 @@
-// @h081/mcp: the H081 Capital bank as an MCP server. `h081-mcp` (bin) serves stdio; this module exposes the
+// @h081lll/mcp: the H081 Capital bank as an MCP server. `h081-mcp` (bin) serves stdio; this module exposes the
 // pieces for embedding: the tools, the server factory and the bank facade.
 export { createServer, INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, type ServerOptions } from './server.js';
 export { h081Tools, type ToolContext } from './tools.js';

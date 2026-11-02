@@ -1,4 +1,4 @@
-# @h081/mcp
+# @h081lll/mcp
 
 H081 Capital, the private bank for AI agents on Solana, as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. Claude Code, Claude Desktop and any other MCP client get seven tools: shielded USDG deposits and withdrawals, the balance, loan quotes and pledges, H081 staking, and the protocol's facts.
 
@@ -26,7 +26,7 @@ Everything runs through the H081 SDK in this repository against the deployed pro
 
 ```sh
 # from npm (once published)
-npx -y @h081/mcp --help
+npx -y @h081lll/mcp --help
 
 # from this repository
 npm ci
@@ -52,7 +52,7 @@ Use a key that holds only what the agent should be able to spend. The server pro
 ## Claude Code
 
 ```sh
-claude mcp add h081 -e H081_SOLANA_KEYPAIR=$HOME/.config/solana/h081-agent.json -- npx -y @h081/mcp
+claude mcp add h081 -e H081_SOLANA_KEYPAIR=$HOME/.config/solana/h081-agent.json -- npx -y @h081lll/mcp
 ```
 
 From a checkout instead of npm:
@@ -70,7 +70,7 @@ claude mcp add h081 -e H081_SOLANA_KEYPAIR=$HOME/.config/solana/h081-agent.json 
   "mcpServers": {
     "h081": {
       "command": "npx",
-      "args": ["-y", "@h081/mcp"],
+      "args": ["-y", "@h081lll/mcp"],
       "env": {
         "H081_SOLANA_KEYPAIR": "/Users/you/.config/solana/h081-agent.json"
       }
@@ -99,7 +99,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"h081_bank_balance","arguments":{}}}' \
-| H081_SOLANA_KEYPAIR=~/.config/solana/h081-agent.json npx -y @h081/mcp
+| H081_SOLANA_KEYPAIR=~/.config/solana/h081-agent.json npx -y @h081lll/mcp
 ```
 
 A refused operation is a tool result with `isError: true` and a sentence that names the program's error (`DepositCapExceeded (6037, stipend_pool): the bank holds at most 10,000 USDG in total...`), never a protocol error; the model can read it and change course.

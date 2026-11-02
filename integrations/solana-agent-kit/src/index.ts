@@ -1,7 +1,7 @@
-// @h081/solana-agent-kit-plugin: H081 Capital (the private bank for AI agents on Solana) for Solana Agent Kit v2.
+// @h081lll/solana-agent-kit-plugin: H081 Capital (the private bank for AI agents on Solana) for Solana Agent Kit v2.
 //
 //   import { SolanaAgentKit, KeypairWallet, createVercelAITools } from 'solana-agent-kit';
-//   import H081Plugin from '@h081/solana-agent-kit-plugin';
+//   import H081Plugin from '@h081lll/solana-agent-kit-plugin';
 //   const agent = new SolanaAgentKit(new KeypairWallet(keypair, rpc), rpc, {}).use(H081Plugin);
 //   const tools = createVercelAITools(agent, agent.actions);          // or createLangchainTools / createOpenAITools
 //   await agent.methods.h081BankDeposit({ usdg: '25' });              // or call the methods directly
