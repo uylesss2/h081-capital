@@ -17,9 +17,12 @@ design is `docs/PRD-V2-DESIGN.md` section 6.3.
 `StipendPool` and `StreamLoan` have no reference to the token, to `CapacityStake` or to `SafetyPool`.
 A pool user needs no H081 for anything: depositing, granting, spending, delegating, pledging, proving and
 claiming all work without it. Capacity (section 3) is honoured by relayers and hosted endpoints, which can
-refuse to submit a proof; the pool itself accepts any valid proof from anyone. This keeps the pool's
-no-admin, no-pause, no-upgrade guarantee independent of the token, and it means a failed or never-launched
-token cannot touch any user's funds.
+refuse to submit a proof; the pool itself accepts any valid proof from anyone. Nothing about the token can
+touch any user's funds in the pool.
+
+On Solana mainnet the programs have two authorities, neither of which involves the token: the deployer key holds
+the upgrade authority of every program, and a config authority can set deposit caps and pause new deposits and
+stakes. Withdrawals, unbonding and unstaking can never be paused.
 
 ## 2. Supply and emissions
 
