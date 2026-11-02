@@ -7,9 +7,8 @@ silent, follow `docs/PRD-V2-DESIGN.md` and the existing Solidity behaviour in `c
 Non-negotiables: no upgrade path in program logic, no admin key or pause except the deposit guards (caps and a
 pause of deposits only, set by a config authority; withdrawals can never be blocked) of stipend_pool, safety_pool
 and capacity_stake, plus safety_pool's underwriter (security review 2026-10-31); every init/config instruction
-accepts only the program's upgrade authority (ProgramData check); programs are made
-immutable (upgrade authority set to none) at deployment; nothing is deployed to devnet or mainnet by this
-work; no token is launched.
+accepts only the program's upgrade authority (ProgramData check). All four programs are deployed on Solana
+mainnet (2026-10-31) and stay upgradeable by the deployer key; see `docs/MAINNET-RUNBOOK.md`.
 
 ## 1. What does not change
 

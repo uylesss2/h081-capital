@@ -2,11 +2,10 @@
 
 Four Anchor programs (the `anchor-lang` / `anchor-spl` crates, built with `cargo build-sbf`; the Anchor CLI
 is not used). Binding design: `docs/SOLANA-PORT.md`. Reference implementation: the EVM contracts in
-`contracts/`. **Nothing here is deployed to any public cluster.** No program has upgrade logic. stipend_pool has a
+`contracts/`. **All four programs are live on Solana mainnet** (ids in the top-level README). No program has upgrade logic of its own. stipend_pool has a
 deposit guard (`Config` PDA ["config"], `AssetCap` PDA ["cap", mint]): its config authority can change per-asset
 caps (total vault balance, single deposit) and pause DEPOSITS only; no outflow path reads it. Other than that, no
-admin key, pause or
-upgrade logic; deployment makes each one immutable (see "Deploying", owner's explicit go only).
+admin key or pause. Each program stays upgradeable through the loader by the deployer key (see "Deploying").
 
 ## Layout
 
