@@ -23,14 +23,25 @@ const priceCache = new WeakMap<Connection, { at: number; price: number }>();
 const genesisCache = new WeakMap<Connection, Promise<string>>();
 
 /**
- * Priority price in micro-lamports per CU: the 75th percentile of recent fees, at least PRIORITY_FLOOR on
- * mainnet, at most PRIORITY_CEIL. 0 on a cluster with no priority fees at all (local validators), so tests
- * pay exactly what they did before.
+ * Per-send priority-fee limits that replace PRIORITY_CEIL / PRIORITY_MAX_LAMPORTS for that send (a relayer's
+ * paid priority lane). Omitted: the defaults above.
  */
-export async function priorityPrice(connection: Connection): Promise<number> {
+export interface PriorityOptions {
+  /** ceiling in micro-lamports per CU */
+  priceCeil?: number;
+  /** the priority fee of one transaction never exceeds this many lamports */
+  maxLamports?: number;
+}
+
+/**
+ * Priority price in micro-lamports per CU: the 75th percentile of recent fees, at least PRIORITY_FLOOR on
+ * mainnet, at most `ceil` (default PRIORITY_CEIL). 0 on a cluster with no priority fees at all (local
+ * validators), so tests pay exactly what they did before.
+ */
+export async function priorityPrice(connection: Connection, ceil = PRIORITY_CEIL): Promise<number> {
   if (override !== undefined) return override;
   const hit = priceCache.get(connection);
-  if (hit && Date.now() - hit.at < 20_000) return hit.price;
+  if (hit && Date.now() - hit.at < 20_000) return Math.min(hit.price, ceil);
   if (!genesisCache.has(connection)) genesisCache.set(connection, connection.getGenesisHash().catch(() => ''));
   const [genesis, recent] = await Promise.all([
     genesisCache.get(connection)!,
@@ -39,9 +50,8 @@ export async function priorityPrice(connection: Connection): Promise<number> {
   const fees = recent.map((f) => f.prioritizationFee).sort((a, b) => a - b);
   let price = fees.length ? fees[Math.floor(fees.length * 0.75)] : 0;
   if (genesis === MAINNET_GENESIS) price = Math.max(price, PRIORITY_FLOOR);
-  price = Math.min(price, PRIORITY_CEIL);
   priceCache.set(connection, { at: Date.now(), price });
-  return price;
+  return Math.min(price, ceil);
 }
 
 const isBudget = (ix: TransactionInstruction) => ix.programId.equals(ComputeBudgetProgram.programId);
@@ -63,10 +73,11 @@ export class SimulationError extends Error {
  * price. Throws SimulationError when the transaction would fail.
  */
 export async function withBudget(
-  connection: Connection, feePayer: PublicKey, ixs: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = [],
+  connection: Connection, feePayer: PublicKey, ixs: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = [], priority: PriorityOptions = {},
 ): Promise<TransactionInstruction[]> {
   const body = ixs.filter((ix) => !isBudget(ix));
-  const [{ blockhash }, price] = await Promise.all([connection.getLatestBlockhash('confirmed'), priorityPrice(connection)]);
+  const maxLamports = priority.maxLamports ?? PRIORITY_MAX_LAMPORTS;
+  const [{ blockhash }, price] = await Promise.all([connection.getLatestBlockhash('confirmed'), priorityPrice(connection, priority.priceCeil ?? PRIORITY_CEIL)]);
   const probe = new VersionedTransaction(new TransactionMessage({
     payerKey: feePayer, recentBlockhash: blockhash, instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: MAX_CU }), ...body],
   }).compileToV0Message(lookupTables));
@@ -74,7 +85,7 @@ export async function withBudget(
   if (sim.value.err) throw new SimulationError(sim.value.err, sim.value.logs ?? []);
   const used = sim.value.unitsConsumed ?? MAX_CU;
   const units = Math.min(MAX_CU, Math.max(10_000, Math.ceil(used * 1.2) + 5_000));
-  const micro = Math.min(price, Math.floor((PRIORITY_MAX_LAMPORTS * 1_000_000) / units));
+  const micro = Math.min(price, Math.floor((maxLamports * 1_000_000) / units));
   return [
     ComputeBudgetProgram.setComputeUnitLimit({ units }),
     ...(micro > 0 ? [ComputeBudgetProgram.setComputeUnitPrice({ microLamports: micro })] : []),

@@ -53,7 +53,7 @@ Rules enforced in code and process:
 |---|---|---|---|
 | Our relayer | 0.20% of the operation's public leg, with a per-asset minimum that covers transaction costs | the proof's existing `fee` field; the relayer requires `fee >= max(min, 0.20% x public amount)` and requires the fee account to be the treasury's token account for that asset (`RELAYER_SOLANA_TREASURY`, required; there is no fallback to the relayer's own wallet) | no |
 | Loan origination (`stream_loan::fund`) | 0.25% of principal, deducted from the payout | compile-time `TREASURY` and `ORIGINATION_FEE_BPS = 25` constants in `stream_loan`, no admin key; the borrower's slot still owes the full principal | no (`stream_loan` only) |
-| Paid services we host (MCP tools via x402) | per call, priced per tool | the x402 `payTo` address is the treasury | no |
+| Paid services we host (x402 endpoints on the relayer: priority relay lane, relay preflight, loan-market data, disclosure proving; `docs/X402-SELLER.md`) | per call, priced per service in USDG (optionally USDC) base units, settled through Coinbase's CDP x402 facilitator | the x402 `payTo` is the treasury vault `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`; the payment lands in its token account (USDG: `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo`); the relayer refuses any other payTo at startup | no |
 
 Notes:
 
