@@ -154,9 +154,11 @@ rate-limit token.
    that by default).
 8. **Confirm the listing.** Within about 15 minutes:
    ```
-   curl -s 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources?limit=50'
+   curl -s 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq'
+   curl -s -G https://api.cdp.coinbase.com/platform/v2/x402/discovery/search --data-urlencode urlSubstring=h081-relayer
    ```
-   (public; filter the JSON for `h081-relayer.vercel.app`). The relayer logs the facilitator's
+   (public, no key; the full `…/discovery/resources` list has tens of thousands of entries and is not worth scanning).
+   Done 2026-11-02: `loans/market` listed after the first settlement; found by both lookups and by semantic search. The relayer logs the facilitator's
    `EXTENSION-RESPONSES` on every verify and settle as `x402 <service> settle bazaar success|processing|rejected: <reason>`
    (`vercel logs`); a `rejected` status names what to fix (description over 500 characters, placeholder text,
    bad icon type). Each paid route is listed separately: repeat step 7 once per route you want in the Bazaar.
