@@ -8,9 +8,9 @@ import * as web3 from '@solana/web3.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 // @ts-expect-error plain ESM script without types
 import { ADDR, derived } from './derive-addresses.mjs';
-import { calls as receivedCalls, STUB_AMOUNT, USDG_STUB } from './stubs/helpers-token';
+import { calls as receivedCalls, STUB_AMOUNT, USDG_STUB } from './stubs/helpers-token.js';
 // resolved to ./stubs/* by vitest.config.ts (the real helpers live only in dimension-adapters)
-import feesAdapter from '../fees/fees/h081';
+import feesAdapter from '../fees/fees/h081.js';
 
 const here = path.resolve(__dirname);
 const read = (p: string) => readFileSync(path.join(here, '..', p), 'utf8');
