@@ -30,7 +30,9 @@
     "relayer": "tsx relayer/main.ts",
     "flywheel:buyback": "tsx scripts/flywheel/buyback.mts",
     "flywheel:rehearse": "tsx scripts/flywheel/rehearse.mts",
-    "test:relayer": "vitest run test/relayer test/sdk/solana-alt.test.ts"
+    "test:relayer": "vitest run test/relayer test/sdk/solana-alt.test.ts",
+    "test:integrations": "vitest run test/integrations",
+    "build:integrations": "npm run build --prefix integrations/mcp && npm run build --prefix integrations/solana-agent-kit"
   },
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "1.5.1",
@@ -48,13 +50,17 @@
     "@nomicfoundation/hardhat-ethers": "3.1.0",
     "@nomicfoundation/hardhat-network-helpers": "1.1.0",
     "@openzeppelin/contracts": "5.3.0",
+    "bs58": "^6.0.0",
     "chai": "4.5.0",
     "circom2": "0.2.22",
     "circomlib": "2.0.5",
     "hardhat": "2.26.1",
     "mocha": "11.7.1",
+    "solana-agent-kit": "^2.0.10",
+    "tsup": "^8.5.1",
     "tsx": "4.20.3",
     "typescript": "5.8.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.4",
+    "zod": "^3.25.76"
   }
 }

@@ -1,0 +1,46 @@
+{
+  "name": "@h081/solana-agent-kit-plugin",
+  "version": "0.1.0",
+  "description": "Solana Agent Kit v2 plugin for H081 Capital, the private bank for AI agents on Solana: shielded USDG deposits and withdrawals, balance, loan quotes and pledges, H081 staking. Live on Solana mainnet; not audited yet; use at your own risk.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "build": "tsup --config tsup.config.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["h081", "solana", "solana-agent-kit", "sendai", "ai-agents", "private-bank", "usdg", "zero-knowledge", "plugin"],
+  "homepage": "https://www.h081.xyz",
+  "peerDependencies": {
+    "@solana/web3.js": "^1.98.2",
+    "solana-agent-kit": "^2.0.10"
+  },
+  "dependencies": {
+    "@noble/ciphers": "1.3.0",
+    "@noble/curves": "1.9.2",
+    "@noble/hashes": "1.8.0",
+    "@solana/spl-token": "0.4.13",
+    "bs58": "6.0.0",
+    "circomlibjs": "0.1.7",
+    "ffjavascript": "0.3.1",
+    "snarkjs": "0.7.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "1.98.4",
+    "solana-agent-kit": "2.0.10",
+    "tsup": "8.5.1",
+    "typescript": "5.8.3"
+  }
+}
