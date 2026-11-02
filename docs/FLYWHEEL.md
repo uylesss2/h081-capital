@@ -111,7 +111,7 @@ Notes:
 - **Record:** `buyback.mts record` only accepts signatures that carry out a transaction of that proposal (same
   programs, accounts and data), and notes skipped chunks or a missing settle in the ledger entry.
 - **Programs:** on mainnet only the official mint and pool are accepted, and the top-up only calls the pinned
-  mainnet `safety_pool` program id (none until it is deployed, so until then every run is 100% burn).
+  mainnet `safety_pool` program id `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`.
 
 **Disclosure:** a buyback is an ordinary trade on the pool. It pays the pool's normal trading fee like any
 other buyer (today 2% of each trade: 0.4% to Meteora, 1.6% to the creator). The flywheel gets no discount and
@@ -122,8 +122,10 @@ it.
 
 | Phase | Burn | `safety_pool.top_up` |
 |---|---|---|
-| Until the safety pool is live on mainnet | 100% | 0% |
-| After the safety pool is live | 50% | 50% |
+| Safety pool has stakers and at least 10,000 H081 | 50% | 50% |
+| Safety pool has no stakers, or less than 10,000 H081 | 100% | 0% |
+
+The safety pool is live on mainnet since 2026-10-31, so each run checks the pool first and picks the row.
 
 - **Burn** uses the SPL token `burn` instruction from the treasury's H081 account, which reduces the total
   supply. Supply is fixed (no mint authority), so burned tokens cannot be re-created.
