@@ -1,0 +1,13 @@
+{
+  "measured": "2026-10-26T19:08:25.908Z",
+  "rpc": "http://127.0.0.1:8999",
+  "computeUnits": {
+    "verify_spend": 121400,
+    "verify_disclose": 93758,
+    "insert_1_leaf_tx": 21329,
+    "insert_13_leaves_tx": 247329,
+    "insert_marginal_per_leaf": 18833,
+    "verify_disclosure_with_root_check": 91957,
+    "verify_stream_with_root_check": 136925
+  }
+}

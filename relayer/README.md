@@ -1,0 +1,82 @@
+# Relayer (MVP)
+
+A small HTTP service that submits operations the SDK already produces, so the wallet that proves an
+operation does not have to pay gas or reveal its own address. The relayer is paid in the asset: the fee
+and the relayer's address are bound into the proof (`extDataHash`), so the relayer can only choose to
+submit or not; it cannot change the fee or the destination.
+
+**Status: MVP, hosted for mainnet** as the Vercel project `h081-relayer` (serverless, `relayer/vercel.ts`; bundle with
+`node scripts/relayer-vercel.mjs`, then `vercel deploy --prod` in `deploy/relayer-vercel/`). Hot wallet
+`DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA` (pays transaction fees only); fees go to the treasury
+`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`; minimum fee 0.05 USDG, 0.20% above that; capacity_stake on.
+Unit tests (`npm run test:relayer`) and the localnet suites; not load-tested, not audited.
+
+## Run
+
+```
+npm run relayer        # tsx relayer/main.ts
+```
+
+Configuration comes from environment variables set by the operator (nothing reads a `.env` file):
+
+| Variable | Meaning |
+| --- | --- |
+| `RELAYER_HOST`, `RELAYER_PORT` | listen address (default `127.0.0.1:8787`) |
+| `RELAYER_RATE_PER_MIN`, `RELAYER_BURST` | token-bucket rate limit per client (default 30/min, burst 10) |
+| `RELAYER_TRUST_PROXY` | `1` to key the rate limit on the first `X-Forwarded-For` hop |
+| `RELAYER_CORS_ORIGINS` | comma-separated browser origins allowed to call the API (e.g. `https://www.h081.xyz`); default none |
+| `RELAYER_ALLOW_UNPAID` | `1` to also relay operations that pay no fee (grant, delegate, shielded transfer) |
+| `RELAYER_SOLANA_RPC` | enables Solana relaying |
+| `RELAYER_SOLANA_KEYPAIR` | path to the relayer's keypair JSON (pays transaction fees; relay fees go to the treasury, not here) |
+| `RELAYER_SOLANA_KEYPAIR_JSON` | the keypair JSON itself, instead of a path (serverless hosts); set exactly one of the two |
+| `RELAYER_SOLANA_TREASURY` | required: owner of the fee token accounts (the platform treasury multisig vault); never an H081 launch wallet |
+| `RELAYER_FEE_BPS` | platform fee on the public amount (withdrawal, or a spend's public amount plus lender share), basis points (default 20 = 0.20%); the fee is max(minimum, this) |
+| `RELAYER_SOLANA_PROGRAM_ID` | stipend_pool program id (default: the localnet id) |
+| `RELAYER_SOLANA_MIN_FEES` | `mint=amount,...` minimum fee per mint, base units |
+| `RELAYER_SOLANA_LOOKUP_TABLES` | comma-separated lookup tables to build v0 transactions against |
+| `RELAYER_SOLANA_MIN_LAMPORTS`, `RELAYER_SOLANA_MAX_IN_FLIGHT` | refuse when underfunded / busy |
+| `RELAYER_SOLANA_CAPACITY_MINT` | enables capacity_stake enforcement for this staked mint (H081) |
+| `RELAYER_SOLANA_CAPACITY_ASSETS` | required with the above: comma-separated 6-decimal (USDG) mints whose amounts count against capacity (other decimals are refused at startup) |
+| `RELAYER_SOLANA_CAPACITY_FREE_TIER`, `RELAYER_SOLANA_CAPACITY_PROGRAM_ID` | anonymous free tier in base units (default 100 USDG); capacity_stake program id (default: localnet id; required, and never the localnet id, when `RELAYER_SOLANA_PROGRAM_ID` is set) |
+| `RELAYER_EVM_RPC`, `RELAYER_EVM_POOL`, `RELAYER_EVM_KEY` | enables EVM relaying (key: 0x hex) |
+| `RELAYER_EVM_MIN_FEES` | `asset=amount,...` minimum fee per ERC-20 |
+| `RELAYER_EVM_MAX_GAS` | refuse calls estimated above this (default 8,000,000) |
+
+## API
+
+```
+GET  /v1/health
+GET  /v1/info                 chains, relayer addresses, minimum fees, fee accounts, lookup tables
+POST /v1/solana/relay         { op, payload (base64), mint?, recipientOwner?, lenderToken? } -> { signature, computeUnits, op, fee }
+POST /v1/evm/relay            { to, data }                                                   -> { hash, fn, fee }
+```
+
+Errors are `{ error: { code, message } }`: 400 malformed, 402 fee not acceptable, 409 stale root or spent
+nullifier, 413 body too large, 422 simulation failed, 429 rate limited, 503 chain disabled or busy.
+
+Solana flow: decode `borsh(Proof, Args, ext)` for the named op, check the fee (mint listed, amount at least
+the minimum, paid to the treasury's fee account), check root/nullifiers/timestamp, stage the payload in a
+buffer the relayer owns, simulate the final transaction, then send. Deposits and lender claims are never
+relayed (the depositor or lender must sign).
+
+## SDK side
+
+```ts
+const relayer = new RelayerClient('http://127.0.0.1:8787');
+const t = await relayer.solanaTerms(mint.toBase58());
+await wallet.withdraw(mint, amount, recipient, {
+  relayer: new PublicKey(t.relayer), feeRecipient: new PublicKey(t.feeRecipient), fee: t.fee, via: relayer,
+});
+```
+
+Without `via` the wallet sends exactly as before. Lookup tables for the v0 path: `createLookupTable`,
+`extendLookupTable`, `poolLookupAddresses`, `buildV0Transaction`, `planOperation` in `src/solana/alt.ts`, and
+`SolanaPool.useLookupTables(tables)`.
+
+## Not yet
+
+- Not run end to end against a validator in this pass (the localnet suites are run separately).
+- No persistence: in-flight relays are lost on restart; no queue, retries or nonce management across restarts.
+- No priority-fee or dynamic fee pricing; minimum fees are static per asset.
+- EVM path is minimal (one signer, sequential sends).
+- No auth, metrics or multi-instance coordination; run it behind a proxy you control.

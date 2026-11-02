@@ -1,0 +1,49 @@
+{
+  "schema": "h081-flywheel-ledger/1",
+  "note": "EXAMPLE ONLY (localnet values, placeholder addresses). H081 flywheel: platform fees -> H081 buyback -> burn / safety-pool top-up. Creator trading fees are never a source.",
+  "entries": [
+    {
+      "id": "6f1d3c2a-8b7e-4f0a-9c1d-2e3f4a5b6c7d",
+      "at": "2026-10-31T12:00:00.000Z",
+      "status": "proposed",
+      "cluster": "localnet",
+      "source": "platform-fees",
+      "treasury": "TreasuryVau1tExamp1e1111111111111111111111",
+      "mint": "Examp1eH081Mint11111111111111111111111111",
+      "pool": "Examp1eDammV2Poo111111111111111111111111111",
+      "split": { "burnBps": 10000, "topUpBps": 0 },
+      "proposal": { "file": "flywheel-proposal-2026-10-31T12-00-00-000Z.json", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+      "balances": { "solLamports": "2000000000", "wsolLamports": "500000000", "h081": "0", "otherTokens": [] },
+      "plan": { "spendLamports": "1500000000", "chunks": 8, "minH081Out": "14420000000000", "burn": "14420000000000", "topUp": "0", "slippageBps": 100 },
+      "firewall": {
+        "denyListChecked": ["2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP", "FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ", "5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw"],
+        "provenanceScanned": 2,
+        "provenanceCursor": "Examp1eSignature1111111111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      "at": "2026-10-31T15:30:00.000Z",
+      "status": "executed",
+      "cluster": "localnet",
+      "source": "platform-fees",
+      "treasury": "TreasuryVau1tExamp1e1111111111111111111111",
+      "mint": "Examp1eH081Mint11111111111111111111111111",
+      "pool": "Examp1eDammV2Poo111111111111111111111111111",
+      "split": { "burnBps": 10000, "topUpBps": 0 },
+      "refersTo": "6f1d3c2a-8b7e-4f0a-9c1d-2e3f4a5b6c7d",
+      "result": {
+        "solSpentLamports": "1500000000",
+        "h081Bought": "14565000000000",
+        "burned": "14420000000000",
+        "toppedUp": "0",
+        "signatures": ["Examp1eSignature2222222222222222222222222222222222222222222222222222222222222222222222"]
+      },
+      "firewall": {
+        "denyListChecked": ["2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP", "FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ", "5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw"],
+        "provenanceScanned": 0,
+        "provenanceCursor": null
+      }
+    }
+  ]
+}

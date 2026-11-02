@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "h081-flywheel-ledger/1",
+  "title": "H081 flywheel ledger",
+  "description": "Append-only record of the H081 flywheel: platform fees (never creator trading fees) -> H081 buyback on the DAMM v2 pool -> burn / safety-pool top-up. Written by scripts/flywheel/buyback.mts (--propose appends 'proposed', record appends 'executed'). Amounts are base-unit integers as decimal strings: lamports for SOL, 10^-6 H081 for H081.",
+  "type": "object",
+  "required": ["schema", "note", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "h081-flywheel-ledger/1" },
+    "note": { "type": "string" },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "pubkey": { "type": "string", "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$" },
+    "amount": { "type": "string", "pattern": "^[0-9]+$" },
+    "split": {
+      "type": "object", "required": ["burnBps", "topUpBps"], "additionalProperties": false,
+      "properties": {
+        "burnBps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "topUpBps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["id", "at", "status", "cluster", "source", "treasury", "mint", "pool", "split", "firewall"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "at": { "type": "string", "format": "date-time" },
+        "status": { "enum": ["proposed", "executed"] },
+        "cluster": { "enum": ["mainnet-beta", "localnet"] },
+        "source": { "const": "platform-fees", "description": "Always platform fees. Creator trading fees are never a source." },
+        "treasury": { "$ref": "#/$defs/pubkey", "description": "The platform-fee treasury (Squads vault); never a launch wallet." },
+        "mint": { "$ref": "#/$defs/pubkey" },
+        "pool": { "$ref": "#/$defs/pubkey" },
+        "split": { "$ref": "#/$defs/split" },
+        "refersTo": { "type": "string", "description": "executed: the id of the proposed entry it carries out." },
+        "proposal": {
+          "type": "object", "required": ["file", "sha256"], "additionalProperties": false,
+          "properties": { "file": { "type": "string" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+        },
+        "balances": {
+          "type": "object", "required": ["solLamports", "wsolLamports", "h081", "otherTokens"], "additionalProperties": false,
+          "properties": {
+            "solLamports": { "$ref": "#/$defs/amount" },
+            "wsolLamports": { "$ref": "#/$defs/amount" },
+            "h081": { "$ref": "#/$defs/amount" },
+            "otherTokens": {
+              "type": "array",
+              "items": { "type": "object", "required": ["mint", "amount"], "additionalProperties": false, "properties": { "mint": { "$ref": "#/$defs/pubkey" }, "amount": { "$ref": "#/$defs/amount" } } }
+            }
+          }
+        },
+        "plan": {
+          "type": "object", "required": ["spendLamports", "chunks", "minH081Out", "burn", "topUp", "slippageBps"], "additionalProperties": false,
+          "properties": {
+            "spendLamports": { "$ref": "#/$defs/amount" },
+            "chunks": { "type": "integer", "minimum": 0 },
+            "minH081Out": { "$ref": "#/$defs/amount" },
+            "burn": { "$ref": "#/$defs/amount" },
+            "topUp": { "$ref": "#/$defs/amount" },
+            "slippageBps": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        "result": {
+          "type": "object", "required": ["solSpentLamports", "h081Bought", "burned", "toppedUp", "signatures"], "additionalProperties": false,
+          "properties": {
+            "solSpentLamports": { "$ref": "#/$defs/amount" },
+            "h081Bought": { "$ref": "#/$defs/amount" },
+            "burned": { "$ref": "#/$defs/amount" },
+            "toppedUp": { "$ref": "#/$defs/amount" },
+            "signatures": { "type": "array", "items": { "type": "string" } },
+            "executed": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "description": "the proposal transactions (order numbers) the signatures carried out" },
+            "warnings": { "type": "array", "items": { "type": "string" }, "description": "settle missing, chunks skipped, a chunk executed after its notAfter" }
+          }
+        },
+        "firewall": {
+          "type": "object", "required": ["denyListChecked", "provenanceScanned", "provenanceCursor"], "additionalProperties": false,
+          "properties": {
+            "denyListChecked": { "type": "array", "items": { "$ref": "#/$defs/pubkey" }, "minItems": 3 },
+            "provenanceScanned": { "type": "integer", "minimum": 0 },
+            "provenanceCursor": { "type": ["string", "null"] }
+          }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "proposed" } } }, "then": { "required": ["proposal", "balances", "plan"] } },
+        { "if": { "properties": { "status": { "const": "executed" } } }, "then": { "required": ["refersTo", "result"] } }
+      ]
+    }
+  }
+}

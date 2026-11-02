@@ -1,0 +1,366 @@
+# H0.81 Capital protocol
+
+Private, programmable treasuries for AI agents on Solana, and the first private cashflow a lender
+can lend against. One shielded pool holds any SPL Token or Token-2022 asset (live on mainnet: USDG). Owners fund up to sixteen agents per proof; each
+agent's spending policy lives inside its note, so a payment that breaks the policy has no valid proof.
+Agents delegate slices of their allowance to sub-agents under provably tighter policy, budgets stream at
+a rate per second, and an owner can pledge a streamed allowance to a lender: a fixed share of every spend
+is routed to the lender inside the spend proof, and the lender can pull its share of what has vested.
+Owners, agents and lenders prove bounds on balances and rates without revealing amounts, counterparties
+or policies. On Solana mainnet a config authority can cap and pause deposits, safety-pool deposits and new stakes
+(never withdrawals, unbonding or unstaking), and the team holds the upgrade key of every program
+(see "Deployed on Solana mainnet").
+
+Target chain: **Solana** (owner decision 2026-10-26), the same chain as the H081 token. Asset live on mainnet: USDG. The Solana programs (`solana/`: stipend_pool,
+stream_loan, capacity_stake, safety_pool) are built and tested on a local validator per
+`docs/SOLANA-PORT.md`; see "Solana programs" below and `solana/README.md`. The EVM contracts in
+`contracts/` were built for Robinhood Chain and are kept as the reference implementation. Robinhood Chain is
+no longer the target.
+**Live on Solana mainnet since 2026-10-31: the H081 token and all four protocol programs (bank, loans,
+safety pool, capacity staking). Program ids, authorities and build hashes are under "Deployed on Solana
+mainnet" below. The programs have not had an external audit yet; deposits are capped.**
+
+### Why "Stipend"?
+
+Stipend was the working name of the protocol before it became H0.81 Capital. A stipend is a fixed allowance
+paid out on a schedule, which is exactly what the protocol does: an owner gives each AI agent a budget, the
+budget streams in at a rate per second, and the agent can only spend it inside the rules written into its
+note. The name stuck in the code: the bank program is `stipend_pool` and the EVM reference contracts are
+`StipendPool` and `StipendToken`. We keep it on purpose. The `stipend_pool` program live on mainnet was
+built from this crate, and renaming it would change the build, so the published build hashes could no
+longer be checked against the deployed program. H0.81 Capital is the product and H081 the token; "stipend"
+only lives on in the code.
+
+## The six circuits
+
+| Circuit | Does | Constraints | Public inputs |
+|---|---|---|---|
+| `transact` | deposit, withdraw, shielded transfer (2-in 2-out) | 27,950 | 8 |
+| `grant` | owner funds up to 16 agents plus change in one proof | 96,685 | 22 |
+| `spend` | agent pays, owner reclaims, or lender claims; routes the pledge share | 27,344 | 15 |
+| `disclose` | `remaining >= b`, `spent <= b`, `windowSpent <= b` over an allowance | 14,310 | 6 |
+| `delegate` | agent splits an allowance into up to 4 sub-allowances plus a residual | 35,307 | 9 |
+| `stream` | `proveStream`: the lender's view of a pledged, streamed allowance | 14,482 | 13 |
+
+Counts are `snarkjs r1cs info` on the current build (Groth16, BN254, `pot17`, limit 131,072). Proving in
+Node takes about one second per proof on a laptop; `grant` takes a few seconds.
+
+## What the chain sees
+
+| Operation | Public | Private |
+|---|---|---|
+| `transact` | root, two nullifiers, two commitments, the public leg (amount, asset, recipient) if any | note amounts, owners, the asset of a shielded transfer |
+| `grant` | root, two nullifiers, seventeen commitments, an opaque total hash | every amount, every agent, every policy, the asset, any pledge |
+| `delegate` | root, nullifier, five commitments, the timestamp | the parent, the sub-agents, every amount and policy |
+| `spend` (unpledged) | root, nullifier, successor commitment, payout commitment or public payout, the timestamp, an opaque receipt | which allowance, its policy, remaining budget, window counters, the payer. For a shielded payout also the amount and recipient |
+| `spend` (pledged) | the above plus the asset, the lender address, the loan ref and the share routed | the recipient and balances stay hidden; the gross amount is implied by the share |
+| `verifyDisclosure` | root, statement kind, bound, window id, agent key, audience | the asset, the policy, the actual figures |
+| `verifyStream` | root, min remaining, min rate, lender address, loan ref, pledge bps, expiry, lifetime cap, routed so far, agent key, audience, stream start, asset | the balance, counterparties, window state, strategy |
+
+### The privacy price of a pledge
+
+A pledged allowance reveals, per spend, the asset, the lender address, the loan ref and the share amount
+(and so the gross spend amount) to the chain. Recipients and balances stay hidden. This is the cost of
+on-chain-verifiable repayment: it is what lets a lender be paid without trusting anyone, and what makes
+Phase 2 slashing objective. Unpledged allowances are unchanged from v1.
+
+## Policies (enforced in the spend circuit)
+
+| Field | Meaning | 0 means |
+|---|---|---|
+| `lifetimeCap` | total the allowance may ever spend (equals the grant amount) | n/a |
+| `windowCap` / `windowLen` | at most `windowCap` per window of `windowLen` seconds; the window id is `floor(now / windowLen)` | no window limit |
+| `maxPerTx` | per-payment ceiling | no ceiling |
+| `expiry` | unix time after which the agent cannot spend | never |
+| `recipientRoot` | Merkle root (depth 8) of allowed recipients, public addresses or shielded keys mixed | any recipient |
+| `streamRate` / `streamStart` | cumulative spend may never exceed `streamRate * (now - streamStart)` (vesting: units per second) | no streaming |
+| `ownerPk` | the key that can reclaim the allowance at any time | n/a |
+| `lender` / `pledgeBps` | `Poseidon(DOM_LENDER, lenderAddr, loanRef)` and the share (0..10000) of every spend routed to it | not pledged |
+
+The allowance note also carries `pledgePaid`, the cumulative amount routed to the lender on this line.
+`now` is a public input that the contract checks against block time (15 minutes back, 1 minute ahead),
+so the window length itself stays private.
+
+### Who may spend, and the owner-reclaim rule
+
+Exactly one of three roles proves a spend: the **agent** (every rule enforced, including when the owner
+granted to its own key), the **owner** (no rules), or the **lender** (a claim: `sk = 0`, and the contract
+requires `msg.sender == lenderAddr`). The owner's reclaim bypasses every policy rule except one: on a
+pledged allowance the lender's share is still routed, so a lender cannot be drained by a reclaim. Over
+any sequence of spends, reclaims and claims the total routed to a lender never exceeds
+`floor(lifetimeCap * pledgeBps / 10000)`; this is a circuit test and a 300-run property test on the pure model.
+
+## Delegation
+
+An agent splits its allowance into up to four sub-allowances plus a residual, in one proof, without the
+owner. The circuit forces every sub-policy to be no looser than the parent's: per-payment caps and
+expiries at or below the parent's, window caps and stream rates that sum (with the residual's) to no
+more than the parent's, sub-streams that start no earlier than now, and the parent's window length,
+allow-list, owner and pledge carried over unchanged. The residual keeps the parent's spent-so-far and
+routed-so-far, so the tree as a whole still obeys the owner's policy, and the owner can reclaim any note
+in it. Only the owner creates a pledge; an agent can neither pledge, re-point nor drop one.
+
+### More than four subs (MVP)
+
+`delegate(owned, subs)` takes any number of subs (`Wallet` and `SolanaWallet`). Up to four take one proof.
+More are delegated as a chain: four subs per step, each step delegating from the previous step's residual,
+the caller's `residualWindowCap` / `residualStreamRate` applying to the final residual only. The pure planner
+(`planDelegation`, `src/delegation.ts`) dry-runs every step's input builder first, so a chain that does not
+fit (amounts, window caps, stream rates, a pledge the lender would lose by) is refused before the first
+transaction. Each step is an ordinary `delegate` proof, so by induction every sub is no looser than the
+original allowance. No circuit or contract changed. A step that is not the last and has four subs uses no
+placeholder slots, so only the last step spends one unit of window cap and stream rate per empty slot.
+
+What it costs: `ceil(n / 4)` transactions instead of one, and the chain is not atomic: if a later step
+fails, the earlier subs stand and the residual holds the rest (call `delegate` again on it). Linkability:
+each step's proof is unlinkable on its own (a nullifier and five commitments), but the steps go out back to
+back from the same submitter, each spending a note the previous step just created, so an observer can guess
+that they form one chain and, from the step count, roughly how many subs were made (between `4(k-1)+1` and
+`4k` for `k` steps). Not yet: atomic multi-step submission, spacing steps out over time, a wider circuit.
+
+## Stream-backed lending (Phase 1)
+
+1. The lender opens a slot in the `StreamLoan` registry (`openSlot`, sequential `loanRef`).
+2. The owner grants (or re-grants) a streamed allowance pledged to `(StreamLoan address, loanRef, pledgeBps)`
+   and hands the lender an encrypted copy of the note (`LenderPayload`), off-chain.
+3. The borrower proves a stream bound (`proveStream`): at least `minRemaining` left, rate at least `minRate`,
+   plus the cap, expiry, what was routed so far, when the stream starts and the asset. The lender checks it
+   on chain (`verifyStream`) and against the note it holds, then funds through `StreamLoan.fund`, which
+   records the loan and pays the principal out.
+4. Every spend on the pledged allowance routes `floor(amount * pledgeBps / 10000)` to the lender inside
+   the proof (`PledgeRouted`), credits `repaid` in the registry and forwards the tokens to the slot's lender.
+   The recipient gets the net. A memo for the lender (`LenderMemo`) carries the successor note.
+5. The lender may also pull the vested share itself: a claim through `StreamLoan.claim` for at most
+   `floor(vested * pledgeBps / 10000) - pledgePaid`, where `vested <= min(lifetimeCap, streamRate * (now - streamStart))`.
+6. After `expiry + 7 days` with `repaid < principal` the registry reports a `shortfall`; the lender
+   `settle`s when done. An allowance that never expires has no due date and never reports a shortfall.
+
+The lender leg never blocks a spend, so the owner can always reclaim: a share the token refuses to
+transfer is escrowed in the pool (`pullLenderShare` is permissionless), a lender contract gets at most
+300,000 gas for `onPledge`, and the registry keeps what it cannot forward for the slot's lender (`collect`).
+The pull path depends on the borrower writing the successor memo; a borrower that withholds it leaves the
+loan `opaque` to the lender's wallet, which then relies on the routed shares and the shortfall.
+
+### The lender wallet
+
+`LenderWallet(viewingKey, pool, streamLoan)` is the lender's side: `openSlot`, `ingest(payload)`,
+`sync()` (follows every pledged note through `LenderMemo` and commitment memos), `claimable(loanRef, now)`,
+`claim(loanRef, amount?)`, `fund(loanRef, streamProof, asset, principal, payoutTo)` (refuses a proof that
+does not restate a live note it holds), `collect`, `settle`, `loan`, `shortfall`, `opaque(loanRef)`.
+
+## Phase 2 EVM reference contracts (`contracts/token/`; the Solana versions are live, see above)
+
+- `StipendToken` (EVM reference only; the real H081 is the Solana token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`): plain OpenZeppelin ERC-20, name "H0.81 Capital", symbol `H081` (working symbol, not a
+  commitment), 18 decimals, whole supply minted once to the deployer. No mint, no owner.
+- `CapacityStake`: staked H081 buys capacity for relayers and hosted endpoints to honour:
+  `deskCapacity = staked / 100e18`, `shieldCap = (staked / 100e18) * 10,000 USDG per 30 days`;
+  7-day unstake cooldown. **The pool never reads this contract**, so the no-admin invariant holds.
+- `SafetyPool`: stakers pool H081; a loan's lender `insure`s a funded, unexpired loan and pays a premium
+  in; once the registry reports a shortfall, anyone may `slash` and the pool pays the lender
+  `min(shortfall, poolBalance)` (1:1 in base units for v1). The shortfall is chain state produced by the
+  circuit's routing, so no oracle decides. 14-day unbonding; a slash that empties the pool retires every share.
+
+Details and caveats: `docs/tokenomics.md`.
+
+## Phase 3 helpers
+
+- `Wallet.transferAllowance(owned, to)`: a bearer note. The whole balance moves to another key under the
+  identical policy (zero residual); the mandate, and any pledge, travel with the note.
+- `Wallet.treasuryTree()`: the owner's nested view of every granted allowance and its sub-allowances.
+
+## Note consolidation
+
+`transact` and `grant` take two input notes. When covering an amount needs more than two notes, the wallet
+(`Wallet` and `SolanaWallet`) first merges notes with ordinary fully shielded `transact` calls to itself:
+the two smallest notes of the largest-first selection go in, their sum and a zero note come out, and this
+repeats until two notes cover the amount. `transfer`, `withdraw` and `grant` do this on their own;
+`consolidate(asset, needed?, maxInputs?)` runs it ahead of time (`maxInputs = 1` merges down to one note).
+A balance that is short is refused before any merge is sent. No circuit or contract changed.
+
+What it costs: each merge is one more transaction, and `k` selected notes take at most `k - 2` merges. A
+merge shows the chain what any shielded transfer shows (a root, two nullifiers, two commitments; no
+amount, asset or address), but the merges and the payment are submitted back to back by the same payer,
+so an observer can guess that they belong together and that the wallet held several small notes. Merging
+ahead of time, at a quiet moment, breaks that timing link. A merge has no public leg, so until fee notes
+exist it pays no relayer: the submitting account pays the gas (EVM) or the transaction fee (Solana).
+
+## Disclosures
+
+Over an allowance note as of a known root: `remaining >= bound`, `spent <= bound`, or
+`windowSpent <= bound` in a stated window. The note's own counters make the statement complete, since
+every spend must rewrite the note. A grant's total is openable off-chain from its `TotalCommitment`.
+Each payment also emits a `ReceiptCommitment` the payer can open to a counterparty.
+
+## Layout
+
+```
+circuits/lib/        hashes (Poseidon, domain-tagged), Merkle proof, range checks, pledge share and lender binding
+circuits/main/       transact, grant, spend, disclose, delegate, stream
+contracts/           StipendPool, MerkleTreeWithHistory, TryERC20, generated verifiers/
+contracts/lending/   StreamLoan registry, IPledgeSink
+contracts/token/     StipendToken, CapacityStake, SafetyPool (Phase 2)
+contracts/test/      TestERC20, BlockingERC20, GreedySink (test doubles only)
+src/                 SDK: crypto (mirrors the circuits), merkle, encryption (x25519 + XChaCha20),
+                     inputs (circuit input builders), consolidate (note selection and merges), delegation (chained delegation plans),
+                     prover (snarkjs), client (Wallet, deploy, scanning),
+                     lender (LenderWallet), token (Phase 2 deploy helpers and the capacity curve)
+test/circuits/       constraint tests: honest inputs accepted, every dishonest input rejected
+test/e2e/            full flow on an in-process EVM with real Groth16 proofs (pool, lending, token)
+test/sdk/            pure-model property test of the lender total bound, note selection, consolidation and chained delegation plans
+scripts/             build-circuits, setup-circuits, deploy, gen-solana-vk, Solana localnet and test runners
+solana/programs/     stipend_pool, stream_loan, capacity_stake, safety_pool (Anchor crates, cargo build-sbf)
+solana/scripts/      WSL build and private-validator scripts
+src/solana/          Solana SDK: fieldOf, PDAs, buffers, instruction builders, events, SolanaWallet,
+                     SolanaLenderWallet (wallet lender), loan.SolanaLoanLenderWallet (stream_loan), staking helpers
+test/solana/         e2e, pool, lending, staking (local validator), events and consistency (unit)
+```
+
+## Build and test
+
+```
+npm ci
+npm run circuits:build      # circom2 (WASM) -> build/circuits/<name>/{r1cs,wasm,sym}; minutes per circuit
+npm run circuits:setup      # Groth16 keys + Solidity verifiers from circuits/ptau/pot17.ptau (dev ceremony)
+npm run contracts:compile   # Hardhat, solc 0.8.28, artifacts in build/artifacts
+npm test                    # 41 circuit tests + 50 end-to-end tests + 1 pure-model property test
+npm run typecheck
+```
+
+`npm run circuits:build grant` and `npm run circuits:setup grant` take circuit names to rebuild one.
+`test:circuits` and `test:e2e` run the halves. Builds and setups must not run in parallel.
+
+The powers-of-tau file `circuits/ptau/pot17.ptau` is not committed. Generate it with snarkjs (this is what
+CI does when the cache misses):
+
+```
+npx snarkjs powersoftau new bn128 17 pot17_0000.ptau
+npx snarkjs powersoftau contribute pot17_0000.ptau pot17_0001.ptau --name=dev -e="$(openssl rand -hex 32)"
+npx snarkjs powersoftau prepare phase2 pot17_0001.ptau circuits/ptau/pot17.ptau
+```
+
+For production, download `powersOfTau28_hez_final_17.ptau` or larger, set `PTAU=<path>`, and replace the
+single dev contribution with a public ceremony. The circuits, the pipeline and the contracts do not change.
+
+CI (`.github/workflows/ci.yml`) runs the same steps on Node 20 with the ptau cached.
+
+## Solana programs (`solana/`)
+
+| program | what it does | port of |
+|---|---|---|
+| `stipend_pool` | shielded pool: deposit, withdraw, transfer, 16-way grant, spend (agent, owner reclaim, lender claim), delegate, lender-share routing and escrow, on-chain Groth16 (alt_bn128) and Poseidon Merkle tree, disclosure and stream verification | `StipendPool.sol` |
+| `stream_loan` | slots, loans funded against a stream proof, repayment credited from the slot inbox, lender claims through the slot PDA, shortfall view | `StreamLoan.sol` |
+| `capacity_stake` | staked H081 buys desk and shielding capacity, 7-day unstake cooldown | `CapacityStake.sol` |
+| `safety_pool` | H081 stakers insure stream-backed loans; slash on shortfall, 14-day unbonding at risk | `SafetyPool.sol` |
+
+Circuits, zkeys and verifying keys are byte-identical to the EVM build. Solana pubkeys enter the circuits
+as `fieldOf(pubkey)` (first 160 bits of sha256). No program has upgrade logic; the only admin power is
+stipend_pool's deposit guard (per-asset caps, deposit-only pause; withdrawals cannot be blocked);
+every per-mint pool is created permissionlessly. Layout, PDAs, the buffer flow and the deploy steps
+(including removing the upgrade authority, only on the owner's explicit go) are in `solana/README.md`.
+
+Requirements: WSL Ubuntu with Rust 1.99, cargo-build-sbf 4.4.0 and the Solana CLI 4.3.2
+(`solana-test-validator`); Node on Windows. Anchor CLI is not needed.
+
+```
+npm run solana:build     # all programs (+ localnet-only probe/fast variants) -> solana/target-so (gitignored)
+npm run test:solana      # every Solana test file: three private validators (8999, 9099, 9199), started fresh
+                         # and stopped afterwards; a missing validator, program or a skipped test fails the run
+```
+
+Test results (2026-10-26, local only):
+
+| command | result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm test` (EVM reference + circuits) | 5 files, 92/92 |
+| `npm run test:solana` | 86/86: pool suite 52 (e2e, pool, events, consistency), loan 11, staking 23 |
+| `npm run solana:build` | all 4 programs and 3 localnet variants build |
+
+Measured compute units (local validator): deposit 191k, withdraw 188k, grant 565k (16-way 576k), public
+spend 180k, shielded spend 169k, pledged spend 198k, lender claim 181k, delegate 237k; Groth16 spend verify
+121k. All are asserted against budgets in the tests and written to `solana/target-so/compute-units*.json`.
+
+## Deployed on Solana mainnet
+
+Deployed and initialized 2026-10-31. Every program is upgradeable; the upgrade authority is the team's deployer
+key `5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1`. The config authority (caps, deposit pause, safety-pool
+underwriting) is `4eySgHKMNGMpWtbtpfxfSyJZK8LGYxEZLzJwHXCsoPX2`. No program has had an external audit yet.
+
+| Program | Program id | `.so` sha256 |
+|---|---|---|
+| stipend_pool (private bank) | [`E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM`](https://solscan.io/account/E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM) | `4e1fbbc3d1c7d094824ce323f34bbc671f68334b15a2467da4533e11052c1a51` |
+| stream_loan (loans) | [`8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`](https://solscan.io/account/8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4) | `d8cfbca52d22b231e0c9e376a613847157676c275bb9852ee02a2f7d7205d3c0` |
+| safety_pool (H081 safety pool) | [`HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`](https://solscan.io/account/HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt) | `6415fd13484703f1e31950abfcd17c1edf6edf8a5c9ff95646ca2df0ae10bce7` |
+| capacity_stake (H081 staking) | [`CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`](https://solscan.io/account/CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU) | `bbe8b1a2450dc6275b0229954d6b2f1fdb706cb27ab643697aa5f6b22a1082f2` |
+
+Accounts: USDG vault `FaRG7DV8e7XF3RyoZrBb3h1oLiFFWFFCuYDSXsDoyyzG` (USDG mint `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH`),
+loan registry `5MMWdQWZB3JWTCZXZsEGSLWegi9bk9iSitT9avdLo4Kt`, safety pool `91QLL95oPgJF8yjWeKb41yMs5Z48UPd9mTXMH7xppoQA`,
+capacity config `7QuqMc95ry9sjeem5gsS4SNQzoQfoHqVwSvAcSFq8uKS`. Loan fee treasury (0.25% origination):
+`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`.
+
+Limits: 1,000 USDG per deposit and 10,000 USDG in the bank in total; 100,000 H081 per safety-pool deposit or
+stake and 1,000,000 H081 in total. The safety pool covers no loan until the config authority enables
+underwriting. Live transactions: https://h081.xyz/proof. Full deploy procedure: `docs/MAINNET-RUNBOOK.md`.
+
+Check that what runs on chain is this code (read-only):
+
+```bash
+npx tsx scripts/solana-program-hash.mts --program E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM   --cluster mainnet-beta --so <your build of stipend_pool.so>          # prints MATCH or MISMATCH
+```
+
+Other notes:
+
+- The H081 token `EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo`. `StipendToken.sol` is
+  an EVM reference contract in the repo, not the token.
+- The EVM contracts (`contracts/`, Robinhood Chain) are a reference implementation and are not deployed.
+  `scripts/deploy.mjs` deploys them to a named EVM network; mainnet additionally needs `STIPEND_ALLOW_MAINNET=1`.
+- An external audit is planned. The trusted setup was run by the team (`docs/CEREMONY.md`), not a public ceremony.
+
+## Using the SDK
+
+```ts
+const owner = new Wallet(Account.random(), pool.connect(ownerSigner));
+await owner.deposit(usdg, 5_000_000_000n, { relayer, fee: 1_000_000n });
+
+// Lender side: a slot in the registry, and a viewing key for its memos.
+const lender = new LenderWallet(lenderView, pool, streamLoan.connect(lenderSigner));
+const loanRef = await lender.openSlot();
+
+// Owner grants a streamed allowance pledged 40% to that slot.
+const { lenderPayloads } = await owner.grant(usdg, [
+  { to: agentA.account.address, amount: 1_000_000_000n, streamRate: 100_000n, expiry,
+    pledge: { lenderAddr: lender.address.lenderAddr, loanRef, pledgeBps: 4000n, lenderViewPub: lender.address.viewPub } },
+  { to: agentB.account.address, amount: 500_000_000n, recipients: [vendorAddress] },
+]);
+lender.ingest(lenderPayloads[0]!);            // handed over off-chain
+
+// Borrower proves a stream bound; the lender verifies it on chain and funds.
+const agent = new Wallet(agentKeys, pool.connect(relayerSigner));
+await agent.sync();
+const stream = await agent.proveStream(agent.agentAllowances(usdg)[0], { minRemaining: 900_000_000n, minRate: 50_000n, audience });
+await verifyStream(pool, stream.proof, stream.args);   // true
+await lender.sync();
+await lender.fund(loanRef, stream, usdgAddress, 300_000_000n, borrowerPayout);
+
+// Every pay routes the share to the lender inside the proof; the vendor gets the net.
+await agent.pay(agent.agentAllowances(usdg)[0], 200_000_000n, vendorAddress, { relayer, fee: 2_000_000n });
+await lender.sync();
+await lender.claim(loanRef);                  // pulls the vested share not yet routed
+
+const { proof, args } = await agent.prove(agent.agentAllowances(usdg)[0], 'spentAtMost', 500_000_000n, audience);
+await verifyDisclosure(pool, proof, args);    // true, and the figures stay private
+await owner.reclaim(owner.grantedAllowances()[0]);   // still routes the lender's share
+```
+
+## Not yet built
+
+- Relayer fees for fully shielded operations (fee notes). Today only operations with a public leg pay a fee.
+- Per-asset caps inside one policy for mixed stock and stablecoin desks.
+- A wider `delegate` circuit. More than four subs per delegation is an MVP: a non-atomic chain of steps (see
+  Delegation).
+- Loan pricing: the safety pool values H081 1:1 against the shortfall and premiums are lender-chosen
+  (design in `docs/LOAN-PRICING.md`, owner decisions pending).
+- Relayer (`relayer/`) and address lookup tables (`src/solana/alt.ts`) are MVPs: no persistence, retries,
+  dynamic fees, auth or metrics yet. See relayer/README.md.
+- The public trusted-setup ceremony and the external audit themselves. The tooling exists (`npm run ceremony`,
+  verifiable builds, `npm run solana:preflight`); the audit scope is `docs/AUDIT-SCOPE.md`.

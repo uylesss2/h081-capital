@@ -1,0 +1,12 @@
+node_modules/
+build/
+circuits/ptau/*.ptau
+.env
+*.zkey
+solana/keys/
+solana/target/
+solana/target-so/
+solana/test-ledger/
+solana/target-verifiable/
+deploy/relayer-vercel/api/
+deploy/relayer-vercel/.vercel/

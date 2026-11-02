@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "created": "2026-10-31T00:40:58.519Z",
+  "protocol": "groth16",
+  "curve": "bn128",
+  "ptau": {
+    "file": "powersOfTau28_hez_final_17.ptau",
+    "blake2b": "6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345",
+    "sha256": "6b662a324867139fb1a20a324d90b6ff61856dfb23f59326909f14b0e2483ae0",
+    "verified": false,
+    "expected": "6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345"
+  },
+  "circuits": {
+    "spend": {
+      "r1cs": "build/circuits/spend/spend.r1cs",
+      "r1csSha256": "fbde5e7bdf4595efbb4a324501821b4aae4dc7596037d1fdcc83cf38a41d78ce",
+      "circuitHash": "81a9aa29f5dba592d568bee86563e060d5ceeda0012f1ec3b2236dfaaac4c3d0202f988b4d0aebea18bfa57e7597d1acd991680c911fed7f387e8987b30c80ea",
+      "constraints": 27344,
+      "publicInputs": 15,
+      "init": {
+        "file": "spend/spend_0000.zkey",
+        "sha256": "bac7877e6294c5ec51febd8f066ed983d42b7b855bbdadfdaa03c038f7a5c149"
+      }
+    }
+  },
+  "contributions": [
+    {
+      "index": 1,
+      "name": "H0.81 project team, contribution 1",
+      "at": "2026-10-31T00:41:09.275Z",
+      "circuits": {
+        "spend": {
+          "file": "spend/spend_0001.zkey",
+          "sha256": "8c929898f1313720662d48dd9870ad1404433f83db3c77cf91f6f71ae78d5894",
+          "prevSha256": "bac7877e6294c5ec51febd8f066ed983d42b7b855bbdadfdaa03c038f7a5c149",
+          "contributionHash": "71883ffc78d66571b9739e68bf428ad5dc4ee7381405e8c1254cdfe4a46b9127018a17712cf8f232e0a9dfd41b062e4a12c0abe6211a800852ab1d4670723c41"
+        }
+      }
+    },
+    {
+      "index": 2,
+      "name": "H0.81 project team, contribution 2",
+      "at": "2026-10-31T00:41:10.835Z",
+      "circuits": {
+        "spend": {
+          "file": "spend/spend_0002.zkey",
+          "sha256": "dd88b4376ffbf79f267b9319ee5b70b0a3b21536f20da76397d07ea858288595",
+          "prevSha256": "8c929898f1313720662d48dd9870ad1404433f83db3c77cf91f6f71ae78d5894",
+          "contributionHash": "14a7916afcf5e1265ef059ddfaba08a03585c81a5b08dde75f5e07569f1d05617510e992602893c39fe0f72c7a201fc5af005f13f413e900c887aecb509416d3"
+        }
+      }
+    },
+    {
+      "index": 3,
+      "name": "H0.81 project team, contribution 3",
+      "at": "2026-10-31T00:41:13.826Z",
+      "circuits": {
+        "spend": {
+          "file": "spend/spend_0003.zkey",
+          "sha256": "12487e881635fd4c90db6fa90f019244a22f22b270944b37c37677105b477fa1",
+          "prevSha256": "dd88b4376ffbf79f267b9319ee5b70b0a3b21536f20da76397d07ea858288595",
+          "contributionHash": "f8dc8bcfffafc19092563f06ba7936fdcf0ca20969948a8cf7d9568efb5083a1a09eb93f429d71ccaf0dc96d6a2b6f1efd807e3d3e16d0420b2037867c2ae332"
+        }
+      }
+    }
+  ],
+  "beacon": {
+    "name": "final beacon",
+    "value": "f7aa63083f307cb8ec4b548e4a50893cd8248c097a1ebf85bb0675639ea7485b",
+    "source": "Solana mainnet-beta block hash HfnPkpVKUZ2enGWZo7zjMh6xCZWNyDetvejnhnMaXW4S (slot 463490557, block height 441512795), base58-decoded to 32 bytes",
+    "iterationsExp": 10,
+    "at": "2026-10-31T00:41:53.948Z",
+    "circuits": {
+      "spend": {
+        "file": "spend/spend_final.zkey",
+        "sha256": "0e5cbe9f896a611717df1c65104f2ea53ee2ae282c3a98837f564a62250651e9",
+        "prevSha256": "12487e881635fd4c90db6fa90f019244a22f22b270944b37c37677105b477fa1",
+        "contributionHash": "683f2fd941e821258e3d8295c7a73d4b0428f5fe1d9c26c62a1f9d5128f2f0c28f69c8ce47d4a076526696ab3ad80503981e6a79d02887c354284e22f567de47"
+      }
+    }
+  },
+  "verified": {
+    "at": "2026-10-31T00:42:11.690Z",
+    "contributions": 3,
+    "beacon": true
+  }
+}
