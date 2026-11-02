@@ -7,13 +7,13 @@ import { poseidonContract } from 'circomlibjs';
 import { readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import {
-  Allowance, FIELD, Note, SpendingKey, addressKey, allowanceCommitment, allowanceNullifier, keysFromSk, lenderKey, nextRho, noteCommitment,
-  noteNullifier, randomField, randomKeys, addressToField, spendAllowance,
+  Allowance, FIELD, Note, addressKey, allowanceCommitment, allowanceNullifier, lenderKey, nextRho, noteCommitment,
+  noteNullifier, randomField, addressToField, spendAllowance,
 } from './crypto.js';
 import { MerklePath, MerkleTree, recipientListRoot } from './merkle.js';
 import {
   AllowancePayload, LenderInfo, LenderPayload, MemoViews, NotePayload, ViewingKey, allowanceMemo, decodePayload, decryptMemo, fromHex, noteMemo,
-  parseAllowancePayload, sealForLender, toHex, unpackMemos, viewingKeyFromSk,
+  parseAllowancePayload, sealForLender, toHex, unpackMemos,
 } from './encryption.js';
 import {
   DELEGATE_OUTPUTS, GRANT_OUTPUTS, LEVELS, RECIPIENT_LEVELS, delegateInput, dummyNoteInput, discloseInput, grantInput, spendInput, streamInput,
@@ -86,23 +86,10 @@ export function connectLending(address: string, runner: Signer | Provider): Cont
 
 // ------------------------------------------------------------------ accounts
 
-/** What you hand to someone who wants to pay you or fund you. */
-export interface StipendAddress { pk: bigint; viewPub: Uint8Array }
-
-export class Account {
-  readonly keys: SpendingKey;
-  readonly view: ViewingKey;
-  constructor(sk: bigint) {
-    this.keys = keysFromSk(sk);
-    this.view = viewingKeyFromSk(sk);
-  }
-  static random(): Account {
-    return new Account(randomKeys().sk);
-  }
-  get address(): StipendAddress {
-    return { pk: this.keys.pk, viewPub: this.view.pub };
-  }
-}
+// Account, StipendAddress and TreasuryNode live in account.ts (shared with the Solana SDK, which must not
+// pull ethers in through this module); re-exported here so nothing that imports them from client.ts moves.
+import { Account, type StipendAddress, type TreasuryNode } from './account.js';
+export { Account, type StipendAddress, type TreasuryNode };
 
 // ------------------------------------------------------------------ wallet
 
@@ -160,15 +147,6 @@ export interface StreamArgs {
 
 /** The memos a spend writes; a subclass may override `spendMemos` (tests model a borrower that withholds one). */
 export interface SpendMemos { encryptedAllowance: string; encryptedPayment: string; encryptedLender: string }
-
-/** One line of allowances (a note and its successors) with the lines delegated from it. */
-export interface TreasuryNode {
-  /** the line's latest note */
-  allowance: Allowance; commitment: bigint; index: number; spent: boolean;
-  /** the line's first note, as granted or delegated */
-  granted: Allowance;
-  children: TreasuryNode[];
-}
 
 type SubRequest = { to: StipendAddress } & Omit<SubGrant, 'agentPk'>;
 type Origin = { kind: 'grant' } | { kind: 'sub' | 'residual'; parentNullifier: bigint };

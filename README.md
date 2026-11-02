@@ -154,8 +154,7 @@ does not restate a live note it holds), `collect`, `settle`, `loan`, `shortfall`
   commitment), 18 decimals, whole supply minted once to the deployer. No mint, no owner.
 - `CapacityStake`: staked H081 buys capacity for relayers and hosted endpoints to honour:
   `deskCapacity = staked / 100e18`, `shieldCap = (staked / 100e18) * 10,000 USDG per 30 days`;
-  7-day unstake cooldown in this EVM reference (the live Solana `capacity_stake` uses 30 days). **The pool never
-  reads this contract.**
+  7-day unstake cooldown. **The pool never reads this contract**, so the no-admin invariant holds.
 - `SafetyPool`: stakers pool H081; a loan's lender `insure`s a funded, unexpired loan and pays a premium
   in; once the registry reports a shortfall, anyone may `slash` and the pool pays the lender
   `min(shortfall, poolBalance)` (1:1 in base units for v1). The shortfall is chain state produced by the
@@ -250,7 +249,7 @@ CI (`.github/workflows/ci.yml`) runs the same steps on Node 20 with the ptau cac
 |---|---|---|
 | `stipend_pool` | shielded pool: deposit, withdraw, transfer, 16-way grant, spend (agent, owner reclaim, lender claim), delegate, lender-share routing and escrow, on-chain Groth16 (alt_bn128) and Poseidon Merkle tree, disclosure and stream verification | `StipendPool.sol` |
 | `stream_loan` | slots, loans funded against a stream proof, repayment credited from the slot inbox, lender claims through the slot PDA, shortfall view | `StreamLoan.sol` |
-| `capacity_stake` | staked H081 buys desk and shielding capacity, 30-day unstake cooldown | `CapacityStake.sol` |
+| `capacity_stake` | staked H081 buys desk and shielding capacity, 7-day unstake cooldown | `CapacityStake.sol` |
 | `safety_pool` | H081 stakers insure stream-backed loans; slash on shortfall, 14-day unbonding at risk | `SafetyPool.sol` |
 
 Circuits, zkeys and verifying keys are byte-identical to the EVM build. Solana pubkeys enter the circuits

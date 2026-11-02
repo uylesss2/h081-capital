@@ -7,23 +7,16 @@
 // The server holds the agent's spending key. It cannot spend past the
 // allowance's policy: every payment is a spend proof the pool verifies, and a
 // payment the policy forbids has no valid proof.
-import { createInterface } from 'node:readline';
-import type { Readable, Writable } from 'node:stream';
 import { hexlify } from 'ethers';
 import { type OwnedAllowance, type Relay, type StipendAddress, type Wallet, fieldToAddress, verifyDisclosure } from './client.js';
 import { fromHex } from './encryption.js';
 import type { DisclosureKind } from './inputs.js';
 import type { ProofResult, SolidityProof } from './prover.js';
 import { x402Fetch } from './x402.js';
-
-export const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
-
-export interface McpTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  handler: (args: Record<string, unknown>) => Promise<unknown>;
-}
+// The JSON-RPC framing (McpServer, McpTool, toJson, MCP_PROTOCOL_VERSIONS) lives in mcp-core.ts, which has no
+// chain dependency; re-exported here so existing imports keep working.
+import { MCP_PROTOCOL_VERSIONS, McpServer, type McpTool, POLICY_NOTE, toJson } from './mcp-core.js';
+export { MCP_PROTOCOL_VERSIONS, McpServer, type McpTool, POLICY_NOTE, toJson };
 
 export interface StipendToolContext {
   wallet: Wallet;
@@ -35,11 +28,6 @@ export interface StipendToolContext {
   maxX402Amount?: bigint;
   fetch?: typeof fetch;
 }
-
-const POLICY_NOTE =
-  'Spending is bounded by the allowance policy the owner set (lifetime cap, window cap, per-payment cap, expiry, ' +
-  'recipient allow-list, stream rate): the pool accepts a payment only with a zero-knowledge spend proof, and a ' +
-  'payment that breaks the policy has no valid proof, whatever this tool is asked to do.';
 
 const KINDS: DisclosureKind[] = ['remainingAtLeast', 'spentAtMost', 'windowSpentAtMost'];
 const uint = { type: 'string', pattern: '^(0x[0-9a-fA-F]+|[0-9]+)$' };
@@ -230,90 +218,3 @@ function recipientOf(to: unknown): string | StipendAddress {
   if (o?.pk === undefined || typeof o.viewPub !== 'string') throw new Error('`to` must be a 0x address or {pk, viewPub}');
   return { pk: BigInt(String(o.pk)), viewPub: fromHex(o.viewPub) };
 }
-
-/** JSON with bigints as decimal strings and byte arrays as hex. */
-export function toJson(value: unknown): string {
-  return JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v instanceof Uint8Array ? hexlify(v) : v));
-}
-
-// ------------------------------------------------------------------ JSON-RPC
-
-type Id = string | number | null;
-interface JsonRpcRequest { jsonrpc: '2.0'; id?: Id; method: string; params?: Record<string, unknown> }
-interface JsonRpcResponse { jsonrpc: '2.0'; id: Id; result?: unknown; error?: { code: number; message: string; data?: unknown } }
-
-export class McpServer {
-  private readonly byName: Map<string, McpTool>;
-
-  constructor(readonly tools: McpTool[], readonly info: { name: string; version: string } = { name: 'stipend', version: '0.1.0' }) {
-    this.byName = new Map(tools.map((t) => [t.name, t]));
-  }
-
-  /** Handles one message; returns the response, or undefined for a notification. */
-  async handle(msg: unknown): Promise<JsonRpcResponse | undefined> {
-    const req = msg as JsonRpcRequest;
-    if (!req || req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
-      return { jsonrpc: '2.0', id: (req as { id?: Id })?.id ?? null, error: { code: -32600, message: 'invalid request' } };
-    }
-    const isNotification = req.id === undefined;
-    const reply = (result: unknown): JsonRpcResponse | undefined => (isNotification ? undefined : { jsonrpc: '2.0', id: req.id!, result });
-    const fail = (code: number, message: string): JsonRpcResponse | undefined => (isNotification ? undefined : { jsonrpc: '2.0', id: req.id!, error: { code, message } });
-    switch (req.method) {
-      case 'initialize': {
-        const asked = String(req.params?.protocolVersion ?? '');
-        const protocolVersion = (MCP_PROTOCOL_VERSIONS as readonly string[]).includes(asked) ? asked : MCP_PROTOCOL_VERSIONS[0];
-        return reply({
-          protocolVersion,
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: this.info,
-          instructions: 'Stipend wallet tools. ' + POLICY_NOTE,
-        });
-      }
-      case 'ping':
-        return reply({});
-      case 'tools/list':
-        return reply({ tools: this.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
-      case 'tools/call': {
-        const name = String(req.params?.name ?? '');
-        const tool = this.byName.get(name);
-        if (!tool) return fail(-32602, `unknown tool: ${name}`);
-        try {
-          const out = await tool.handler((req.params?.arguments ?? {}) as Record<string, unknown>);
-          const text = toJson(out);
-          return reply({ content: [{ type: 'text', text }], structuredContent: JSON.parse(text), isError: false });
-        } catch (e) {
-          // a tool failure (a refused proof, a bad argument) is a result the model can read, not a protocol error
-          return reply({ content: [{ type: 'text', text: (e as Error).message }], isError: true });
-        }
-      }
-      default:
-        if (req.method.startsWith('notifications/')) return undefined;
-        return fail(-32601, `method not found: ${req.method}`);
-    }
-  }
-
-  /**
-   * Serves newline-delimited JSON-RPC on the streams (stdin/stdout by default) until input ends. Messages are
-   * handled one at a time: two payments from one allowance must not race for the same note.
-   */
-  serveStdio(input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
-    const rl = createInterface({ input, crlfDelay: Infinity });
-    let queue: Promise<void> = Promise.resolve();
-    rl.on('line', (line) => {
-      if (!line.trim()) return;
-      queue = queue.then(async () => {
-        let msg: unknown;
-        try { msg = JSON.parse(line); } catch {
-          output.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) + '\n');
-          return;
-        }
-        const batch = Array.isArray(msg) ? msg : [msg];
-        const replies: JsonRpcResponse[] = [];
-        for (const m of batch) { const r = await this.handle(m); if (r) replies.push(r); }
-        if (replies.length) output.write(toJson(Array.isArray(msg) ? replies : replies[0]) + '\n');
-      });
-    });
-    return new Promise((resolve) => rl.on('close', () => { void queue.then(() => resolve()); }));
-  }
-}
-

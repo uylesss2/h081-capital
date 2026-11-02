@@ -17,12 +17,9 @@ design is `docs/PRD-V2-DESIGN.md` section 6.3.
 `StipendPool` and `StreamLoan` have no reference to the token, to `CapacityStake` or to `SafetyPool`.
 A pool user needs no H081 for anything: depositing, granting, spending, delegating, pledging, proving and
 claiming all work without it. Capacity (section 3) is honoured by relayers and hosted endpoints, which can
-refuse to submit a proof; the pool itself accepts any valid proof from anyone. Nothing about the token can
-touch any user's funds in the pool.
-
-On Solana mainnet the programs have two authorities, neither of which involves the token: the deployer key holds
-the upgrade authority of every program, and a config authority can set deposit caps and pause new deposits and
-stakes. Withdrawals, unbonding and unstaking can never be paused.
+refuse to submit a proof; the pool itself accepts any valid proof from anyone. This keeps the pool's
+no-admin, no-pause, no-upgrade guarantee independent of the token, and it means a failed or never-launched
+token cannot touch any user's funds.
 
 ## 2. Supply and emissions
 
@@ -65,12 +62,6 @@ Rules: `stake(amount)` counts at once; `requestUnstake(amount)` removes the amou
 starts the cooldown (a second request adds to the pending amount and restarts the cooldown for all of it);
 `unstake()` pays the whole pending amount after the cooldown. No owner, no slashing, no rewards.
 
-**On Solana mainnet** (`capacity_stake` `CH1rrfFyJMVn158UHL2fLpKTtoLJojrz5f68toMQdQKU`, live since 2026-10-31) the
-curve is the same: 100 H081 per desk and per 10,000 USDG of shielding every 30 days. The unstake cooldown is
-**30 days** (one full capacity window, so capacity cannot be reused by unstaking and restaking). Our relayer
-serves a free tier of 100 USDG per 30 days without any stake. Caps: 100,000 H081 per stake and 1,000,000 H081
-staked in total. The config authority can pause new stakes; unstake requests and unstaking are never paused.
-
 ## 4. Safety pool (`SafetyPool.sol`)
 
 A proof-settled insurance market for stream-backed loans. Stakers put H081 at risk; a lender buys cover for
@@ -96,11 +87,6 @@ Mechanics:
   that takes the whole pool bumps the pool `generation`, which retires every share, including unbonding
   ones; the next deposit starts a fresh pool at 1:1.
 
-**On Solana mainnet** (`safety_pool` `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`, live since 2026-10-31): 14-day
-unbonding with shares still at risk, 7-day grace after a loan's expiry before a shortfall counts, caps of 100,000
-H081 per deposit and 1,000,000 H081 in total. Every cover needs the pool's underwriter (the config authority) to
-co-sign, and underwriting stays off until it is switched on with cover limits, so nothing is insured yet.
-
 Caveats the pricing work must address before any deployment:
 
 - With lender-chosen premiums and 1:1 valuation, a lender can fund a loan to itself, let it lapse past the
@@ -111,11 +97,11 @@ Caveats the pricing work must address before any deployment:
 - A loan on an allowance that never expires has no due date and never reports a shortfall, so it cannot be
   insured (`insure` requires an expiry).
 
-## 5. Fee capture: platform fees buy back H081
+## 5. Fee capture: platform fees buy back H081 (designed, not live)
 
-Status 2026-11-02: **live on Solana mainnet since 2026-10-31.** The loan origination fee and our relayer's fee
-are charged and paid to the treasury; no buyback has run yet. The full specification is `docs/FLYWHEEL.md`.
-Every mainnet buyback needs an explicit go from the owner.
+Status 2026-10-31: **no platform fee is charged today and no buyback has happened.** The design below is in
+build on branch `feat/flywheel`; the full specification is `docs/FLYWHEEL.md`. Every mainnet step needs an
+explicit go from the owner.
 
 **Only platform fees feed the flywheel.** These are fees the bank earns for services it provides:
 
@@ -130,9 +116,8 @@ and anyone may run their own relayer or submit proofs directly.
 
 Fees collect in a Squads 2-of-3 treasury multisig that is distinct from every launch wallet. Once a week the
 treasury buys H081 on the official DAMM v2 pool (`CryBbh9QQttrUrfLVXLLEuhkM5wZ8W1DUZFYNhUEhYqs`) in
-randomised small chunks with at most 1% slippage. The safety pool (section 4) is live, so 50% of the bought H081
-is burned and 50% goes to `safety_pool.top_up` (100% burned while the pool has no stakers or holds less than
-10,000 H081). The top-up adds insurance
+randomised small chunks with at most 1% slippage. Until the safety pool (section 4) is live, 100% of the
+bought H081 is burned; after that, 50% is burned and 50% goes to `safety_pool.top_up`, which adds insurance
 capital for lenders without minting shares. Because no shares are minted, a top-up raises what every
 safety-pool share redeems for, so stakers who back loans benefit pro rata in return for carrying slashing
 risk (section 4); it is not a fixed or promised return. Holding H081 outside the safety pool pays nothing. Every run is recorded in the public ledger `flywheel-ledger.json`.

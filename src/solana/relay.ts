@@ -4,6 +4,7 @@
 // payer to be the buffer's authority). extDataHash binds the fee, the relayer pubkey and the fee token
 // account, so a relayer cannot change who is paid, and a wallet cannot point the fee anywhere the relayer
 // did not agree to (the relayer refuses it here).
+import { sha256 } from '@noble/hashes/sha2';
 import { PublicKey } from '@solana/web3.js';
 import { fromBe } from './field.js';
 import { DELEGATE_OUTPUTS, GRANT_OUTPUTS, extDataHash } from './ops.js';
@@ -31,6 +32,23 @@ export interface SolanaRelayRequest {
   recipientOwner?: string;
   /** the lender's ATA for a pledged spend; the relayer falls back to the escrow when it cannot take the share */
   lenderToken?: string;
+  /**
+   * Capacity operator (base58): a wallet with H081 staked in capacity_stake whose 30-day relayed volume this
+   * operation counts against. A relayer that enforces capacity requires one when the public amount is above
+   * its anonymous free tier. The relayer learns the operator; the chain does not.
+   */
+  operator?: string;
+  /** base64 ed25519 signature by `operator` over capacityMessage(payload) */
+  operatorSig?: string;
+}
+
+/** What an operator signs (ed25519) to put an operation on its capacity: a domain tag and sha256 of the payload. */
+export function capacityMessage(payload: Uint8Array): Uint8Array {
+  const tag = new TextEncoder().encode('h081-relay-capacity:v1:');
+  const out = new Uint8Array(tag.length + 32);
+  out.set(tag);
+  out.set(sha256(payload), tag.length);
+  return out;
 }
 
 export class PayloadError extends Error {

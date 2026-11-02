@@ -10,7 +10,6 @@
 // the token's trading creator fees are the team's and are not part of this; only relay fees are.
 // Capacity (capacity_stake): an operation above the free tier must name a staking operator, signed, whose
 // 30-day relayed volume stays within free tier + shieldCap(staked).
-import { sha256 } from '@noble/hashes/sha2';
 import { ed25519 } from '@noble/curves/ed25519';
 import {
   AddressLookupTableAccount, Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, TransactionInstruction,
@@ -19,17 +18,18 @@ import {
   TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, unpackAccount,
 } from '@solana/spl-token';
 import { type OpPlan, abandonPlan, planOperation, sendV0, simulateV0, stagePlan } from '../src/solana/alt.js';
+import type { PriorityOptions } from '../src/solana/send.js';
 import { fieldOf } from '../src/solana/field.js';
 import { createVaultIx, delegateIx, grantIx, spendIx, transactIx, type SpendAccounts } from '../src/solana/ops.js';
 import { nullifierPda, poolPda, vaultPda } from '../src/solana/pda.js';
 import { BUFFER_MAX_LEN, LOCALNET_POOL_PROGRAM_ID, decodePool } from '../src/solana/program.js';
 import {
-  type DecodedOp, type FeeTerms, SOLANA_OPS, type SolanaOp, type SolanaRelayRequest, checkFee, decodeRelayPayload, fromB64, nullifiersOf,
+  type DecodedOp, type FeeTerms, SOLANA_OPS, type SolanaOp, type SolanaRelayRequest, capacityMessage, checkFee, decodeRelayPayload, fromB64, nullifiersOf,
 } from '../src/solana/relay.js';
 import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, readCapacity } from '../src/solana/token.js';
 import { OP_CU_LIMIT } from '../src/solana/wallet.js';
 import { DEFAULT_FEE_BPS, LAUNCH_WALLET_DENYLIST, type RelayerConfig, isDenyListed } from './config.js';
-import { RelayError, badRequest } from './errors.js';
+import { RelayError, badRequest, toRelayError } from './errors.js';
 import { InFlight } from './ratelimit.js';
 
 /** The pool accepts `now` up to 15 minutes old; staging takes time, so the relayer wants this much slack left. */
@@ -59,6 +59,40 @@ export interface SolanaRelayerOptions {
   feeBps?: number;
   /** capacity_stake enforcement; absent = off */
   capacity?: CapacityOptions;
+  /** the paid priority lane (x402 relay-priority): its own in-flight count and higher priority-fee caps; absent = no lane */
+  priority?: PriorityLaneOptions;
+  /** the chain transport (stage, simulate, send, abandon); injectable so tests need no validator */
+  io?: RelayIo;
+}
+
+export interface PriorityLaneOptions { maxInFlight: number; maxLamports: number; priceCeil: number }
+
+export interface RelayIo {
+  stagePlan: typeof stagePlan;
+  simulateV0: typeof simulateV0;
+  sendV0: typeof sendV0;
+  abandonPlan: typeof abandonPlan;
+}
+
+export interface RelayOptions { lane?: 'priority' }
+
+export interface RelayResult {
+  signature: string; computeUnits: number; op: SolanaOp; fee: string;
+  lane?: 'priority'; priorityFee?: { maxLamports: number; priceCeil: number };
+}
+
+/** What `inspect` reports: the relay checks as findings instead of a thrown refusal. */
+export interface Inspection {
+  ok: boolean;
+  op: SolanaOp;
+  fee: {
+    paid: string; required: string | null; min: string | null; bps: number; publicAmount: string; mint: string | null; feeAccount: string | null;
+  };
+  capacity: { needed: boolean; operator: string | null; used: string | null; limit: string | null; ok: boolean } | null;
+  chain: { rootKnown: boolean; nullifiersUnspent: boolean[]; timestampFresh: boolean | null };
+  accounts: { recipientExists: boolean | null; vaultExists: boolean | null; lenderTokenUsable: boolean | null } | null;
+  plan: { payloadBytes: number; setupTxs: number; writeTxs: number } | null;
+  refusals: Array<{ status: number; code: string; message: string }>;
 }
 
 /** Required fee: max(min, bps * amount / 10_000), rounded down. */
@@ -99,14 +133,8 @@ export function solanaRelayerOptions(
 /** 30 days, the period shieldCap is measured over. */
 export const CAPACITY_WINDOW_SECS = 30 * 86400;
 
-/** What an operator signs (ed25519) to put an operation on its capacity: a domain tag and sha256 of the payload. */
-export function capacityMessage(payload: Uint8Array): Uint8Array {
-  const tag = new TextEncoder().encode('h081-relay-capacity:v1:');
-  const out = new Uint8Array(tag.length + 32);
-  out.set(tag);
-  out.set(sha256(payload), tag.length);
-  return out;
-}
+/** What an operator signs to put an operation on its capacity: defined in src/solana/relay.ts so the SDK signs the same bytes. */
+export { capacityMessage };
 
 export interface CapacityOptions {
   /** an operation whose public amount is at most this needs no operator (anonymous free tier); also added to every operator's allowance */
@@ -226,7 +254,9 @@ export class SolanaRelayer {
   readonly inFlight = new InFlight();
   private tokenPrograms = new Map<string, PublicKey>();
   private busy = 0;
+  private busyPriority = 0;
   readonly capacity?: CapacityGate;
+  private readonly io: RelayIo;
 
   constructor(readonly opts: SolanaRelayerOptions) {
     this.programId = opts.programId ?? LOCALNET_POOL_PROGRAM_ID;
@@ -236,7 +266,11 @@ export class SolanaRelayer {
     const bps = opts.feeBps ?? DEFAULT_FEE_BPS;
     if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) throw new Error('feeBps must be an integer in 0..10000');
     if (opts.capacity) this.capacity = new CapacityGate(opts.capacity);
+    this.io = opts.io ?? { stagePlan, simulateV0, sendV0, abandonPlan };
   }
+
+  /** The priority lane's fee caps, when the lane exists. */
+  get priorityLane(): PriorityLaneOptions | undefined { return this.opts.priority; }
 
   get connection(): Connection { return this.opts.connection; }
   get relayer(): PublicKey { return this.opts.payer.publicKey; }
@@ -363,32 +397,48 @@ export class SolanaRelayer {
     return Buffer.from(info.data).readBigInt64LE(32);
   }
 
-  /** Decodes, checks the fee and the chain state, and plans the transactions. Reads only. */
-  async prepare(body: unknown): Promise<PreparedRelay> {
-    const req = (body ?? {}) as SolanaRelayBody;
-    const checked = await this.checkTerms(body);
-    const { op, payload, decoded: d } = checked;
-    const reqMint = req.mint === undefined ? undefined : keyOrBad(req.mint, 'mint');
-
-    // chain-state checks that cost no transaction
+  /** Chain-state facts about an operation that cost no transaction (reads only). */
+  private async chainFacts(d: DecodedOp): Promise<{ poolExists: boolean; rootKnown: boolean; nullifiersUnspent: boolean[]; timestampFresh: boolean | null; lamports: number }> {
     const poolInfo = await this.connection.getAccountInfo(poolPda(this.programId), 'confirmed');
-    if (!poolInfo) throw new RelayError(503, 'pool_missing', 'the pool is not initialised on this cluster');
-    if (!decodePool(poolInfo.data).roots.includes(d.root)) throw new RelayError(409, 'unknown_root', 'the proof is against a root the pool no longer knows; sync and prove again');
+    const rootKnown = !!poolInfo && decodePool(poolInfo.data).roots.includes(d.root);
     const nfs = nullifiersOf(d);
     const nfAccounts = await this.connection.getMultipleAccountsInfo(nfs.map((n) => nullifierPda(this.programId, n)), 'confirmed');
-    if (nfAccounts.some((a) => a !== null)) throw new RelayError(409, 'already_spent', 'a nullifier of this operation is already spent');
+    const nullifiersUnspent = nfAccounts.map((a) => a === null);
+    let timestampFresh: boolean | null = null;
     if (d.op === 'spend' || d.op === 'delegate') {
       const now = await this.now();
-      if (d.timestamp + NOW_LOOKBACK < now + TIMESTAMP_SLACK) throw new RelayError(409, 'stale_timestamp', 'the proof timestamp is too old to land; prove again');
-      if (d.timestamp > now + NOW_LOOKAHEAD) throw new RelayError(409, 'stale_timestamp', 'the proof timestamp is in the future');
+      timestampFresh = !(d.timestamp + NOW_LOOKBACK < now + TIMESTAMP_SLACK) && !(d.timestamp > now + NOW_LOOKAHEAD);
     }
     const lamports = await this.connection.getBalance(this.relayer, 'confirmed');
-    if (lamports < (this.opts.minLamports ?? 50_000_000)) throw new RelayError(503, 'relayer_underfunded', 'the relayer is out of SOL');
+    return { poolExists: !!poolInfo, rootKnown, nullifiersUnspent, timestampFresh, lamports };
+  }
 
+  /** The refusals the chain facts imply, in the order `prepare` raises them. */
+  private chainRefusals(f: Awaited<ReturnType<SolanaRelayer['chainFacts']>>): RelayError[] {
+    const out: RelayError[] = [];
+    if (!f.poolExists) out.push(new RelayError(503, 'pool_missing', 'the pool is not initialised on this cluster'));
+    else if (!f.rootKnown) out.push(new RelayError(409, 'unknown_root', 'the proof is against a root the pool no longer knows; sync and prove again'));
+    if (f.nullifiersUnspent.some((u) => !u)) out.push(new RelayError(409, 'already_spent', 'a nullifier of this operation is already spent'));
+    if (f.timestampFresh === false) out.push(new RelayError(409, 'stale_timestamp', 'the proof timestamp is too old to land (or in the future); prove again'));
+    if (f.lamports < (this.opts.minLamports ?? 50_000_000)) out.push(new RelayError(503, 'relayer_underfunded', 'the relayer is out of SOL'));
+    return out;
+  }
+
+  /** Account facts `planFor` gathers while it decides which accounts the final transaction creates. */
+  private emptyAccounts() {
+    return { recipientExists: null as boolean | null, vaultExists: null as boolean | null, lenderTokenUsable: null as boolean | null };
+  }
+
+  /** The transactions of an operation (reads the accounts it names). Throws the relay API's 400s. */
+  private async planFor(req: SolanaRelayBody, checked: CheckedTerms): Promise<Pick<PreparedRelay, 'mint' | 'plan' | 'fallbacks'> & { accounts: ReturnType<SolanaRelayer['emptyAccounts']> }> {
+    const { payload, decoded: d } = checked;
+    const reqMint = req.mint === undefined ? undefined : keyOrBad(req.mint, 'mint');
+    const accounts = this.emptyAccounts();
     const payer = this.relayer;
     const pre: TransactionInstruction[] = [];
     const ensureVault = async (mint: PublicKey, tp: PublicKey) => {
-      if (!(await this.connection.getAccountInfo(vaultPda(this.programId, mint), 'confirmed'))) pre.push(createVaultIx(this.programId, payer, mint, tp));
+      accounts.vaultExists = !!(await this.connection.getAccountInfo(vaultPda(this.programId, mint), 'confirmed'));
+      if (!accounts.vaultExists) pre.push(createVaultIx(this.programId, payer, mint, tp));
     };
     let ops: Array<(buffer: PublicKey) => TransactionInstruction>;
     let mint: PublicKey | undefined;
@@ -405,7 +455,8 @@ export class SolanaRelayer {
       let recipientToken: PublicKey | undefined;
       if (d.extAmount < 0n) {
         recipientToken = d.recipient;
-        if (!(await this.connection.getAccountInfo(recipientToken, 'confirmed'))) {
+        accounts.recipientExists = !!(await this.connection.getAccountInfo(recipientToken, 'confirmed'));
+        if (!accounts.recipientExists) {
           if (req.recipientOwner === undefined) throw badRequest('recipient_account_missing', 'the withdrawal account does not exist; pass recipientOwner to have it created');
           const owner = keyOrBad(req.recipientOwner, 'recipientOwner');
           const ata = getAssociatedTokenAddressSync(token!.mint, owner, true, token!.tokenProgram);
@@ -416,28 +467,32 @@ export class SolanaRelayer {
       const feeToken = d.fee > 0n ? d.feeRecipient : undefined;
       ops = [(buffer) => transactIx(this.programId, { payer, buffer, nullifiers: d.nullifiers, token, recipientToken, feeToken })];
     } else if (d.op === 'spend') {
-      const accounts: Omit<SpendAccounts, 'buffer'> = { payer, nullifier: d.nullifier };
+      const spendAccounts: Omit<SpendAccounts, 'buffer'> = { payer, nullifier: d.nullifier };
       if (d.publicAmount > 0n || d.lenderAmount > 0n) {
         mint = d.publicAsset;
         const tokenProgram = await this.tokenProgramOf(mint);
-        accounts.token = { mint, tokenProgram };
+        spendAccounts.token = { mint, tokenProgram };
         await ensureVault(mint, tokenProgram);
         if (d.publicAmount > 0n) {
           const ata = getAssociatedTokenAddressSync(mint, d.publicRecipient, true, tokenProgram);
-          accounts.recipientToken = ata;
-          if (!(await this.connection.getAccountInfo(ata, 'confirmed'))) {
+          spendAccounts.recipientToken = ata;
+          accounts.recipientExists = !!(await this.connection.getAccountInfo(ata, 'confirmed'));
+          if (!accounts.recipientExists) {
             pre.push(createAssociatedTokenAccountIdempotentInstruction(payer, ata, d.publicRecipient, mint, tokenProgram));
           }
-          if (d.fee > 0n) accounts.feeToken = d.feeRecipient;
+          if (d.fee > 0n) spendAccounts.feeToken = d.feeRecipient;
         }
         if (d.lenderAmount > 0n) {
-          accounts.escrow = { lenderAddr: d.lenderAddr, loanRef: d.loanRef };
-          if (req.lenderToken !== undefined) accounts.lenderToken = await this.lenderAccount(keyOrBad(req.lenderToken, 'lenderToken'), mint, d.lenderAddr);
+          spendAccounts.escrow = { lenderAddr: d.lenderAddr, loanRef: d.loanRef };
+          if (req.lenderToken !== undefined) {
+            spendAccounts.lenderToken = await this.lenderAccount(keyOrBad(req.lenderToken, 'lenderToken'), mint, d.lenderAddr);
+            accounts.lenderTokenUsable = !!spendAccounts.lenderToken;
+          }
         }
       }
-      ops = [(buffer) => spendIx(this.programId, { ...accounts, buffer })];
+      ops = [(buffer) => spendIx(this.programId, { ...spendAccounts, buffer })];
       // as SolanaWallet.submitSpend: a lender account that cannot take the share never blocks the spend
-      if (accounts.lenderToken) ops.push((buffer) => spendIx(this.programId, { ...accounts, lenderToken: undefined, buffer }));
+      if (spendAccounts.lenderToken) ops.push((buffer) => spendIx(this.programId, { ...spendAccounts, lenderToken: undefined, buffer }));
     } else if (d.op === 'grant') {
       ops = [(buffer) => grantIx(this.programId, payer, buffer, d.nullifiers)];
     } else {
@@ -451,7 +506,75 @@ export class SolanaRelayer {
       throw badRequest('too_large', e instanceof Error ? e.message : String(e));
     }
     const fallbacks = ops.slice(1).map((mk) => [...plan.final.slice(0, -1), mk(plan.buffer)]);
-    return { op, decoded: d, fee: checked.fee, mint, plan, fallbacks, capacity: checked.capacity };
+    return { mint, plan, fallbacks, accounts };
+  }
+
+  /** Decodes, checks the fee and the chain state, and plans the transactions. Reads only. */
+  async prepare(body: unknown): Promise<PreparedRelay> {
+    const req = (body ?? {}) as SolanaRelayBody;
+    const checked = await this.checkTerms(body);
+    const refusal = this.chainRefusals(await this.chainFacts(checked.decoded))[0];
+    if (refusal) throw refusal;
+    const planned = await this.planFor(req, checked);
+    return { op: checked.op, decoded: checked.decoded, fee: checked.fee, mint: planned.mint, plan: planned.plan, fallbacks: planned.fallbacks, capacity: checked.capacity };
+  }
+
+  /**
+   * The relay checks as a report instead of a refusal: would `prepare` accept this request, and why not.
+   * A payload that does not decode (bad op, bad base64, bad extDataHash) still throws the relay API's 400.
+   * Reads only; nothing is staged or reserved.
+   */
+  async inspect(body: unknown): Promise<Inspection> {
+    const req = (body ?? {}) as SolanaRelayBody;
+    if (!SOLANA_OPS.includes(req.op as SolanaOp)) throw badRequest('bad_op', `op must be one of ${SOLANA_OPS.join(', ')}`);
+    const op = req.op as SolanaOp;
+    const payload = fromB64(req.payload as string);
+    if (payload.length === 0 || payload.length > BUFFER_MAX_LEN) throw badRequest('bad_payload', `payload must be 1..${BUFFER_MAX_LEN} bytes`);
+    const d = decodeRelayPayload(op, payload);
+    const refusals: RelayError[] = [];
+    let checked: CheckedTerms | undefined;
+    try {
+      checked = await this.checkTerms(body);
+    } catch (e) {
+      refusals.push(toRelayError(e));
+    }
+    // fee facts, whether or not the terms passed
+    const reqMint = typeof req.mint === 'string' ? (() => { try { return new PublicKey(req.mint as string); } catch { return undefined; } })() : undefined;
+    const feeMint = d.op === 'spend' ? (d.publicAsset.equals(PublicKey.default) ? undefined : d.publicAsset) : d.op === 'transact' ? reqMint : undefined;
+    const amount = publicAmountOf(d);
+    const min = feeMint ? this.opts.minFees.get(feeMint.toBase58()) : undefined;
+    const paid = d.op === 'transact' || d.op === 'spend' ? d.fee : 0n;
+    const feeAccount = feeMint && this.tokenPrograms.has(feeMint.toBase58()) ? this.feeAccount(feeMint).toBase58() : null;
+    const fee: Inspection['fee'] = {
+      paid: paid.toString(), required: min === undefined ? null : requiredFee(min, this.feeBps, amount).toString(), min: min === undefined ? null : min.toString(),
+      bps: this.feeBps, publicAmount: amount.toString(), mint: feeMint?.toBase58() ?? null, feeAccount,
+    };
+    let capacity: Inspection['capacity'] = null;
+    if (this.capacity) {
+      const t = checked?.capacity;
+      const capRefusal = refusals.find((r) => r.code === 'capacity_required' || r.code === 'over_capacity');
+      if (t) capacity = { needed: true, operator: t.operator, used: this.capacity.usage(t.operator).toString(), limit: t.limit.toString(), ok: true };
+      else if (capRefusal) capacity = { needed: true, operator: typeof req.operator === 'string' ? req.operator : null, used: null, limit: null, ok: false };
+      else if (checked) capacity = { needed: false, operator: null, used: null, limit: null, ok: true };
+    }
+    const facts = await this.chainFacts(d);
+    refusals.push(...this.chainRefusals(facts));
+    let accounts: Inspection['accounts'] = null;
+    let plan: Inspection['plan'] = null;
+    if (checked) {
+      try {
+        const planned = await this.planFor(req, checked);
+        accounts = planned.accounts;
+        plan = { payloadBytes: payload.length, setupTxs: planned.plan.setup.length, writeTxs: planned.plan.writes.length };
+      } catch (e) {
+        refusals.push(toRelayError(e));
+      }
+    }
+    return {
+      ok: refusals.length === 0, op, fee, capacity,
+      chain: { rootKnown: facts.rootKnown, nullifiersUnspent: facts.nullifiersUnspent, timestampFresh: facts.timestampFresh },
+      accounts, plan, refusals: refusals.map((r) => ({ status: r.status, code: r.code, message: r.message })),
+    };
   }
 
   /** A lender token account the spend may name: it must exist, hold `mint` and be owned by a key whose fieldOf is lenderAddr. Undefined otherwise (escrow). */
@@ -467,53 +590,84 @@ export class SolanaRelayer {
     }
   }
 
-  /** prepare, then stage, simulate and send. */
-  async relay(body: unknown): Promise<{ signature: string; computeUnits: number; op: SolanaOp; fee: string }> {
+  /**
+   * Takes a slot in a lane (the free lane, or the paid priority lane with its own count) or throws 503 busy.
+   * Returns the function that gives the slot back.
+   */
+  acquire(lane?: 'priority'): () => void {
+    if (lane === 'priority') {
+      const p = this.opts.priority;
+      if (!p) throw new RelayError(503, 'lane_disabled', 'this relayer has no priority lane');
+      if (this.busyPriority >= p.maxInFlight) throw new RelayError(503, 'busy', 'the priority lane is at capacity; retry shortly');
+      this.busyPriority++;
+      return () => { this.busyPriority--; };
+    }
     const max = this.opts.maxInFlight ?? 4;
     if (this.busy >= max) throw new RelayError(503, 'busy', 'the relayer is at capacity; retry shortly');
     this.busy++;
+    return () => { this.busy--; };
+  }
+
+  /** prepare, then stage, simulate and send. */
+  async relay(body: unknown, opts: RelayOptions = {}): Promise<RelayResult> {
+    const release = this.acquire(opts.lane);
     try {
-      const p = await this.prepare(body);
-      const release = this.inFlight.claim(nullifiersOf(p.decoded));
-      let uncount: (() => void) | undefined;
-      try {
-        if (p.capacity && this.capacity) uncount = this.capacity.reserve(p.capacity);
-        return { ...(await this.execute(p)), op: p.op, fee: p.fee.toString() };
-      } catch (e) {
-        uncount?.();
-        release();
-        throw e;
-      }
+      return await this.submit(await this.prepare(body), opts);
     } finally {
-      this.busy--;
+      release();
     }
   }
 
-  private async execute(p: PreparedRelay): Promise<{ signature: string; computeUnits: number }> {
+  /**
+   * The second half of `relay`: reserves the nullifiers and capacity of a prepared operation and sends it.
+   * The caller holds a lane slot (`acquire`). The x402 priority lane settles the payment between `prepare`
+   * and `submit`.
+   */
+  async submit(p: PreparedRelay, opts: RelayOptions = {}): Promise<RelayResult> {
+    const release = this.inFlight.claim(nullifiersOf(p.decoded));
+    let uncount: (() => void) | undefined;
+    try {
+      if (p.capacity && this.capacity) uncount = this.capacity.reserve(p.capacity);
+      const lane = opts.lane === 'priority' ? this.opts.priority : undefined;
+      const priority: PriorityOptions | undefined = lane && { maxLamports: lane.maxLamports, priceCeil: lane.priceCeil };
+      const sent = await this.execute(p, priority);
+      return {
+        ...sent, op: p.op, fee: p.fee.toString(),
+        ...(lane ? { lane: 'priority' as const, priorityFee: { maxLamports: lane.maxLamports, priceCeil: lane.priceCeil } } : {}),
+      };
+    } catch (e) {
+      uncount?.();
+      release();
+      throw e;
+    }
+  }
+
+  private async execute(p: PreparedRelay, priority?: PriorityOptions): Promise<{ signature: string; computeUnits: number }> {
     const payer = this.opts.payer;
     const tables = this.opts.lookupTables ?? [];
+    const io = this.io;
     try {
-      await stagePlan(this.connection, payer, p.plan);
+      await io.stagePlan(this.connection, payer, p.plan, priority);
     } catch (e) {
-      await abandonPlan(this.connection, this.programId, payer, p.plan);
+      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
       throw new RelayError(502, 'staging_failed', e instanceof Error ? e.message : String(e));
     }
     let chosen: TransactionInstruction[] | undefined;
     let logs: string[] = [];
     for (const candidate of [p.plan.final, ...p.fallbacks]) {
-      const sim = await simulateV0(this.connection, payer, candidate, tables);
+      const sim = await io.simulateV0(this.connection, payer, candidate, tables);
       if (sim.err === null) { chosen = candidate; break; }
       if (logs.length === 0) logs = sim.logs;
     }
     if (!chosen) {
-      await abandonPlan(this.connection, this.programId, payer, p.plan);
+      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
       throw new RelayError(422, 'simulation_failed', logs.slice(-6).join(' | ') || 'the operation does not simulate');
     }
     try {
-      const sent = await sendV0(this.connection, payer, chosen, tables);
+      const sent = await io.sendV0(this.connection, payer, chosen, tables, [], priority);
       return { signature: sent.signature, computeUnits: sent.computeUnits };
     } catch (e) {
-      await abandonPlan(this.connection, this.programId, payer, p.plan);
+      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
       throw new RelayError(502, 'send_failed', e instanceof Error ? e.message : String(e));
     }
   }

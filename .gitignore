@@ -10,3 +10,6 @@ solana/test-ledger/
 solana/target-verifiable/
 deploy/relayer-vercel/api/
 deploy/relayer-vercel/.vercel/
+deploy/relayer-vercel/circuits/
+integrations/*/dist/
+integrations/*/node_modules/
