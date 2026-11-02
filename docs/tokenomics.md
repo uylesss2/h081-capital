@@ -96,6 +96,11 @@ Mechanics:
   that takes the whole pool bumps the pool `generation`, which retires every share, including unbonding
   ones; the next deposit starts a fresh pool at 1:1.
 
+**On Solana mainnet** (`safety_pool` `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`, live since 2026-10-31): 14-day
+unbonding with shares still at risk, 7-day grace after a loan's expiry before a shortfall counts, caps of 100,000
+H081 per deposit and 1,000,000 H081 in total. Every cover needs the pool's underwriter (the config authority) to
+co-sign, and underwriting stays off until it is switched on with cover limits, so nothing is insured yet.
+
 Caveats the pricing work must address before any deployment:
 
 - With lender-chosen premiums and 1:1 valuation, a lender can fund a loan to itself, let it lapse past the
