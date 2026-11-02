@@ -26,7 +26,9 @@ What an external auditor is asked to review before any mainnet deployment. Nothi
 
 ## Known trust assumptions
 
-- Each program is made immutable after deployment (upgrade authority removed).
+- Every program is upgradeable. The upgrade authority is the deployer key `5WCpirBe1wHUk6PL2nU97pj87PtyaqH9S6UJUbd5z2W1`,
+  kept so the team can ship fixes and recover program rent; it can replace program code, including code that
+  moves vault balances. Reviewers should treat it as a trusted key.
 - The stipend_pool config authority can change deposit caps and pause deposits; it can never block withdrawals
   or move funds.
 - Mint authorities (permanent delegate, freeze, transfer hook) of listed mints can move or freeze vault balances.
