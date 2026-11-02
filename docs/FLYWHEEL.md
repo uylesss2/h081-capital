@@ -58,7 +58,8 @@ Rules enforced in code and process:
 
 Notes:
 
-- `stipend_pool` charges no fee and does not change. It stays immutable, ownerless and blind to the token.
+- `stipend_pool` charges no fee and does not change. It has no fee switch and no treasury cut, and it never reads
+  the token. (Like every program here it is upgradeable by the deployer key; see `docs/MAINNET-RUNBOOK.md`.)
   Anyone can run their own relayer with its own fee, or submit proofs directly and pay only network fees.
 - The relayer fee applies to withdrawals and public spends. The public leg is what leaves the pool's vault:
   the withdrawal amount, or a spend's public amount plus its lender share. Deposits are sent by the depositor
@@ -66,14 +67,15 @@ Notes:
 - For small loans the 0.25% fee rounds down, so a loan under 400 base units pays no origination fee.
 - If the treasury's token account for a loan asset is frozen (the asset's issuer froze it, or the mint creates
   accounts frozen), `fund` takes no fee rather than blocking every loan in that asset.
-- `stream_loan`'s `TREASURY` is a placeholder until the treasury multisig exists. Every production build
-  (including `solana/scripts/verifiable-build.sh`) refuses to compile while it is the placeholder; only the
-  localnet test builds opt in with the `localnet-treasury` feature. It must be set to the Squads vault before
-  any deploy.
+- `stream_loan`'s `TREASURY` is a placeholder in the source. Every production build (including
+  `solana/scripts/verifiable-build.sh`) refuses to compile while it is the placeholder; only the localnet test
+  builds opt in with the `localnet-treasury` feature. The mainnet build sets it to the Squads vault
+  `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq` (`TREASURY=… solana/scripts/build-phase2-mainnet.sh`, see
+  `docs/MAINNET-RUNBOOK.md`).
 - Fees are collected in whatever asset the operation used (USDG, SOL). They are not converted until the
   weekly buyback.
-- Rates are fixed for v1. `ORIGINATION_FEE_BPS` is a constant in an immutable program, so changing it means a
-  new program; the relayer rate is relayer configuration and any change is announced and recorded in the
+- Rates are fixed for v1. `ORIGINATION_FEE_BPS` is a compile-time constant with no admin setter, so changing it
+  means a program upgrade, which would be announced first; the relayer rate is relayer configuration and any change is announced and recorded in the
   ledger.
 
 ## 4. Treasury
