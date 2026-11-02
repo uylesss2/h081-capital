@@ -9,7 +9,7 @@ import {
 import {
   TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, unpackAccount,
 } from '@solana/spl-token';
-import { Account, type StipendAddress, type TreasuryNode } from '../client.js';
+import { Account, type StipendAddress, type TreasuryNode } from '../account.js';
 import {
   Allowance, LenderRef, Note, addressKey, allowanceCommitment, allowanceNullifier, lenderKey, nextRho, noteCommitment, noteNullifier, randomField,
   spendAllowance,
