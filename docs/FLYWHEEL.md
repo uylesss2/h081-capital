@@ -1,8 +1,9 @@
 # H081 flywheel: platform fees buy back H081
 
-Status 2026-10-31: **design, in build on branch `feat/flywheel`. Nothing in this document is live.** No platform
-fee is charged today, no treasury multisig exists yet, and no buyback has happened. Every step that moves real
-money needs an explicit go from the owner (section 9).
+Status 2026-11-02: **live on Solana mainnet since 2026-10-31.** The 0.25% loan origination fee is built into
+`stream_loan`, our relayer charges its 0.20% fee, and both are paid only to the Squads treasury (section 4). No
+buyback has run yet: the first one runs once platform fees have built up. Every step that moves real money needs
+an explicit go from the owner (section 9).
 
 This document is the specification for how fees the bank earns are used to buy H081 on the open market. It is
 not an offer or a promise of any price or return. Holding H081 pays nothing. Once the safety pool is live, half
