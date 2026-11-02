@@ -16,7 +16,7 @@ import { type Allowance, FIELD, allowanceCommitment, initCrypto, randomField, ra
 import { LEVELS } from '../../src/inputs.js';
 import { MerkleTree } from '../../src/merkle.js';
 import { Prover } from '../../src/prover.js';
-import { GRACE, registryPda } from '../../src/solana/lender.js';
+import { GRACE, registryPda, slotPda } from '../../src/solana/lender.js';
 import { poolPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE } from '../../src/solana/program.js';
 import { concatBytes, encodeTransactArgs, encodeTransactExt, extDataHash, fromBe, toB64 } from '../../src/solana/index.js';
@@ -53,11 +53,11 @@ describe('loan market reader', () => {
       if (k.equals(SYSVAR_CLOCK_PUBKEY)) return clockAccount(NOW);
       return null;
     },
-    getProgramAccounts: async (p: PublicKey, cfg: { filters: Array<{ dataSize: number }> }) => {
+    // slots live at ["slot", loan_ref] for loan_ref 1..nextLoanRef-1; the reader must ask for exactly those
+    getMultipleAccountsInfo: async (keys: PublicKey[]) => {
       rpcCalls++;
-      expect(p.equals(loanProgram)).toBe(true);
-      expect(cfg.filters).toEqual([{ dataSize: SLOT_ACCOUNT_BYTES }]);
-      return slots.map((data) => ({ pubkey: Keypair.generate().publicKey, account: { data, owner: loanProgram, lamports: 1, executable: false } }));
+      expect(keys.map((k) => k.toBase58())).toEqual([1n, 2n, 3n].map((r) => slotPda(r, loanProgram).toBase58()));
+      return slots.map((data) => ({ data, owner: loanProgram, lamports: 1, executable: false }));
     },
   } as unknown as Connection;
 
@@ -83,7 +83,7 @@ describe('loan market reader', () => {
   });
 
   it('answers 503 when the chain is not readable', async () => {
-    const broken = { getAccountInfo: async () => { throw new Error('rpc down'); }, getProgramAccounts: async () => [] } as unknown as Connection;
+    const broken = { getAccountInfo: async () => { throw new Error('rpc down'); }, getMultipleAccountsInfo: async () => [] } as unknown as Connection;
     const err = await new LoanMarketReader(broken, { programId: loanProgram }).snapshot().catch((e) => toRelayError(e));
     expect(err).toMatchObject({ status: 503, code: 'rpc' });
   });
