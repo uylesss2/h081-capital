@@ -13,7 +13,7 @@ export const protocolInfoAction = makeAction({
         usdg: { mint: '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH', decimals: 6, symbol: 'USDG' },
         h081: { mint: 'EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo', decimals: 6, symbol: 'H081' },
         caps: { perDepositUsdg: '1000', totalUsdg: '10000', inVaultUsdg: '2500', paused: false },
-        relayer: { url: 'https://h081-relayer.vercel.app', minFee: '50000', feeBps: 20, feeAccount: 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo', freeTier: '100000000' }, relayerStatus: 'ok',
+        relayer: { url: 'https://api.h081.xyz', minFee: '50000', feeBps: 20, feeAccount: 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo', freeTier: '100000000' }, relayerStatus: 'ok',
         account: { source: 'seed' },
         notice: 'H081 Capital is live on Solana mainnet; it is not audited yet; use at your own risk.',
       },

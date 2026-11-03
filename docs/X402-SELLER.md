@@ -85,7 +85,7 @@ artifacts the bundle ships.
 | `RELAYER_X402_ASSETS` | unset = the fee mints (USDG); `2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` to accept USDC as well |
 | `RELAYER_X402_PRICES` | `relay-priority=250000,preflight=2000,loans-market=1000,prove-disclose=20000` (your numbers; `0` disables a service) |
 | `RELAYER_X402_NETWORK` | unset (mainnet); checked against the RPC genesis hash at startup |
-| `RELAYER_X402_RESOURCE_BASE` | unset (`https://h081-relayer.vercel.app`) |
+| `RELAYER_X402_RESOURCE_BASE` | unset (`https://api.h081.xyz`) |
 | `RELAYER_X402_SERVICE_NAME`, `RELAYER_X402_TAGS`, `RELAYER_X402_ICON_URL` | `H081 Capital`; up to 5 tags; optional https png/jpg/webp/gif on h081.xyz (no SVG) |
 | `RELAYER_X402_PRIORITY_MAX_IN_FLIGHT`, `RELAYER_X402_PRIORITY_MAX_LAMPORTS`, `RELAYER_X402_PRIORITY_PRICE_CEIL` | defaults 4, 4000000, 5000000 |
 | `RELAYER_X402_FACILITATOR_URL`, `RELAYER_X402_FACILITATOR_TIMEOUT_MS`, `RELAYER_X402_MAX_TIMEOUT_SECONDS`, `RELAYER_X402_LOAN_PROGRAM_ID` | defaults (CDP, 30000, 120, `8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`) |
@@ -118,7 +118,7 @@ rate-limit token.
    node scripts/relayer-vercel.mjs
    cd deploy/relayer-vercel && vercel deploy --prod
    ```
-   Then `curl https://h081-relayer.vercel.app/v1/x402/catalog` must show `"enabled": true`, the services with
+   Then `curl https://api.h081.xyz/v1/x402/catalog` must show `"enabled": true`, the services with
    your prices, `payTo` = `EGvxic665…` and `assets[0].payToTokenAccount` = `DxpmCZ…`. `GET /v1/info` shows
    `x402.enabled: true`. If a configuration rule refused, the function answers 503 `unavailable` and `vercel logs`
    shows the `config:` reason; if the catalog says `enabled: false` with the credentials set, the relay API is
@@ -138,7 +138,7 @@ rate-limit token.
    ```
    curl -s -X POST https://api.cdp.coinbase.com/platform/v2/x402/validate \
      -H 'content-type: application/json' \
-     -d '{"resource":"https://h081-relayer.vercel.app/v1/x402/loans/market","method":"GET"}'
+     -d '{"resource":"https://api.h081.xyz/v1/x402/loans/market","method":"GET"}'
    ```
    and the same with `/v1/x402/solana/preflight` (`POST`), `/v1/x402/solana/relay-priority` (`POST`) and, when
    enabled, `/v1/x402/prove/disclose` (`POST`). Every preflight check must pass (`valid: true`,
@@ -155,9 +155,11 @@ rate-limit token.
 8. **Confirm the listing.** Within about 15 minutes:
    ```
    curl -s 'https://api.cdp.coinbase.com/platform/v2/x402/discovery/merchant?payTo=EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq'
-   curl -s -G https://api.cdp.coinbase.com/platform/v2/x402/discovery/search --data-urlencode urlSubstring=h081-relayer
+   curl -s -G https://api.cdp.coinbase.com/platform/v2/x402/discovery/search --data-urlencode urlSubstring=api.h081.xyz
    ```
    (public, no key; the full `…/discovery/resources` list has tens of thousands of entries and is not worth scanning).
+   Resources settled before the move to `https://api.h081.xyz` are listed under the old `h081-relayer.vercel.app`
+   alias (it still answers); a settlement on the new origin lists them under `api.h081.xyz`.
    Done 2026-11-02: `loans/market` listed after the first settlement; found by both lookups and by semantic search. The relayer logs the facilitator's
    `EXTENSION-RESPONSES` on every verify and settle as `x402 <service> settle bazaar success|processing|rejected: <reason>`
    (`vercel logs`); a `rejected` status names what to fix (description over 500 characters, placeholder text,

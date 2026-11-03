@@ -28,7 +28,7 @@ const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
 const MEMO = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
 
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(k); return i >= 0 ? process.argv[i + 1] : d; };
-const url = arg('--url', 'https://h081-relayer.vercel.app/v1/x402/loans/market')!;
+const url = arg('--url', 'https://api.h081.xyz/v1/x402/loans/market')!;
 const method = (arg('--method', 'GET')!).toUpperCase();
 if (method !== 'GET' && method !== 'POST') throw new Error('--method must be GET or POST');
 const body = arg('--body');

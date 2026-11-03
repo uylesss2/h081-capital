@@ -38,7 +38,7 @@ export interface RelayerServerOptions {
   corsOrigins?: string[];
   /** the x402 seller; undefined = paid routes answer 503 x402_disabled */
   x402?: X402Seller;
-  /** the public origin of this relayer (catalog URLs when x402 is disabled); default https://h081-relayer.vercel.app */
+  /** the public origin of this relayer (catalog URLs when x402 is disabled); default https://api.h081.xyz */
   publicBase?: string;
 }
 
@@ -59,7 +59,7 @@ const X402_PATHS = new Map<string, { id: X402ServiceId; method: 'GET' | 'POST' }
 export function createRelayerHandler(opts: RelayerServerOptions): RequestListener {
   const max = opts.maxBodyBytes ?? 256 * 1024;
   const cors = new Set(opts.corsOrigins ?? []);
-  const publicBase = (opts.publicBase ?? 'https://h081-relayer.vercel.app').replace(/\/+$/, '');
+  const publicBase = (opts.publicBase ?? 'https://api.h081.xyz').replace(/\/+$/, '');
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://relayer');
     const path = url.pathname.replace(/\/+$/, '');

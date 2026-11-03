@@ -34,7 +34,7 @@ export const MAINNET = {
   loanTreasury: 'EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq',
   /** The treasury's USDG token account (the relayer's fee account for USDG). */
   treasuryUsdgAccount: 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo',
-  relayer: 'https://h081-relayer.vercel.app',
+  relayer: 'https://api.h081.xyz',
   /** Deposit caps as initialized on chain; the chain is the source of truth (H081Bank.caps reads it). */
   caps: { perDeposit: 1_000_000_000n, total: 10_000_000_000n },
   /** capacity_stake caps for H081 (base units, 6 decimals). */
@@ -120,7 +120,7 @@ export const ENV_VARS = {
   H081_ACCOUNT_SK: 'optional shielded account secret (decimal or 0x hex field element); default: derived from the Solana key\'s secret seed',
   H081_DERIVE_ACCOUNT: 'optional; 1 = derive the account from the key\'s signature over the label instead (one such signature then equals the key)',
   H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com; the public RPC rate-limits history scans); only its host is ever reported',
-  H081_RELAYER_URL: 'relayer for withdrawals (default https://h081-relayer.vercel.app; empty = the signer sends directly, relayed withdrawals are not attempted)',
+  H081_RELAYER_URL: 'relayer for withdrawals (default https://api.h081.xyz; empty = the signer sends directly, relayed withdrawals are not attempted)',
   H081_CIRCUITS_DIR: 'where proving artifacts are stored (default ~/.h081/circuits)',
   H081_CIRCUITS_URL: 'where they are downloaded from (default https://www.h081.xyz/circuits/)',
   H081_POOL_PROGRAM_ID: 'stipend_pool program id (default mainnet E16DK…)',

@@ -123,7 +123,7 @@ Until a lender funds, nothing is borrowed: the budget sits in the pledged sub-ac
 | `H081_ACCOUNT_SK` | optional shielded account secret (decimal or 0x hex); default: derived from the agent key's secret seed |
 | `H081_DERIVE_ACCOUNT` | optional; `1` derives the account from the key's ed25519 signature over `h081/agent-account/v1` instead of its seed (the older construction). One such signature then holds the shielded balance: never combine with message-signing tools. |
 | `H081_RPC_URL` | Solana RPC; default `https://api.mainnet-beta.solana.com`. The public RPC rate-limits the history scan a sync needs (`getSignaturesForAddress` / `getTransaction`); a private RPC makes the first sync much faster. The scanned public event log is cached under `<H081_CIRCUITS_DIR>/../cache`. Only the RPC's host is ever reported (tool results, `info`, logs): a private RPC's API key in the path or query stays out of transcripts. |
-| `H081_RELAYER_URL` | relayer for withdrawals; default `https://h081-relayer.vercel.app`; empty = the agent key always sends directly (no relayed withdrawal is attempted). With a relayer set, a withdrawal that cannot go through it is refused, not sent directly. |
+| `H081_RELAYER_URL` | relayer for withdrawals; default `https://api.h081.xyz`; empty = the agent key always sends directly (no relayed withdrawal is attempted). With a relayer set, a withdrawal that cannot go through it is refused, not sent directly. |
 | `H081_CIRCUITS_DIR` | where the proving artifacts live; default `~/.h081/circuits` |
 | `H081_CIRCUITS_URL` | where they are downloaded from; default `https://www.h081.xyz/circuits/` |
 | `H081_MAX_DEPOSIT` | optional operator ceiling per deposit, base units, below the program cap |

@@ -101,7 +101,7 @@ stream_loan has no offer book and no matching. A loan starts with a lender who o
 | `H081_ACCOUNT_SK` | optional shielded account secret; default derived from the agent key's secret seed |
 | `H081_DERIVE_ACCOUNT` | optional; `1` derives the account from the key's signature over the label instead (one such signature then equals the key) |
 | `H081_RPC_URL` | RPC to use instead of the agent's connection; only its host is ever reported |
-| `H081_RELAYER_URL` | relayer for withdrawals; default `https://h081-relayer.vercel.app`; empty = direct sends only. With a relayer set, a withdrawal that cannot go through it is refused, never sent directly instead. |
+| `H081_RELAYER_URL` | relayer for withdrawals; default `https://api.h081.xyz`; empty = direct sends only. With a relayer set, a withdrawal that cannot go through it is refused, never sent directly instead. |
 | `H081_CIRCUITS_DIR`, `H081_CIRCUITS_URL` | where the proving artifacts live / come from |
 | `H081_MAX_DEPOSIT` | optional operator ceiling per deposit, base units |
 | `H081_POOL_PROGRAM_ID`, `H081_LOAN_PROGRAM_ID`, `H081_CAPACITY_PROGRAM_ID`, `H081_SAFETY_PROGRAM_ID`, `H081_USDG_MINT`, `H081_STAKE_MINT`, `H081_LOAN_TREASURY`, `H081_CLUSTER` | override the mainnet ids for a rehearsal validator; a cluster/id mismatch is refused before anything is signed |
