@@ -8,7 +8,8 @@ import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web
 import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { toRelayError } from '../../relayer/errors.js';
 import { type RelayIo, SolanaRelayer } from '../../relayer/solana.js';
-import { MAX_DESCRIPTION_LENGTH } from '../../relayer/x402/catalog.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import { MAX_DESCRIPTION_LENGTH, bazaarDeclaration } from '../../relayer/x402/catalog.js';
 import { LoanMarketReader, SLOT_ACCOUNT_BYTES } from '../../relayer/x402/loans.js';
 import { DiscloseProver, checkDiscloseRequest, discloseArtifacts, parseDiscloseRequest, rootOfPath } from '../../relayer/x402/prove.js';
 import { loansMarket, preflight, proveDisclose, relayPriority } from '../../relayer/x402/services.js';
@@ -33,6 +34,22 @@ describe('service descriptions', () => {
       expect(s.description.length, `${s.id} description length`).toBeLessThanOrEqual(MAX_DESCRIPTION_LENGTH);
       expect(s.description).toContain('live on Solana mainnet, not audited yet; use at your own risk');
       expect(s.description).not.toMatch(/no audit planned/i);
+    }
+  });
+
+  // The Bazaar validates each declaration's `info` against its `schema` and refuses the listing ("invalid discovery
+  // configuration") when the example does not match: prove-disclose shipped with "0x..." placeholders and was refused.
+  it('every Bazaar declaration validates: the example input and output satisfy the declared schema (JSON Schema 2020-12)', () => {
+    const none = undefined as never;
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    for (const s of [relayPriority(none), preflight(none), loansMarket(none), proveDisclose(undefined)]) {
+      const d = bazaarDeclaration(s);
+      const validate = ajv.compile(d.schema);
+      expect(validate(d.info), `${s.id}: ${ajv.errorsText(validate.errors)}`).toBe(true);
+      if (s.method === 'POST') {
+        const body = ajv.compile(s.inputSchema);
+        expect(body(s.inputExample), `${s.id} inputExample: ${ajv.errorsText(body.errors)}`).toBe(true);
+      }
     }
   });
 });

@@ -142,13 +142,15 @@ export function proveDisclose(prover: DiscloseProver | undefined): X402Service<D
     description: 'Proves a statement about a stipend_pool allowance (Groth16 disclose circuit): remaining at least, lifetime spend at most or window spend '
       + 'at most a bound, for an audience, as of a root the pool knows. Input: the allowance figures and policy (the prover sees them), its Merkle path, '
       + 'the bound and the audience; no spending key. Output: the proof, its public signals and the payload for verify_disclosure. ' + DISCLAIMER,
+    // every value must satisfy DISCLOSE_BODY_SCHEMA: the Bazaar checks the example against it and refuses the listing
+    // ("invalid discovery configuration") otherwise. Illustrative field elements, not a real allowance.
     inputExample: {
-      root: '0x1a2b...', kind: 'remainingAtLeast', bound: '600', audience: '77',
+      root: '0x1a2b3c4d', kind: 'remainingAtLeast', bound: '600', audience: '77',
       allowance: {
-        asset: '0x1111111111111111111111111111111111111111', remaining: '640', agentPk: '0x2c3d...', windowId: '0', windowSpent: '0', rho: '0x4e5f...', pledgePaid: '0',
-        policy: { lifetimeCap: '1000', windowCap: '0', windowLen: '86400', maxPerTx: '0', expiry: '0', recipientRoot: '0', ownerPk: '0x6a7b...', streamRate: '0', streamStart: '0', lender: '0', pledgeBps: '0' },
+        asset: '0x1111111111111111111111111111111111111111', remaining: '640', agentPk: '0x2c3d4e5f', windowId: '0', windowSpent: '0', rho: '0x4e5f6a7b', pledgePaid: '0',
+        policy: { lifetimeCap: '1000', windowCap: '0', windowLen: '86400', maxPerTx: '0', expiry: '0', recipientRoot: '0', ownerPk: '0x6a7b8c9d', streamRate: '0', streamStart: '0', lender: '0', pledgeBps: '0' },
       },
-      path: { pathIndices: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], pathElements: ['0x8c9d...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...', '0x...'] },
+      path: { pathIndices: Array(20).fill(0), pathElements: ['0x8c9d0e1f', ...Array(19).fill('0x0')] },
     },
     inputSchema: DISCLOSE_BODY_SCHEMA,
     outputExample: {
