@@ -76,7 +76,9 @@ async function checkDisclose() {
   await wallet.prove(o, 'spentAtMost', bound, 1n);
   console.log(`local disclose check: spentAtMost ${bound} proves (remaining ${o.allowance.remaining}, cap ${o.allowance.policy.lifetimeCap})`);
 }
-if (!record.proveDisclose) await checkDisclose();
+// --redo-disclose: pay prove-disclose once more (e.g. after a refused Bazaar listing), on the existing allowance
+const REDO_DISCLOSE = process.argv.includes("--redo-disclose");
+if (!record.proveDisclose || REDO_DISCLOSE) await checkDisclose();
 if (!SEND) { console.log('dry run: nothing sent'); process.exit(0); }
 
 // 1. deposit
@@ -94,7 +96,7 @@ if (!record.proveDisclose && wallet.agentAllowances(USDG).length === 0) {
   console.log(`grant ${GRANT}: ${r.tx.signature}; SOL now ${await sol()}`);
 }
 // 3. prove-disclose
-if (!record.proveDisclose) {
+if (!record.proveDisclose || REDO_DISCLOSE) {
   await wallet.sync();
   const owned = wallet.agentAllowances(USDG)[0];
   if (!owned) throw new Error('no allowance found after grant');

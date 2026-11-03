@@ -126,6 +126,16 @@ describe('x402 adapter', () => {
     // the lifetime share is exhausted: nothing more goes to the lender
     const done = a(2500n, 250n * U);
     expect(grossFor(done, 10n * U)).toBe(10n * U);
+    // a high pledge with the lifetime share nearly paid out: the gross is want + what is left of the share, found
+    // at once (a unit-by-unit walk from the uncapped estimate took an hour and a half here)
+    for (const [bps, left] of [[9999n, 3n], [9000n, 1n], [9000n, 123_456n], [5000n, 999_999n]] as const) {
+      const nearlyDone = a(bps, (1_000n * U * bps) / 10000n - left);
+      const t = Date.now();
+      const g = grossFor(nearlyDone, 10n * U, 5n);
+      expect(Date.now() - t).toBeLessThan(1000);
+      expect(g).toBe(10n * U + 5n + left);
+      expect(g - lenderShare(nearlyDone, g) - 5n).toBe(10n * U);
+    }
     expect(() => grossFor(a(10000n), 1n)).toThrow(/fully pledged/);
   });
 
