@@ -11,7 +11,7 @@ const LOCALNET_CAPACITY_ID = '6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3';
 
 /** stream_loan on Solana mainnet (docs/MAINNET-RUNBOOK.md). */
 export const MAINNET_LOAN_PROGRAM_ID = '8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4';
-export const DEFAULT_X402_RESOURCE_BASE = 'https://h081-relayer.vercel.app';
+export const DEFAULT_X402_RESOURCE_BASE = 'https://api.h081.xyz';
 export const DEFAULT_X402_SERVICE_NAME = 'H081 Capital';
 export const DEFAULT_X402_TAGS = ['solana', 'privacy', 'bank', 'agents', 'loans'];
 

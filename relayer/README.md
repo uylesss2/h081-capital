@@ -6,7 +6,8 @@ and the relayer's address are bound into the proof (`extDataHash`), so the relay
 submit or not; it cannot change the fee or the destination.
 
 **Status: MVP, hosted for mainnet** as the Vercel project `h081-relayer` (serverless, `relayer/vercel.ts`; bundle with
-`node scripts/relayer-vercel.mjs`, then `vercel deploy --prod` in `deploy/relayer-vercel/`). Hot wallet
+`node scripts/relayer-vercel.mjs`, then `vercel deploy --prod` in `deploy/relayer-vercel/`), served at `https://api.h081.xyz` (the old
+`https://h081-relayer.vercel.app` alias still answers). Hot wallet
 `DWp7dJ6QZxqtUDhMy7JB6UJru47J94bQSJNEdG4QrjjA` (pays transaction fees only); fees go to the treasury
 `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`; minimum fee 0.05 USDG, 0.20% above that; capacity_stake on.
 Unit tests (`npm run test:relayer`) and the localnet suites; not load-tested, not audited yet. The x402 paid
@@ -57,7 +58,7 @@ which case Solana relaying must be configured):
 | `RELAYER_X402_ASSETS` | comma-separated 6-decimal mints accepted for payment; default: the Solana fee mints (USDG); **set it to USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` with the CDP facilitator, which refuses USDG at verify preflight** (docs/X402-SELLER.md section 5) |
 | `RELAYER_X402_PAY_TO_TOKEN_ACCOUNTS` | `mint=tokenAccount,...` pins: startup asserts ATA(payTo, mint) equals each (USDG: `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo`); a mismatch refuses to start; a missing ATA leaves the seller off (`x402: seller off:` in the log, free relay API unaffected) until the owner creates it from the vault; the relayer never sends a transaction for it |
 | `RELAYER_X402_PRICES` | `service=amount,...` in 6-decimal base units; defaults `relay-priority=250000,preflight=2000,loans-market=1000,prove-disclose=20000`; `0` disables a service |
-| `RELAYER_X402_RESOURCE_BASE` | https origin the resource URLs advertise (default `https://h081-relayer.vercel.app`) |
+| `RELAYER_X402_RESOURCE_BASE` | https origin the resource URLs advertise (default `https://api.h081.xyz`) |
 | `RELAYER_X402_MAX_TIMEOUT_SECONDS` | `maxTimeoutSeconds` in the requirements (default 120) |
 | `RELAYER_X402_SERVICE_NAME`, `RELAYER_X402_TAGS`, `RELAYER_X402_ICON_URL` | Bazaar listing: name (default `H081 Capital`, at most 32 ASCII), at most 5 tags (default `solana,privacy,bank,agents,loans`), optional https png/jpg/webp/gif icon |
 | `RELAYER_X402_PRIORITY_MAX_IN_FLIGHT`, `RELAYER_X402_PRIORITY_MAX_LAMPORTS`, `RELAYER_X402_PRIORITY_PRICE_CEIL` | the priority lane: its own in-flight count (default 4), priority fee cap per transaction in lamports (default 4,000,000) and ceiling in micro-lamports per CU (default 5,000,000) |
