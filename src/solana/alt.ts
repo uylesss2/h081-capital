@@ -18,7 +18,7 @@ import {
 } from '@solana/web3.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { randomSeed } from './buffer.js';
-import { budgetReserve, encodeSig, sendSigned, withBudget } from './send.js';
+import { type PriorityOptions, budgetReserve, encodeSig, sendSigned, withBudget } from './send.js';
 import { eventAuthorityPda, poolPda, vaultAuthorityPda, vaultPda, bufferPda } from './pda.js';
 import { BUFFER_GROW_STEP, BUFFER_MAX_INIT, BUFFER_MAX_LEN, bufferCloseIx, bufferGrowIx, bufferOpenIx, bufferWriteIx } from './program.js';
 
@@ -190,8 +190,11 @@ export function legacyTransactions(payloadLength: number, writeChunk = 900): num
 
 export interface SentV0 { signature: string; computeUnits: number; logs: string[] }
 
-export async function sendV0(connection: Connection, payer: Keypair, instructions: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = [], signers: Keypair[] = []): Promise<SentV0> {
-  const full = await withBudget(connection, payer.publicKey, instructions, lookupTables);
+export async function sendV0(
+  connection: Connection, payer: Keypair, instructions: TransactionInstruction[], lookupTables: AddressLookupTableAccount[] = [], signers: Keypair[] = [],
+  priority?: PriorityOptions,
+): Promise<SentV0> {
+  const full = await withBudget(connection, payer.publicKey, instructions, lookupTables, priority);
   const latest = await connection.getLatestBlockhash('confirmed');
   const tx = buildV0Transaction(payer.publicKey, full, latest.blockhash, lookupTables);
   tx.sign([payer, ...signers]);
@@ -210,11 +213,11 @@ export async function simulateV0(connection: Connection, payer: Keypair, instruc
 }
 
 /** Sends the setup and write transactions of a plan (writes 16 at a time). Returns their signatures. */
-export async function stagePlan(connection: Connection, payer: Keypair, plan: OpPlan): Promise<string[]> {
+export async function stagePlan(connection: Connection, payer: Keypair, plan: OpPlan, priority?: PriorityOptions): Promise<string[]> {
   const sigs: string[] = [];
-  for (const ixs of plan.setup) sigs.push((await sendV0(connection, payer, ixs)).signature);
+  for (const ixs of plan.setup) sigs.push((await sendV0(connection, payer, ixs, [], [], priority)).signature);
   for (let i = 0; i < plan.writes.length; i += 16) {
-    const batch = await Promise.all(plan.writes.slice(i, i + 16).map((ixs) => sendV0(connection, payer, ixs)));
+    const batch = await Promise.all(plan.writes.slice(i, i + 16).map((ixs) => sendV0(connection, payer, ixs, [], [], priority)));
     sigs.push(...batch.map((s) => s.signature));
   }
   return sigs;

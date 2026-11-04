@@ -14,7 +14,8 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # a cold cache spends ~35 min generating pot17 before the tests; warm runs are much shorter
+    timeout-minutes: 120
     env:
       NODE_OPTIONS: --max-old-space-size=8192
     steps:
@@ -22,7 +23,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - run: npm ci
@@ -30,7 +31,7 @@ jobs:
       # One dev contribution is enough for tests; the file only depends on the curve and the power.
       - name: Cache powers of tau
         id: ptau
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: circuits/ptau/pot17.ptau
           key: ptau-bn128-17-v1
@@ -45,11 +46,19 @@ jobs:
           npx snarkjs powersoftau prepare phase2 /tmp/pot17_0001.ptau circuits/ptau/pot17.ptau
           rm -f /tmp/pot17_0000.ptau /tmp/pot17_0001.ptau
 
+      # Saved right away, so a later failing or cancelled step does not throw the 35-minute generation away.
+      - name: Save powers of tau
+        if: steps.ptau.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: circuits/ptau/pot17.ptau
+          key: ptau-bn128-17-v1
+
       # Compiled circuits, proving keys and verifiers are reused while the circuit sources and the
       # toolchain are unchanged. Builds and setups run one circuit at a time, never in parallel.
       - name: Cache circuit builds
         id: circuits
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             build/circuits
@@ -63,6 +72,15 @@ jobs:
       - name: Groth16 setup and verifiers
         if: steps.circuits.outputs.cache-hit != 'true'
         run: npm run circuits:setup
+
+      - name: Save circuit builds
+        if: steps.circuits.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/circuits
+            contracts/verifiers
+          key: ${{ steps.circuits.outputs.cache-primary-key }}
 
       - run: npm run contracts:compile
 

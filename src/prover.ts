@@ -20,10 +20,12 @@ export interface ProofResult {
 
 export type CircuitInput = Record<string, bigint | number | string | (bigint | number | string)[] | (bigint | number | string)[][]>;
 
-const defaultBuildDir = resolve(import.meta.dirname, '..', 'build', 'circuits');
+// Resolved lazily: a CommonJS bundle has no import.meta.dirname, and a consumer that passes its own directory
+// (or overrides `paths`, as integrations/core/circuits.ts does) must not fail at load time because of it.
+const defaultBuildDir = () => resolve(import.meta.dirname ?? process.cwd(), '..', 'build', 'circuits');
 
 export class Prover {
-  constructor(private readonly buildDir: string = defaultBuildDir) {}
+  constructor(protected readonly buildDir: string = defaultBuildDir()) {}
 
   paths(name: CircuitName) {
     const dir = join(this.buildDir, name);

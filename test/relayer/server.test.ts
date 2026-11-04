@@ -69,7 +69,8 @@ describe('relayer CORS', () => {
     const pre = await fetch(`${url}/v1/solana/relay`, { method: 'OPTIONS', headers: { origin: site } });
     expect(pre.status).toBe(204);
     expect(pre.headers.get('access-control-allow-origin')).toBe(site);
-    expect(pre.headers.get('access-control-allow-headers')).toBe('content-type');
+    expect(pre.headers.get('access-control-allow-headers')).toBe('content-type, payment-signature');
+    expect(pre.headers.get('access-control-expose-headers')).toBe('PAYMENT-REQUIRED, PAYMENT-RESPONSE');
     expect((await fetch(`${url}/v1/info`, { headers: { origin: site } })).headers.get('access-control-allow-origin')).toBe(site);
     const other = await fetch(`${url}/v1/solana/relay`, { method: 'OPTIONS', headers: { origin: 'https://evil.example' } });
     expect(other.status).toBe(403);

@@ -19,7 +19,9 @@ const node = (...args: string[]) => {
 const preflight = (...args: string[]) => node(join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(root, 'scripts', 'solana-preflight.mts'), ...args);
 
 describe.skipIf(!built)('deploy pre-flight', () => {
-  it('vk.rs and zeros.rs match the verifying keys in build/circuits', () => {
+  // vk.rs holds the mainnet verifying keys from the team's trusted setup. CI builds its own throwaway setup (a fresh
+  // pot17 and keys), so its build/circuits can never match: the check is meaningful only where the real setup is.
+  it.skipIf(process.env.CI === 'true')('vk.rs and zeros.rs match the verifying keys in build/circuits', () => {
     const r = node(join(root, 'scripts', 'gen-solana-vk.mjs'), '--check');
     expect(r.out).toContain('match');
     expect(r.status).toBe(0);

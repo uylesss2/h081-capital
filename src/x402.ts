@@ -115,11 +115,18 @@ export function grossFor(a: Allowance, net: bigint, fee = 0n): bigint {
   const bps = a.policy.pledgeBps;
   if (bps === 0n) return want;
   if (bps >= 10000n) throw new Error('a fully pledged allowance pays nothing to a vendor');
+  // The payout g - lenderShare(a, g) never decreases as g grows (the share grows by at most one unit per unit of g
+  // and is capped by the lifetime share), so the smallest gross is found by bisection between `want` (no share at
+  // all) and the gross that covers a full, uncapped share. A linear walk is not an option here: with a high pledge
+  // and the lifetime share nearly paid out, those two bounds are billions of units apart.
   const pays = (g: bigint) => g - lenderShare(a, g) >= want;
-  let g = (want * 10000n + (10000n - bps) - 1n) / (10000n - bps);
-  while (g > want && pays(g - 1n)) g--;
-  while (!pays(g)) g++;
-  return g;
+  let lo = want;
+  let hi = (want * 10000n + (10000n - bps) - 1n) / (10000n - bps);
+  while (lo < hi) {
+    const mid = (lo + hi) / 2n;
+    if (pays(mid)) hi = mid; else lo = mid + 1n;
+  }
+  return lo;
 }
 
 // ------------------------------------------------------------------ client

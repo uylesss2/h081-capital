@@ -1,9 +1,8 @@
 # H081 flywheel: platform fees buy back H081
 
-Status 2026-11-02: **live on Solana mainnet since 2026-10-31.** The 0.25% loan origination fee is built into
-`stream_loan`, our relayer charges its 0.20% fee, and both are paid only to the Squads treasury (section 4). No
-buyback has run yet: the first one runs once platform fees have built up. Every step that moves real money needs
-an explicit go from the owner (section 9).
+Status 2026-10-31: **design, in build on branch `feat/flywheel`. Nothing in this document is live.** No platform
+fee is charged today, no treasury multisig exists yet, and no buyback has happened. Every step that moves real
+money needs an explicit go from the owner (section 9).
 
 This document is the specification for how fees the bank earns are used to buy H081 on the open market. It is
 not an offer or a promise of any price or return. Holding H081 pays nothing. Once the safety pool is live, half
@@ -54,12 +53,11 @@ Rules enforced in code and process:
 |---|---|---|---|
 | Our relayer | 0.20% of the operation's public leg, with a per-asset minimum that covers transaction costs | the proof's existing `fee` field; the relayer requires `fee >= max(min, 0.20% x public amount)` and requires the fee account to be the treasury's token account for that asset (`RELAYER_SOLANA_TREASURY`, required; there is no fallback to the relayer's own wallet) | no |
 | Loan origination (`stream_loan::fund`) | 0.25% of principal, deducted from the payout | compile-time `TREASURY` and `ORIGINATION_FEE_BPS = 25` constants in `stream_loan`, no admin key; the borrower's slot still owes the full principal | no (`stream_loan` only) |
-| Paid services we host (MCP tools via x402) | per call, priced per tool | the x402 `payTo` address is the treasury | no |
+| Paid services we host (x402 endpoints on the relayer: priority relay lane, relay preflight, loan-market data, disclosure proving; `docs/X402-SELLER.md`) | per call, priced per service in USDG (optionally USDC) base units, settled through Coinbase's CDP x402 facilitator | the x402 `payTo` is the treasury vault `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`; the payment lands in its token account (USDG: `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo`); the relayer refuses any other payTo at startup | no |
 
 Notes:
 
-- `stipend_pool` charges no fee and does not change. It has no fee switch and no treasury cut, and it never reads
-  the token. (Like every program here it is upgradeable by the deployer key; see `docs/MAINNET-RUNBOOK.md`.)
+- `stipend_pool` charges no fee and does not change. It stays immutable, ownerless and blind to the token.
   Anyone can run their own relayer with its own fee, or submit proofs directly and pay only network fees.
 - The relayer fee applies to withdrawals and public spends. The public leg is what leaves the pool's vault:
   the withdrawal amount, or a spend's public amount plus its lender share. Deposits are sent by the depositor
@@ -67,15 +65,14 @@ Notes:
 - For small loans the 0.25% fee rounds down, so a loan under 400 base units pays no origination fee.
 - If the treasury's token account for a loan asset is frozen (the asset's issuer froze it, or the mint creates
   accounts frozen), `fund` takes no fee rather than blocking every loan in that asset.
-- `stream_loan`'s `TREASURY` is a placeholder in the source. Every production build (including
-  `solana/scripts/verifiable-build.sh`) refuses to compile while it is the placeholder; only the localnet test
-  builds opt in with the `localnet-treasury` feature. The mainnet build sets it to the Squads vault
-  `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq` (`TREASURY=… solana/scripts/build-phase2-mainnet.sh`, see
-  `docs/MAINNET-RUNBOOK.md`).
+- `stream_loan`'s `TREASURY` is a placeholder until the treasury multisig exists. Every production build
+  (including `solana/scripts/verifiable-build.sh`) refuses to compile while it is the placeholder; only the
+  localnet test builds opt in with the `localnet-treasury` feature. It must be set to the Squads vault before
+  any deploy.
 - Fees are collected in whatever asset the operation used (USDG, SOL). They are not converted until the
   weekly buyback.
-- Rates are fixed for v1. `ORIGINATION_FEE_BPS` is a compile-time constant with no admin setter, so changing it
-  means a program upgrade, which would be announced first; the relayer rate is relayer configuration and any change is announced and recorded in the
+- Rates are fixed for v1. `ORIGINATION_FEE_BPS` is a constant in an immutable program, so changing it means a
+  new program; the relayer rate is relayer configuration and any change is announced and recorded in the
   ledger.
 
 ## 4. Treasury
@@ -111,7 +108,7 @@ Notes:
 - **Record:** `buyback.mts record` only accepts signatures that carry out a transaction of that proposal (same
   programs, accounts and data), and notes skipped chunks or a missing settle in the ledger entry.
 - **Programs:** on mainnet only the official mint and pool are accepted, and the top-up only calls the pinned
-  mainnet `safety_pool` program id `HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`.
+  mainnet `safety_pool` program id (none until it is deployed, so until then every run is 100% burn).
 
 **Disclosure:** a buyback is an ordinary trade on the pool. It pays the pool's normal trading fee like any
 other buyer (today 2% of each trade: 0.4% to Meteora, 1.6% to the creator). The flywheel gets no discount and
@@ -122,10 +119,8 @@ it.
 
 | Phase | Burn | `safety_pool.top_up` |
 |---|---|---|
-| Safety pool has stakers and at least 10,000 H081 | 50% | 50% |
-| Safety pool has no stakers, or less than 10,000 H081 | 100% | 0% |
-
-The safety pool is live on mainnet since 2026-10-31, so each run checks the pool first and picks the row.
+| Until the safety pool is live on mainnet | 100% | 0% |
+| After the safety pool is live | 50% | 50% |
 
 - **Burn** uses the SPL token `burn` instruction from the treasury's H081 account, which reduces the total
   supply. Supply is fixed (no mint authority), so burned tokens cannot be re-created.

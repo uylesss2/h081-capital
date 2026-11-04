@@ -2,9 +2,47 @@
 // operator names). See relayer/README.md for the list. Keys never live in this repository.
 import { PublicKey } from '@solana/web3.js';
 import { getAddress } from 'ethers';
+import { DEFAULT_X402_PRICES, X402_SERVICE_IDS, type X402ServiceId } from './x402/catalog.js';
+import { DEFAULT_FACILITATOR_TIMEOUT_MS, DEFAULT_FACILITATOR_URL } from './x402/facilitator.js';
+import { SOLANA_MAINNET_NETWORK } from './x402/types.js';
 
 /** capacity_stake's localnet program id (src/solana/token.ts LOCALNET_CAPACITY_STAKE_PROGRAM_ID). */
 const LOCALNET_CAPACITY_ID = '6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3';
+
+/** stream_loan on Solana mainnet (docs/MAINNET-RUNBOOK.md). */
+export const MAINNET_LOAN_PROGRAM_ID = '8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4';
+export const DEFAULT_X402_RESOURCE_BASE = 'https://api.h081.xyz';
+export const DEFAULT_X402_SERVICE_NAME = 'H081 Capital';
+export const DEFAULT_X402_TAGS = ['solana', 'privacy', 'bank', 'agents', 'loans'];
+
+/** The x402 seller (paid endpoints settled through the CDP facilitator); present only with CDP credentials. */
+export interface X402Config {
+  facilitatorUrl: string;
+  apiKeyId: string;
+  apiKeySecret: string;
+  facilitatorTimeoutMs: number;
+  /** CAIP-2 network id (checked against the RPC's genesis hash at startup) */
+  network: string;
+  /** base58 owner of the payment token accounts: the platform treasury (must equal RELAYER_SOLANA_TREASURY) */
+  payTo: string;
+  /** mints (base58) accepted for payment; each must have 6 decimals */
+  assets: string[];
+  /** mint -> expected ATA(payTo, mint), asserted at startup when given */
+  payToTokenAccounts: Map<string, string>;
+  /** price per service in 6-decimal base units; 0 disables the service */
+  prices: Map<X402ServiceId, bigint>;
+  /** https origin the resource URLs are built on */
+  resourceBase: string;
+  maxTimeoutSeconds: number;
+  serviceName: string;
+  tags: string[];
+  iconUrl?: string;
+  priority: { maxInFlight: number; maxLamports: number; priceCeil: number };
+  /** build/circuits-style directory holding disclose/ artifacts; absent = prove-disclose answers 503 service_disabled */
+  circuitsDir?: string;
+  discloseVkeySha256?: string;
+  loanProgramId: string;
+}
 
 export interface RelayerConfig {
   host: string;
@@ -25,6 +63,7 @@ export interface RelayerConfig {
     /** capacity_stake enforcement; absent = off */
     capacity?: { programId?: string; mint: string; freeTier: bigint; assets: string[] };
   };
+  x402?: X402Config;
 }
 
 export class ConfigError extends Error {}
@@ -144,5 +183,70 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     };
   }
   if (!cfg.evm && !cfg.solana) throw new ConfigError('configure at least one chain: RELAYER_EVM_RPC and/or RELAYER_SOLANA_RPC');
+  cfg.x402 = loadX402Config(env, cfg);
   return cfg;
+}
+
+const list = (v: string | undefined) => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+
+/**
+ * The x402 seller: enabled only when both CDP credentials are set (one alone is a configuration error).
+ * payTo is the platform treasury (RELAYER_SOLANA_TREASURY) and nothing else: paid services are protocol
+ * revenue; the H081 token's trading creator fees are the team's and never pass through here.
+ */
+export function loadX402Config(env: Record<string, string | undefined>, cfg: Pick<RelayerConfig, 'solana'>): X402Config | undefined {
+  const apiKeyId = env.CDP_API_KEY_ID || undefined;
+  const apiKeySecret = env.CDP_API_KEY_SECRET || undefined;
+  if (!apiKeyId && !apiKeySecret) return undefined;
+  if (!apiKeyId || !apiKeySecret) throw new ConfigError('x402: set both CDP_API_KEY_ID and CDP_API_KEY_SECRET (or neither to disable the paid endpoints)');
+  if (!cfg.solana) throw new ConfigError('x402: the paid endpoints need Solana relaying (RELAYER_SOLANA_RPC)');
+  const network = env.RELAYER_X402_NETWORK || SOLANA_MAINNET_NETWORK;
+  if (!/^solana:[1-9A-HJ-NP-Za-km-z]{32}$/.test(network)) throw new ConfigError('RELAYER_X402_NETWORK must be a Solana CAIP-2 id (solana:<32 chars of the genesis hash>)');
+  const payToRaw = env.RELAYER_X402_PAY_TO || cfg.solana.treasury;
+  if (!isKey(payToRaw)) throw new ConfigError('RELAYER_X402_PAY_TO is not a public key');
+  const payTo = new PublicKey(payToRaw).toBase58();
+  if (payTo !== cfg.solana.treasury) throw new ConfigError(`x402 payTo must be the platform treasury ${cfg.solana.treasury} (RELAYER_SOLANA_TREASURY)`);
+  if (isDenyListed(payTo)) throw new ConfigError(`x402 payTo ${payTo} is an H081 launch wallet; paid services never pay a launch wallet`);
+  const assets = env.RELAYER_X402_ASSETS ? list(env.RELAYER_X402_ASSETS) : [...cfg.solana.minFees.keys()];
+  if (assets.length === 0) throw new ConfigError('RELAYER_X402_ASSETS is empty (and no Solana fee mint to default to)');
+  for (const a of assets) if (!isKey(a)) throw new ConfigError(`RELAYER_X402_ASSETS: ${a} is not a public key`);
+  const payToTokenAccounts = new Map<string, string>();
+  for (const part of list(env.RELAYER_X402_PAY_TO_TOKEN_ACCOUNTS)) {
+    const [mint, ata] = part.split('=').map((s) => s.trim());
+    if (!mint || !ata || !isKey(mint) || !isKey(ata)) throw new ConfigError(`RELAYER_X402_PAY_TO_TOKEN_ACCOUNTS: "${part}" is not mint=tokenAccount`);
+    payToTokenAccounts.set(new PublicKey(mint).toBase58(), new PublicKey(ata).toBase58());
+  }
+  const prices = new Map<X402ServiceId, bigint>(X402_SERVICE_IDS.map((id) => [id, DEFAULT_X402_PRICES[id]]));
+  for (const part of list(env.RELAYER_X402_PRICES)) {
+    const [id, amount] = part.split('=').map((s) => s.trim());
+    if (!id || amount === undefined || !/^\d+$/.test(amount)) throw new ConfigError(`RELAYER_X402_PRICES: "${part}" is not service=amount`);
+    if (!(X402_SERVICE_IDS as readonly string[]).includes(id)) throw new ConfigError(`RELAYER_X402_PRICES: unknown service "${id}" (${X402_SERVICE_IDS.join(', ')})`);
+    prices.set(id as X402ServiceId, BigInt(amount));
+  }
+  const resourceBase = (env.RELAYER_X402_RESOURCE_BASE || DEFAULT_X402_RESOURCE_BASE).replace(/\/+$/, '');
+  let okBase = false;
+  try { const u = new URL(resourceBase); okBase = u.protocol === 'https:' && u.origin === resourceBase; } catch { /* not a URL */ }
+  if (!okBase) throw new ConfigError('RELAYER_X402_RESOURCE_BASE must be an https origin (https://host[:port])');
+  const serviceName = env.RELAYER_X402_SERVICE_NAME || DEFAULT_X402_SERVICE_NAME;
+  if (serviceName.length > 32 || !/^[\x20-\x7e]+$/.test(serviceName)) throw new ConfigError('RELAYER_X402_SERVICE_NAME must be at most 32 printable ASCII characters');
+  const tags = env.RELAYER_X402_TAGS === undefined ? DEFAULT_X402_TAGS : list(env.RELAYER_X402_TAGS);
+  if (tags.length > 5 || tags.some((t) => t.length > 32)) throw new ConfigError('RELAYER_X402_TAGS: at most 5 tags of at most 32 characters');
+  const iconUrl = env.RELAYER_X402_ICON_URL || undefined;
+  if (iconUrl && !/^https:\/\/\S+\.(png|jpe?g|webp|gif)$/i.test(iconUrl)) throw new ConfigError('RELAYER_X402_ICON_URL must be an https png/jpg/webp/gif URL');
+  const loanProgramId = env.RELAYER_X402_LOAN_PROGRAM_ID || MAINNET_LOAN_PROGRAM_ID;
+  if (!isKey(loanProgramId)) throw new ConfigError('RELAYER_X402_LOAN_PROGRAM_ID is not a public key');
+  const discloseVkeySha256 = env.RELAYER_X402_DISCLOSE_VKEY_SHA256?.toLowerCase() || undefined;
+  if (discloseVkeySha256 && !/^[0-9a-f]{64}$/.test(discloseVkeySha256)) throw new ConfigError('RELAYER_X402_DISCLOSE_VKEY_SHA256 must be a hex sha256');
+  return {
+    facilitatorUrl: (env.RELAYER_X402_FACILITATOR_URL || DEFAULT_FACILITATOR_URL).replace(/\/+$/, ''),
+    apiKeyId, apiKeySecret, facilitatorTimeoutMs: int(env, 'RELAYER_X402_FACILITATOR_TIMEOUT_MS', DEFAULT_FACILITATOR_TIMEOUT_MS, 1_000),
+    network, payTo, assets: assets.map((a) => new PublicKey(a).toBase58()), payToTokenAccounts, prices, resourceBase,
+    maxTimeoutSeconds: int(env, 'RELAYER_X402_MAX_TIMEOUT_SECONDS', 120, 10), serviceName, tags, iconUrl,
+    priority: {
+      maxInFlight: int(env, 'RELAYER_X402_PRIORITY_MAX_IN_FLIGHT', 4, 1),
+      maxLamports: int(env, 'RELAYER_X402_PRIORITY_MAX_LAMPORTS', 4_000_000, 1),
+      priceCeil: int(env, 'RELAYER_X402_PRIORITY_PRICE_CEIL', 5_000_000, 1),
+    },
+    circuitsDir: env.RELAYER_X402_CIRCUITS_DIR || undefined, discloseVkeySha256, loanProgramId: new PublicKey(loanProgramId).toBase58(),
+  };
 }
