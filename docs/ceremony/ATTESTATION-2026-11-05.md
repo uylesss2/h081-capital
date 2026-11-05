@@ -1,0 +1,50 @@
+# Trusted-setup attestation
+
+H0.81 Capital (stipend) Groth16 phase 2. Groth16 on BN254 (snarkjs), one phase-2 chain per circuit.
+
+Phase 1: `powersOfTau28_hez_final_17.ptau`, blake2b `6247a3433948b35fbfae414fa5a9355bfb45f56efa7ab4929e669264a0258976741dfbe3288bfb49828e5df02c2e633df38d2245e30162ae7e3bcca5b8b49345` (checked against the published hash).
+
+Participants, in order:
+
+| # | name | at |
+|---|---|---|
+| 1 | H081 team, contribution 1 (2026-11-05, circuit fixes round) | 2026-11-05T14:14:44.205Z |
+| 2 | H081 team, contribution 2 (2026-11-05, circuit fixes round) | 2026-11-05T14:14:47.261Z |
+| 3 | H081 team, contribution 3 (2026-11-05, circuit fixes round) | 2026-11-05T14:14:50.469Z |
+
+Random beacon: `71fb4bf03ca1838f016b94ccbf5e0d6e90e4881ab80cedea4965e481ec43fa90` from Solana mainnet-beta finalized block hash 8fwKSJAyRQ42oo9HmaTCMYx1ApVKLDRFSwmQmVRRz5W7 (slot 465735503, getLatestBlockhash at 2026-11-05 after the last contribution), 2^10 iterations.
+
+## spend
+
+- r1cs sha256 `dc249460cc0088f5d4a2e21c6f899e687cc272fcdabd074176424908fb9b99d3` (27479 constraints, 15 public inputs)
+- circuit hash `13f3b0d0e6a5de1808f85337d917e536f879c483314e34bf905aacde35a4f36972c4f8ef49437469c339268a8f49b0c248dd1d65a6a459038cc2ffe74c482d68`
+- contribution #1 (H081 team, contribution 1 (2026-11-05, circuit fixes round)): `e5c65f0538db783f797f7b816d5f76a4b9e9cb3752022de2acc5fd28774c4319dc72b9c576537bd67d12c0f6a2b5d45910110c99ff16aa50bec9fcda85fe2f5a`
+- contribution #2 (H081 team, contribution 2 (2026-11-05, circuit fixes round)): `3cc8cd82c4f78c269236f4ac022ab49e82d6ff643c905e74291c788eca7e5038d503084cb7aa48e7c1c1760ae8b364de5f061bc22f3a1bb1f65a92bf2463b9d6`
+- contribution #3 (H081 team, contribution 3 (2026-11-05, circuit fixes round)): `7c144a9bb47d887ec0dc4e7bef283477347923611ebc71fb78df8f29982e624e27d3f6b7936c53adfaa13bfe134b236cdb1ab7d57711ec54b13e6518d5b28126`
+- beacon: `05fe17aebcaabfea3f1501b48be0d295eb5537cb7b14b477f40a70b526f8c1ab9f9445f9333dce44f9cbc418e9b1efc1db577a8c0b7025fe890cf1efa90459d6`
+- final zkey sha256 `709c59049c6e133ba981ba32a962af42f839d7600ada4e0e51237654d4e02b91`
+- verifying key sha256 `64f489ef7061fdb6225ad9262876d65a0e666316d72da04209fa246d04ec7530`
+
+## delegate
+
+- r1cs sha256 `2aae851941199b35877dc360e312352a5d84463e3c251775bd976177dfb2db44` (37796 constraints, 9 public inputs)
+- circuit hash `1d919503e24338c6aadc5a8ce565ae846bdcd42ee2b078ddd04c81c3dd1121c9d9317acb20846987dba974a6c8a998ed878d12899c1905edd50d669ffd58a783`
+- contribution #1 (H081 team, contribution 1 (2026-11-05, circuit fixes round)): `bdec4d3694432a27fb3cbbb7b4a3a48d587ded705aa65077047dcb14d53a0df9185d9226c0f281090e701da3e462f927b6f465907a1799b93c1d635c92eeb8e9`
+- contribution #2 (H081 team, contribution 2 (2026-11-05, circuit fixes round)): `04f3b5e08bae81d74eeeb5d3d636ef033afe4a5867725f7a5a74b1f154c2f93fca8c965916b960096a55cc9eebe3261f15a6af883200227b45b56406dca7c0ae`
+- contribution #3 (H081 team, contribution 3 (2026-11-05, circuit fixes round)): `88a4e320e09d72bae7408aaeb5d4e72f12fc5f231b3b2a3d0840375a8c517b7de4262ed685ac7038ff221d5caa836087a7f5d4b9215abef20fd1ed8c6c3865d7`
+- beacon: `c9b5c47bc009a08406250a17252e1247ee128a407be41592b046b2fbd0a35ecfb796a2f28ec4063eec6624476149581561beceb5aeaffa3aae61714a89b93fcf`
+- final zkey sha256 `6e47fc61d6023562c6d3a8429e09fc5b3d9b0df5fcd91243f50508e11074e631`
+- verifying key sha256 `82e35d8206e84c60d15e5a14aff6de0e40864e98980811376e4b336eb6a3456b`
+
+## stream
+
+- r1cs sha256 `824fa499c979c58666a48c3905d23c3f878181c64b6df1f5093d212c73d94d2b` (15006 constraints, 13 public inputs)
+- circuit hash `6b84c456007c42d1566849258863252c8303edef1a3a7f4347b7fe7703157ccd19c9026b2953f4a390bcf76ddab2b0f80a577678219f354e0a93494837d10887`
+- contribution #1 (H081 team, contribution 1 (2026-11-05, circuit fixes round)): `1b87804543829f60863792dfdddbe583ed3d1a5389aecabd579c49cbfcf46250eb6265362b0523a65d4852d2206d47fdaad48444180324a21686ae2af9b1df02`
+- contribution #2 (H081 team, contribution 2 (2026-11-05, circuit fixes round)): `b15ae076642650b63c5d5e94d21bad40ed9ee5b2629e619f2d5af73ac4aebbcf4a6ff963df59aeebe7131ac1df68ac1a9897aa968e9fee65dd7162a47e71c026`
+- contribution #3 (H081 team, contribution 3 (2026-11-05, circuit fixes round)): `abda4d186227cd6ac5db4bdf5f89b7831eab10a5dcf9098ff1a97e6dc9617200ab57769e5dc00f1abbc400c99bafb255d19ff83ace0292c1d4eaec5c46347f37`
+- beacon: `ebb23390291d8152314a94c0b0e3d2870f608766002194414f0fbdf8bbcae7edb1ff57afc23b640e800727337b01bb21abe80d536dda7496991d53584ed3bc5d`
+- final zkey sha256 `466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb`
+- verifying key sha256 `a84b8f8c6395cf62b19c8df12aeba5b349175609fed64ccab3be33c5bfd8aea2`
+
+Check it yourself: `node scripts/ceremony.mjs verify --dir <ceremony dir> --ptau <ptau>` re-derives every key from the r1cs and the ptau and checks every contribution.

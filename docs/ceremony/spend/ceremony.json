@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "created": "2026-10-31T00:40:58.519Z",
+  "created": "2026-11-05T14:14:05.275Z",
   "protocol": "groth16",
   "curve": "bn128",
   "ptau": {
@@ -13,74 +13,144 @@
   "circuits": {
     "spend": {
       "r1cs": "build/circuits/spend/spend.r1cs",
-      "r1csSha256": "fbde5e7bdf4595efbb4a324501821b4aae4dc7596037d1fdcc83cf38a41d78ce",
-      "circuitHash": "81a9aa29f5dba592d568bee86563e060d5ceeda0012f1ec3b2236dfaaac4c3d0202f988b4d0aebea18bfa57e7597d1acd991680c911fed7f387e8987b30c80ea",
-      "constraints": 27344,
+      "r1csSha256": "dc249460cc0088f5d4a2e21c6f899e687cc272fcdabd074176424908fb9b99d3",
+      "circuitHash": "13f3b0d0e6a5de1808f85337d917e536f879c483314e34bf905aacde35a4f36972c4f8ef49437469c339268a8f49b0c248dd1d65a6a459038cc2ffe74c482d68",
+      "constraints": 27479,
       "publicInputs": 15,
       "init": {
         "file": "spend/spend_0000.zkey",
-        "sha256": "bac7877e6294c5ec51febd8f066ed983d42b7b855bbdadfdaa03c038f7a5c149"
+        "sha256": "6e5cd3160ba94183b1556a168c25adc4375289b1684c5fac784f90ba9b5fafdb"
+      }
+    },
+    "delegate": {
+      "r1cs": "build/circuits/delegate/delegate.r1cs",
+      "r1csSha256": "2aae851941199b35877dc360e312352a5d84463e3c251775bd976177dfb2db44",
+      "circuitHash": "1d919503e24338c6aadc5a8ce565ae846bdcd42ee2b078ddd04c81c3dd1121c9d9317acb20846987dba974a6c8a998ed878d12899c1905edd50d669ffd58a783",
+      "constraints": 37796,
+      "publicInputs": 9,
+      "init": {
+        "file": "delegate/delegate_0000.zkey",
+        "sha256": "4238febde568b4e7901ff157c0fec18656a6d94550782dce53a466bf1d599f75"
+      }
+    },
+    "stream": {
+      "r1cs": "build/circuits/stream/stream.r1cs",
+      "r1csSha256": "824fa499c979c58666a48c3905d23c3f878181c64b6df1f5093d212c73d94d2b",
+      "circuitHash": "6b84c456007c42d1566849258863252c8303edef1a3a7f4347b7fe7703157ccd19c9026b2953f4a390bcf76ddab2b0f80a577678219f354e0a93494837d10887",
+      "constraints": 15006,
+      "publicInputs": 13,
+      "init": {
+        "file": "stream/stream_0000.zkey",
+        "sha256": "d16e06d95ce2d61aed4c9513a21882ffc1d0c195ff4c4067a88d3a77ea31f4c9"
       }
     }
   },
   "contributions": [
     {
       "index": 1,
-      "name": "H0.81 project team, contribution 1",
-      "at": "2026-10-31T00:41:09.275Z",
+      "name": "H081 team, contribution 1 (2026-11-05, circuit fixes round)",
+      "at": "2026-11-05T14:14:44.205Z",
       "circuits": {
         "spend": {
           "file": "spend/spend_0001.zkey",
-          "sha256": "8c929898f1313720662d48dd9870ad1404433f83db3c77cf91f6f71ae78d5894",
-          "prevSha256": "bac7877e6294c5ec51febd8f066ed983d42b7b855bbdadfdaa03c038f7a5c149",
-          "contributionHash": "71883ffc78d66571b9739e68bf428ad5dc4ee7381405e8c1254cdfe4a46b9127018a17712cf8f232e0a9dfd41b062e4a12c0abe6211a800852ab1d4670723c41"
+          "sha256": "4459c6c6366b361a5786a5ecc50ae92c564eb2d32836e637fc5386a819c1ca7e",
+          "prevSha256": "6e5cd3160ba94183b1556a168c25adc4375289b1684c5fac784f90ba9b5fafdb",
+          "contributionHash": "e5c65f0538db783f797f7b816d5f76a4b9e9cb3752022de2acc5fd28774c4319dc72b9c576537bd67d12c0f6a2b5d45910110c99ff16aa50bec9fcda85fe2f5a"
+        },
+        "delegate": {
+          "file": "delegate/delegate_0001.zkey",
+          "sha256": "4ec8e3d48bdf1a58ef520f4a65f7394a567be0a46a07828dc6d7e7e75e1284c7",
+          "prevSha256": "4238febde568b4e7901ff157c0fec18656a6d94550782dce53a466bf1d599f75",
+          "contributionHash": "bdec4d3694432a27fb3cbbb7b4a3a48d587ded705aa65077047dcb14d53a0df9185d9226c0f281090e701da3e462f927b6f465907a1799b93c1d635c92eeb8e9"
+        },
+        "stream": {
+          "file": "stream/stream_0001.zkey",
+          "sha256": "95e4f33ccb6d752b5062cbff5b92bd15e7024915e1357dd30a606d8eba84e7bb",
+          "prevSha256": "d16e06d95ce2d61aed4c9513a21882ffc1d0c195ff4c4067a88d3a77ea31f4c9",
+          "contributionHash": "1b87804543829f60863792dfdddbe583ed3d1a5389aecabd579c49cbfcf46250eb6265362b0523a65d4852d2206d47fdaad48444180324a21686ae2af9b1df02"
         }
       }
     },
     {
       "index": 2,
-      "name": "H0.81 project team, contribution 2",
-      "at": "2026-10-31T00:41:10.835Z",
+      "name": "H081 team, contribution 2 (2026-11-05, circuit fixes round)",
+      "at": "2026-11-05T14:14:47.261Z",
       "circuits": {
         "spend": {
           "file": "spend/spend_0002.zkey",
-          "sha256": "dd88b4376ffbf79f267b9319ee5b70b0a3b21536f20da76397d07ea858288595",
-          "prevSha256": "8c929898f1313720662d48dd9870ad1404433f83db3c77cf91f6f71ae78d5894",
-          "contributionHash": "14a7916afcf5e1265ef059ddfaba08a03585c81a5b08dde75f5e07569f1d05617510e992602893c39fe0f72c7a201fc5af005f13f413e900c887aecb509416d3"
+          "sha256": "ef7f326d64e535661888194136a6bf2c8f9988626619f381e5b4ba10e2b2bdcb",
+          "prevSha256": "4459c6c6366b361a5786a5ecc50ae92c564eb2d32836e637fc5386a819c1ca7e",
+          "contributionHash": "3cc8cd82c4f78c269236f4ac022ab49e82d6ff643c905e74291c788eca7e5038d503084cb7aa48e7c1c1760ae8b364de5f061bc22f3a1bb1f65a92bf2463b9d6"
+        },
+        "delegate": {
+          "file": "delegate/delegate_0002.zkey",
+          "sha256": "b24c6cb28196697b872731a212e7039d8d0c7c994b043409358825f1f2d16ac2",
+          "prevSha256": "4ec8e3d48bdf1a58ef520f4a65f7394a567be0a46a07828dc6d7e7e75e1284c7",
+          "contributionHash": "04f3b5e08bae81d74eeeb5d3d636ef033afe4a5867725f7a5a74b1f154c2f93fca8c965916b960096a55cc9eebe3261f15a6af883200227b45b56406dca7c0ae"
+        },
+        "stream": {
+          "file": "stream/stream_0002.zkey",
+          "sha256": "ae0e2ffa773b0f23f9afedb7ecc9e03f35e90b49590414b8b25aa09e82005e68",
+          "prevSha256": "95e4f33ccb6d752b5062cbff5b92bd15e7024915e1357dd30a606d8eba84e7bb",
+          "contributionHash": "b15ae076642650b63c5d5e94d21bad40ed9ee5b2629e619f2d5af73ac4aebbcf4a6ff963df59aeebe7131ac1df68ac1a9897aa968e9fee65dd7162a47e71c026"
         }
       }
     },
     {
       "index": 3,
-      "name": "H0.81 project team, contribution 3",
-      "at": "2026-10-31T00:41:13.826Z",
+      "name": "H081 team, contribution 3 (2026-11-05, circuit fixes round)",
+      "at": "2026-11-05T14:14:50.469Z",
       "circuits": {
         "spend": {
           "file": "spend/spend_0003.zkey",
-          "sha256": "12487e881635fd4c90db6fa90f019244a22f22b270944b37c37677105b477fa1",
-          "prevSha256": "dd88b4376ffbf79f267b9319ee5b70b0a3b21536f20da76397d07ea858288595",
-          "contributionHash": "f8dc8bcfffafc19092563f06ba7936fdcf0ca20969948a8cf7d9568efb5083a1a09eb93f429d71ccaf0dc96d6a2b6f1efd807e3d3e16d0420b2037867c2ae332"
+          "sha256": "b56bcb139dbfbe876f6875cdbf9e188c5c57e80eb81672e5368a7f57faa37bfe",
+          "prevSha256": "ef7f326d64e535661888194136a6bf2c8f9988626619f381e5b4ba10e2b2bdcb",
+          "contributionHash": "7c144a9bb47d887ec0dc4e7bef283477347923611ebc71fb78df8f29982e624e27d3f6b7936c53adfaa13bfe134b236cdb1ab7d57711ec54b13e6518d5b28126"
+        },
+        "delegate": {
+          "file": "delegate/delegate_0003.zkey",
+          "sha256": "4663aeb398dfe395b3b5d40f997c62d99095583e83d0ca9809b13f09d5617012",
+          "prevSha256": "b24c6cb28196697b872731a212e7039d8d0c7c994b043409358825f1f2d16ac2",
+          "contributionHash": "88a4e320e09d72bae7408aaeb5d4e72f12fc5f231b3b2a3d0840375a8c517b7de4262ed685ac7038ff221d5caa836087a7f5d4b9215abef20fd1ed8c6c3865d7"
+        },
+        "stream": {
+          "file": "stream/stream_0003.zkey",
+          "sha256": "af2d9bff450b4756ba47b22194d6db0ecd9fb20914f9fec8b18089ebe24a4e54",
+          "prevSha256": "ae0e2ffa773b0f23f9afedb7ecc9e03f35e90b49590414b8b25aa09e82005e68",
+          "contributionHash": "abda4d186227cd6ac5db4bdf5f89b7831eab10a5dcf9098ff1a97e6dc9617200ab57769e5dc00f1abbc400c99bafb255d19ff83ace0292c1d4eaec5c46347f37"
         }
       }
     }
   ],
   "beacon": {
     "name": "final beacon",
-    "value": "f7aa63083f307cb8ec4b548e4a50893cd8248c097a1ebf85bb0675639ea7485b",
-    "source": "Solana mainnet-beta block hash HfnPkpVKUZ2enGWZo7zjMh6xCZWNyDetvejnhnMaXW4S (slot 463490557, block height 441512795), base58-decoded to 32 bytes",
+    "value": "71fb4bf03ca1838f016b94ccbf5e0d6e90e4881ab80cedea4965e481ec43fa90",
+    "source": "Solana mainnet-beta finalized block hash 8fwKSJAyRQ42oo9HmaTCMYx1ApVKLDRFSwmQmVRRz5W7 (slot 465735503, getLatestBlockhash at 2026-11-05 after the last contribution)",
     "iterationsExp": 10,
-    "at": "2026-10-31T00:41:53.948Z",
+    "at": "2026-11-05T14:15:32.757Z",
     "circuits": {
       "spend": {
         "file": "spend/spend_final.zkey",
-        "sha256": "0e5cbe9f896a611717df1c65104f2ea53ee2ae282c3a98837f564a62250651e9",
-        "prevSha256": "12487e881635fd4c90db6fa90f019244a22f22b270944b37c37677105b477fa1",
-        "contributionHash": "683f2fd941e821258e3d8295c7a73d4b0428f5fe1d9c26c62a1f9d5128f2f0c28f69c8ce47d4a076526696ab3ad80503981e6a79d02887c354284e22f567de47"
+        "sha256": "709c59049c6e133ba981ba32a962af42f839d7600ada4e0e51237654d4e02b91",
+        "prevSha256": "b56bcb139dbfbe876f6875cdbf9e188c5c57e80eb81672e5368a7f57faa37bfe",
+        "contributionHash": "05fe17aebcaabfea3f1501b48be0d295eb5537cb7b14b477f40a70b526f8c1ab9f9445f9333dce44f9cbc418e9b1efc1db577a8c0b7025fe890cf1efa90459d6"
+      },
+      "delegate": {
+        "file": "delegate/delegate_final.zkey",
+        "sha256": "6e47fc61d6023562c6d3a8429e09fc5b3d9b0df5fcd91243f50508e11074e631",
+        "prevSha256": "4663aeb398dfe395b3b5d40f997c62d99095583e83d0ca9809b13f09d5617012",
+        "contributionHash": "c9b5c47bc009a08406250a17252e1247ee128a407be41592b046b2fbd0a35ecfb796a2f28ec4063eec6624476149581561beceb5aeaffa3aae61714a89b93fcf"
+      },
+      "stream": {
+        "file": "stream/stream_final.zkey",
+        "sha256": "466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb",
+        "prevSha256": "af2d9bff450b4756ba47b22194d6db0ecd9fb20914f9fec8b18089ebe24a4e54",
+        "contributionHash": "ebb23390291d8152314a94c0b0e3d2870f608766002194414f0fbdf8bbcae7edb1ff57afc23b640e800727337b01bb21abe80d536dda7496991d53584ed3bc5d"
       }
     }
   },
   "verified": {
-    "at": "2026-10-31T00:42:11.690Z",
+    "at": "2026-11-05T14:15:56.092Z",
     "contributions": 3,
     "beacon": true
   }
