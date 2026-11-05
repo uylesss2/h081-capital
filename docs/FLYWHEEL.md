@@ -1,11 +1,15 @@
 # H081 flywheel: platform fees buy back H081
 
-Status 2026-10-31: **design, in build on branch `feat/flywheel`. Nothing in this document is live.** No platform
-fee is charged today, no treasury multisig exists yet, and no buyback has happened. Every step that moves real
-money needs an explicit go from the owner (section 9).
+Status 2026-11-05: **live on Solana mainnet.** The relayer (`https://api.h081.xyz`) charges max(0.05 USDG, 0.20%)
+on relayed operations and `stream_loan` charges 0.25% of each funded loan's principal; both go only to the
+treasury, Squads v4 multisig `G3xFLKe6An28bgdtUuyaoZCpjtPpQTh3GgKNKtWG26A6` (2 of 3, vault
+`EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`). `safety_pool` is deployed
+(`HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`), underwriting on since 2026-11-04. No buyback has run yet: the
+first waits for fees to build up, and every buyback, burn or top-up still needs an explicit go from the owner
+(section 9). Addresses: `docs/MAINNET-RUNBOOK.md`.
 
 This document is the specification for how fees the bank earns are used to buy H081 on the open market. It is
-not an offer or a promise of any price or return. Holding H081 pays nothing. Once the safety pool is live, half
+not an offer or a promise of any price or return. Holding H081 pays nothing. Once the safety pool holds at least 10,000 H081 of stake, half
 of the bought H081 is added to the safety pool, which raises what every safety-pool share redeems for: stakers
 who back loans in that pool benefit pro rata (section 6).
 
@@ -15,12 +19,12 @@ who back loans in that pool benefit pro rata (section 6).
 agents use the bank ──► platform fees (USDG/SOL) ──► treasury (Squads 2-of-3 multisig)
         ▲                                                   │ weekly buyback on the DAMM v2 pool
         │                                                   ▼
- operators stake H081 for capacity            H081 ──► burn  (+ safety-pool top-up once live)
+ operators stake H081 for capacity            H081 ──► burn  (+ safety-pool top-up once staked)
 ```
 
 The protocol earns small fees for services it actually provides (relaying, loan origination, hosted paid
 tools). Those fees collect in a treasury multisig. Once a week the treasury buys H081 on the official pool and
-burns it; once the safety pool is live, half of what is bought goes into the safety pool instead.
+burns it; once the safety pool holds at least 10,000 H081 of stake, half of what is bought goes into the safety pool instead.
 
 ## 2. The creator-fee firewall
 
@@ -108,7 +112,9 @@ Notes:
 - **Record:** `buyback.mts record` only accepts signatures that carry out a transaction of that proposal (same
   programs, accounts and data), and notes skipped chunks or a missing settle in the ledger entry.
 - **Programs:** on mainnet only the official mint and pool are accepted, and the top-up only calls the pinned
-  mainnet `safety_pool` program id (none until it is deployed, so until then every run is 100% burn).
+  mainnet `safety_pool` program id (`HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt`). A run tops up only when
+  `--safety-program` is given and the pool has stakers and at least 10,000 H081 of accounted assets; otherwise
+  it burns 100%.
 
 **Disclosure:** a buyback is an ordinary trade on the pool. It pays the pool's normal trading fee like any
 other buyer (today 2% of each trade: 0.4% to Meteora, 1.6% to the creator). The flywheel gets no discount and
@@ -119,8 +125,8 @@ it.
 
 | Phase | Burn | `safety_pool.top_up` |
 |---|---|---|
-| Until the safety pool is live on mainnet | 100% | 0% |
-| After the safety pool is live | 50% | 50% |
+| Safety pool without stakers, under 10,000 H081, or no `--safety-program` | 100% | 0% |
+| Safety pool with stakers and at least 10,000 H081 | 50% | 50% |
 
 - **Burn** uses the SPL token `burn` instruction from the treasury's H081 account, which reduces the total
   supply. Supply is fixed (no mint authority), so burned tokens cannot be re-created.

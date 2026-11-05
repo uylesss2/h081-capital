@@ -299,8 +299,8 @@ capacity config `7QuqMc95ry9sjeem5gsS4SNQzoQfoHqVwSvAcSFq8uKS`. Loan fee treasur
 `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq`.
 
 Limits: 1,000 USDG per deposit and 10,000 USDG in the bank in total; 100,000 H081 per safety-pool deposit or
-stake and 1,000,000 H081 in total. The safety pool covers no loan until the config authority enables
-underwriting. Live transactions: https://h081.xyz/proof. Full deploy procedure: `docs/MAINNET-RUNBOOK.md`.
+stake and 1,000,000 H081 in total. Safety-pool underwriting is on since 2026-11-04 for USDG loans: at most 100 USDG
+cover per loan, 1,000 USDG in total, minimum premium 3% of the cover. Live transactions: https://h081.xyz/proof. Full deploy procedure: `docs/MAINNET-RUNBOOK.md`.
 
 Check that what runs on chain is this code (read-only):
 
