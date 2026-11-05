@@ -508,3 +508,60 @@ paused). stream_loan has no admin; only its upgrade authority can replace it (an
 - [ ] P4 dry-run gates pass; deploy; the three hashes match
 - [ ] P5 both init scripts exit 0 with read-back OK
 - [ ] P6 sweep; HANDOFF.md updated (signatures, balances); creating the Squads treasury is a separate owner go
+
+# Upgrade U1: security fixes of 2026-11-05 (NOT DONE; every step below is an owner go)
+
+Source: branch `security-fixes` @ `8927763` (PR "security fixes"), snapshot `../h081-deploy-staging/snap-8927763.tar`.
+Built on 2026-11-05 in WSL from that snapshot into `../h081-deploy-staging/so-mainnet-2026-11-05/` (the
+2026-10-31 binaries in `so-mainnet/` are untouched). Circuit keys: ceremony round 2 (`docs/CEREMONY.md`).
+
+| program | new `.so` | sha256 | deployed program data | action |
+|---|---|---|---|---|
+| stipend_pool `E16DK…` | 350,568 B (unchanged size: new vkeys for spend/delegate/stream, NOW_LOOKBACK 3 min) | `2baeb2e5b7dd663eb5f99e03c74cd35736a376cbbba2df0c56cb96b2946ce809` | 350,568 B room | deploy |
+| stream_loan `8JBd7…` | 265,592 B | `245e13e5da9426077905d88e21dcce723b4677f012f4388b9ee5fd10762643d9` | 242,384 B room | **extend 23,208 B** (0.1179 SOL locked), then deploy |
+| safety_pool `HmzKNPn8…` | 320,984 B | `607f45975d28d0daff9f6f6524747f9e6bb1ba4e1dd45ae1ed3ea23414445469` | 300,312 B room | **extend 20,672 B** (0.1050 SOL locked), then deploy |
+| capacity_stake | unchanged | — | — | nothing |
+
+Gates checked on the new binaries: own ids, `E16DK…`, stream_loan id in safety_pool, treasury `EGvxic665…` in
+stream_loan, no localnet id anywhere, and (new) the mainnet safety_pool id `HmzKNPn8…` embedded in stream_loan
+(`record_slash` accepts only that program's config PDA as signer). Program-data figures read from mainnet on
+2026-11-05 (`getAccountInfo` of the three ProgramData accounts, 45-byte header).
+
+**Why together.** stream_loan `sync`/`claim` take two more accounts and safety_pool `slash` eight more (plus a
+signing payer): old clients fail against the new programs and new clients against the old ones. The three
+programs, the SDK (npm), the relayer and the site ship in one window. Order inside the window:
+
+1. Deposits paused (config authority `4eyS…`, `mainnet-admin.mts`) and Live mode off during the deploy.
+2. Fund the deployer `5WCpirBe…` (balance 0.0359 SOL on 2026-11-05). Needed: buffers 1.7817 + 1.3500 + 1.6314
+   SOL (refunded after each deploy; peak = the largest, 1.78, if done one at a time) + extend rent 0.2229 SOL
+   (locked) + fees. State the exact figure to the owner first.
+3. Extend, then deploy, smallest first, each hash checked (`solana-program-hash.mts --program … --so …` exit 0):
+   ```bash
+   K=C:/Users/Joseph/documents/websites/stipend-protocol/solana/keys/mainnet
+   solana program extend 8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4 23208 --keypair $K/deployer-keypair.json --url $URL
+   solana program extend HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt 20672 --keypair $K/deployer-keypair.json --url $URL
+   node ../h081-deploy-staging/deploy-cluster.mjs --cluster mainnet --programs stream_loan,safety_pool \
+     --keys-dir $K --so-dir C:/Users/Joseph/documents/websites/h081-deploy-staging/so-mainnet-2026-11-05 \
+     --asset-mint 2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH --h081-mint EgqxxR7zowzaLEm24oep5qqBieLVAWYX78LhgeqAJAo \
+     --loan-treasury EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq \
+     --expect-sha256 stream_loan=245e13e5da9426077905d88e21dcce723b4677f012f4388b9ee5fd10762643d9 \
+     --expect-sha256 safety_pool=607f45975d28d0daff9f6f6524747f9e6bb1ba4e1dd45ae1ed3ea23414445469 \
+     --maxlen-factor 1 --allow-hot-upgrade-authority --rpc $RPC --i-understand-mainnet --dry-run   # then without --dry-run
+   solana program deploy C:/Users/Joseph/documents/websites/h081-deploy-staging/so-mainnet-2026-11-05/stipend_pool.so \
+     --program-id E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM --upgrade-authority $K/deployer-keypair.json \
+     --keypair $K/deployer-keypair.json --use-rpc --with-compute-unit-price $PRICE --max-sign-attempts 30 --url $URL
+   ```
+   No `--final`, ever (the upgrade authority stays with the deployer).
+4. Relayer: Vercel env `RELAYER_SOLANA_CREATE_ACCOUNT_FEE=2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH=<base units>`
+   (unset = the relayer creates no token accounts), optional `RELAYER_VKEY_SHA256_{TRANSACT,GRANT,SPEND,DELEGATE}`
+   pins (printed by `scripts/relayer-vercel.mjs`); `node scripts/relayer-vercel.mjs && cd deploy/relayer-vercel && vercel deploy --prod`.
+   The relayer verifies every proof against the keys it ships, so it must be redeployed from this commit no
+   earlier than the stipend_pool upgrade (old-key proofs fail against the new program either way).
+5. `npm publish` the SDK; site: merge the fee-pin PR (independent, can go first) and the loan-flow PR
+   (`public/circuits` carries the round-2 spend/stream artifacts), `npm run deploy`.
+6. Post-checks: `mainnet-core-check.mts verify`, `solana-program-hash` for all three, one relayed withdrawal
+   from the site, one small loan end to end (borrow by amount, fund exactly that amount), deposits unpaused.
+7. Sweep the deployer back to the fee wallet; HANDOFF.md and this file updated with signatures.
+
+Not covered by this upgrade: a loan slashed before it has no subrogation record (none exists on mainnet as of
+2026-11-05: no cover was ever insured).
