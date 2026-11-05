@@ -63,9 +63,9 @@ export const CIRCUIT_HASHES: Record<CircuitName, { wasm: string; zkey: string; v
     vkey: 'dc97feab01ec6a7678a8bafd2f3ad93fc8ed816056e009b50f3baed2575a5b28',
   },
   spend: {
-    wasm: '1a874146da088a1b9143a98fb17538bf38b5aee151abec1aa2da204f6cb71a39',
-    zkey: '0e5cbe9f896a611717df1c65104f2ea53ee2ae282c3a98837f564a62250651e9',
-    vkey: 'f019991fb96969eb5cfd5251f63899e0b273e6992910873413c296f6ac305f88',
+    wasm: 'fae7b7c90d706702bda9b8ca5d14e34a03bbc4c6503ee23af2e4257f01b595fc',
+    zkey: '709c59049c6e133ba981ba32a962af42f839d7600ada4e0e51237654d4e02b91',
+    vkey: '64f489ef7061fdb6225ad9262876d65a0e666316d72da04209fa246d04ec7530',
   },
   disclose: {
     wasm: '39202583b825ac05b97fca0410c251effa813056ec1571cfac5ae160dab0fb69',
@@ -75,13 +75,13 @@ export const CIRCUIT_HASHES: Record<CircuitName, { wasm: string; zkey: string; v
   delegate: {
     // the site does not ship delegate.wasm/.zkey; the ceremony hashes are kept for completeness
     wasm: '',
-    zkey: '41056c1c7e2030e3229ece87d9eaf3cf9edf353a92b5c56627aaa8e2a725fef9',
-    vkey: 'e748f78f4c5296d1e5371cbf79bacd819a4a111160629c0377fbdb74a8f530e0',
+    zkey: '6e47fc61d6023562c6d3a8429e09fc5b3d9b0df5fcd91243f50508e11074e631',
+    vkey: '82e35d8206e84c60d15e5a14aff6de0e40864e98980811376e4b336eb6a3456b',
   },
   stream: {
-    wasm: '2f2fe9faa58c033eb8af1a424f34adcc48f335f142680de7317f93541f1590f4',
-    zkey: 'f2b821af10ccd92e2d97fded94e44037328b036ecf82162497e34746522f30fb',
-    vkey: '4be743351074631c1ac3a243d4a7471b475f0e1e0cd564f21c4827486c8ade8d',
+    wasm: 'f27c3c88720e9ca8fbacc58f2fbdefcf15c18b17755cd7022efd0e78d935a21d',
+    zkey: '466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb',
+    vkey: 'a84b8f8c6395cf62b19c8df12aeba5b349175609fed64ccab3be33c5bfd8aea2',
   },
 };
 
