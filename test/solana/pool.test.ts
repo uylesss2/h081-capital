@@ -310,7 +310,7 @@ describe('poseidon merkle tree (probe build)', () => {
     const c = allowanceCommitment(a);
     await send(connection, payer, [probeInsertIx(PROBE, [c])], { cuLimit: CU });
     const idx = local.insert(c);
-    const s = streamInput({ root: local.root, allowance: a, path: local.path(idx), lender: ref, minRemaining: 80_000n, minRate: 10n, audience: 5n });
+    const s = streamInput({ root: local.root, allowance: a, path: local.path(idx), lender: ref, spender: agent, minRemaining: 80_000n, minRate: 10n, audience: 5n });
     const r = await prover.prove('stream', s.input);
     const args: StreamArgs = {
       root: local.root, minRemaining: 80_000n, minRate: 10n, lender, loanRef, pledgeBps: 4000, expiry: start + 30n * DAY,

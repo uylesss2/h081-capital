@@ -2,6 +2,7 @@ pragma circom 2.1.0;
 
 include "lib/hashes.circom";
 include "lib/merkle.circom";
+include "circomlib/circuits/comparators.circom";
 include "lib/range.circom";
 
 // Proof of a pledged stream for a lender (`proveStream`). Over one allowance
@@ -49,6 +50,21 @@ template Stream(levels) {
     signal input pledgeBps;
     signal input pathIndices[levels];
     signal input pathElements[levels];
+    // the prover: the agent the note is for, or its owner
+    signal input sk;
+
+    // --- only the agent or the owner can speak for the note ---
+    // The lender holds the note's full contents (the sealed grant memo), so without a key check it could
+    // forge the borrower's funding proof for a payout account of its own.
+    component pk = PublicKey();
+    pk.sk <== sk;
+    component isOwner = IsEqual();
+    isOwner.in[0] <== pk.pk;
+    isOwner.in[1] <== ownerPk;
+    component isAgent = IsEqual();
+    isAgent.in[0] <== pk.pk;
+    isAgent.in[1] <== agentPk;
+    (1 - isOwner.out) * (1 - isAgent.out) === 0;
 
     component policy = PolicyHash();
     policy.lifetimeCap <== lifetimeCap;

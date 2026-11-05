@@ -1024,7 +1024,7 @@ export class SolanaWallet extends Scanner {
   async proveStream(owned: SolOwnedAllowance, bounds: { minRemaining: bigint; minRate: bigint; audience: bigint }): Promise<{ proof: ProofResult; args: StreamArgs }> {
     if (!owned.lender || !owned.lenderKey) throw new Error('allowance is not pledged (or its lender pubkey is unknown)');
     await this.sync();
-    const built = streamInput({ root: this.tree.root, allowance: owned.allowance, path: this.tree.path(owned.index), lender: owned.lender, ...bounds });
+    const built = streamInput({ root: this.tree.root, allowance: owned.allowance, path: this.tree.path(owned.index), lender: owned.lender, spender: this.account.keys, ...bounds });
     const proof = await this.prover.prove('stream', built.input);
     const [root, minRemaining, minRate, , loanRef, pledgeBps, expiry, lifetimeCap, pledgePaid, agentPk, audience, streamStart] = built.publicSignals;
     return {

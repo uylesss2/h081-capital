@@ -110,7 +110,7 @@ stream_loan has no offer book and no matching. A loan starts with a **lender** w
 
 1. `h081_loan_quote {"termsCode": "h081-loan-terms:...", "minRemainingUsdg": "100"}`: at 40 % (4000 bps) a 100 USDG pledge backs at most 40 USDG of principal; the protocol's origination fee is 0.25 % of the principal, taken out of the payout.
 2. `h081_loan_borrow {"termsCode": "...", "budgetUsdg": "100", "dailyCapUsdg": "20", "maxPerTxUsdg": "10", "days": 30, "unlockDays": 30}`: grants a 100 USDG allowance from the shielded balance to one of the agent's 16 sub-accounts, unlocking as a stream over 30 days, with 40 % of every payment from it routed to the lender's slot; then makes the stream proof for the lender with the agent wallet's USDG account as the payout and returns it as an `h081-loan-proof:` code.
-3. The agent hands `proofCode` to the lender. When the lender funds the slot (up to `maxPrincipal`), the principal minus 0.25 % lands in `payoutAccount`.
+3. The agent hands `proofCode` to the lender. The lender funds the slot with exactly `principal` (the amount asked for with `principal`/`principalUsdg`, or by default the most the pledge can back; the program accepts no other figure), and the principal minus 0.25 % lands in `payoutAccount`.
 
 Until a lender funds, nothing is borrowed: the budget sits in the pledged sub-account, spendable under its rules, with the lender's share routed if it is spent. The tool refuses terms for another cluster, program or asset, slots that do not exist or are already funded, and an unlock longer than the lifetime.
 

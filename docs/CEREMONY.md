@@ -144,3 +144,17 @@ To run the same steps on new keys: `node scripts/ceremony.mjs init --dir D --pta
 Anyone can extend these keys with `snarkjs zkey contribute` on each final zkey, followed by a new public
 beacon; that keeps this round's security and adds theirs. The resulting verifying keys would then replace
 `vk.rs` through a program upgrade, and the app's proving keys would be replaced with the new final zkeys.
+
+## 2026-11-05: `spend`, `delegate` and `stream` changed; a new round is needed before the upgrade
+
+Three circuits were changed after a security review (window id made monotonic in `spend`; subs inherit the
+parent's consumed window and stream in `delegate`; `stream` proves knowledge of the agent's or owner's key).
+Their R1CS differ from the keys above, so **the 2026-10-31 keys cannot verify proofs of the new circuits**.
+Until the next round runs, `solana/programs/stipend_pool/src/generated/vk.rs` carries single-contribution
+DEVELOPMENT keys for these three circuits (made with `scripts/setup-circuits.mjs` on one machine; the
+contribution entropy was not kept) and the ceremony keys for `transact`, `grant` and `disclose`.
+Before the mainnet program upgrade: run the procedure above for `spend delegate stream` on the new R1CS,
+replace the three `build/circuits/<name>/<name>.{zkey,vkey.json}`, run `npm run solana:vk`, and record the
+new hashes in the table. The old keys stay valid for proofs made before the upgrade only until the program is
+upgraded: a note spent with an old-circuit proof after that has no proof, so users must refresh their
+proving artifacts (the site and the SDK fetch them by hash).

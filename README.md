@@ -37,10 +37,10 @@ only lives on in the code.
 |---|---|---|---|
 | `transact` | deposit, withdraw, shielded transfer (2-in 2-out) | 27,950 | 8 |
 | `grant` | owner funds up to 16 agents plus change in one proof | 96,685 | 22 |
-| `spend` | agent pays, owner reclaims, or lender claims; routes the pledge share | 27,344 | 15 |
+| `spend` | agent pays, owner reclaims, or lender claims; routes the pledge share | 27,479 | 15 |
 | `disclose` | `remaining >= b`, `spent <= b`, `windowSpent <= b` over an allowance | 14,310 | 6 |
-| `delegate` | agent splits an allowance into up to 4 sub-allowances plus a residual | 35,307 | 9 |
-| `stream` | `proveStream`: the lender's view of a pledged, streamed allowance | 14,482 | 13 |
+| `delegate` | agent splits an allowance into up to 4 sub-allowances plus a residual | 37,796 | 9 |
+| `stream` | `proveStream`: the lender's view of a pledged, streamed allowance (agent- or owner-signed) | 15,006 | 13 |
 
 Counts are `snarkjs r1cs info` on the current build (Groth16, BN254, `pot17`, limit 131,072). Proving in
 Node takes about one second per proof on a laptop; `grant` takes a few seconds.
@@ -78,7 +78,7 @@ Phase 2 slashing objective. Unpledged allowances are unchanged from v1.
 | `lender` / `pledgeBps` | `Poseidon(DOM_LENDER, lenderAddr, loanRef)` and the share (0..10000) of every spend routed to it | not pledged |
 
 The allowance note also carries `pledgePaid`, the cumulative amount routed to the lender on this line.
-`now` is a public input that the contract checks against block time (15 minutes back, 1 minute ahead),
+`now` is a public input that the contract checks against block time (3 minutes back, 1 minute ahead),
 so the window length itself stays private.
 
 ### Who may spend, and the owner-reclaim rule

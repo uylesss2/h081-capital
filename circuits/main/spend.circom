@@ -180,6 +180,16 @@ template Spend(levels, recipientLevels) {
     component sameWindow = IsEqual();
     sameWindow.in[0] <== newWindowId;
     sameWindow.in[1] <== windowId;
+    // The window never moves backwards. The program only bounds `now` to a band around the clock,
+    // so without this an agent could alternate `now` across a window boundary and start every
+    // spend with windowSpent = 0. Owner spends obey it too (they rewrite the note's window);
+    // a lender claim leaves the window untouched (below) and is exempt.
+    component rWindowId = Range(TIME_BITS());
+    rWindowId.in <== windowId;
+    component forward = Leq(TIME_BITS());
+    forward.a <== windowId;
+    forward.b <== newWindowId;
+    (1 - forward.out) * notClaim === 0;
     signal carried <== sameWindow.out * windowSpent;
     signal counted <== amount * enforce;
     signal newWindowSpent <== carried + counted;

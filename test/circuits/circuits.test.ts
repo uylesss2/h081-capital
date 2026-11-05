@@ -533,7 +533,7 @@ describe('stream proof (design 5)', () => {
   it('discloses the pledge terms and bounds, hiding the balance', async () => {
     const a = { ...pledged(100_000n, 4000n, { streamRate: 10n, streamStart: start, expiry: start + 86400n }), remaining: 90_000n, pledgePaid: 4000n };
     const p = inTree(a);
-    const s = streamInput({ ...p, lender: LENDER, minRemaining: 80_000n, minRate: 10n, audience: 99n });
+    const s = streamInput({ ...p, lender: LENDER, spender: agent, minRemaining: 80_000n, minRate: 10n, audience: 99n });
     expect(s.publicSignals).toHaveLength(13);
     expect(s.publicSignals.map(String)).toEqual([p.root, 80_000n, 10n, LENDER_ADDR, LOAN_REF, 4000n, start + 86400n, 100_000n, 4000n, agent.pk, 99n, start, ASSET].map(String));
     expect(STREAM_PUBLIC[1]).toBe('minRemaining');
@@ -552,13 +552,13 @@ describe('stream proof (design 5)', () => {
     // the start date and the asset cannot be misstated: a lender knows when the cashflow begins and what it is paid in
     await rejects('stream', { ...s.input, streamStartPub: start - 1n });
     await rejects('stream', { ...s.input, assetPub: 0n });
-    expect(() => streamInput({ ...p, lender: LENDER, minRemaining: 90_001n, minRate: 10n, audience: 1n })).toThrow();
-    expect(() => streamInput({ ...inTree(fresh(1000n)), lender: LENDER, minRemaining: 1n, minRate: 0n, audience: 1n })).toThrow();
+    expect(() => streamInput({ ...p, lender: LENDER, spender: agent, minRemaining: 90_001n, minRate: 10n, audience: 1n })).toThrow();
+    expect(() => streamInput({ ...inTree(fresh(1000n)), lender: LENDER, spender: agent, minRemaining: 1n, minRate: 0n, audience: 1n })).toThrow();
   });
 
   it('has no proof over an unpledged note', async () => {
     const p = inTree(fresh(1000n, { streamRate: 10n, streamStart: start }));
-    const ok = streamInput({ ...inTree(pledged(1000n, 4000n, { streamRate: 10n, streamStart: start })), lender: LENDER, minRemaining: 1n, minRate: 1n, audience: 1n });
+    const ok = streamInput({ ...inTree(pledged(1000n, 4000n, { streamRate: 10n, streamStart: start })), lender: LENDER, spender: agent, minRemaining: 1n, minRate: 1n, audience: 1n });
     const forged = { ...ok.input, root: p.root, pathElements: p.path.pathElements, pathIndices: p.path.pathIndices, lender: 0n, pledgeBps: 0n, pledgeBpsPub: 0n, lenderAddr: 0n, loanRef: 0n, rho: p.allowance.rho };
     await rejects('stream', forged);
   });
@@ -713,7 +713,7 @@ describe('delegate', () => {
       expect(lenderClaimable(d.subs[1], at)).toBe(40n);
       await accepts('spend', spendInput({ ...s, claim: true, amount: 40n, now: at, lender: LENDER, extDataHash: 1n }).input);
       await rejects('spend', spendInput({ ...s, claim: true, amount: 41n, now: at, lender: LENDER, extDataHash: 1n }).input);
-      await accepts('stream', streamInput({ ...s, lender: LENDER, minRemaining: 100n, minRate: 5n, audience: 5n }).input);
+      await accepts('stream', streamInput({ ...s, lender: LENDER, spender: agent, minRemaining: 100n, minRate: 5n, audience: 5n }).input);
       // re-pledge or re-point of a sub: no proof
       const subWith = (policy: Partial<Policy>) => (d.input.subCommitment as bigint[]).map((x, i) => (i === 0 ? allowanceCommitment({ ...d.subs[0], policy: { ...d.subs[0].policy, ...policy } }) : x));
       await rejects('delegate', { ...d.input, subCommitment: subWith({ pledgeBps: BPS + 1n }) });

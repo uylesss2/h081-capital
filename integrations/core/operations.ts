@@ -57,6 +57,7 @@ export async function opLoanBorrow(bank: BankLike, args: Args) {
   const budget = parseAmount(args, 'budgetUsdg', USDG_DECIMALS, { baseKey: 'budget' });
   const dailyCap = has('dailyCap') || has('dailyCapUsdg') ? parseAmount(args, 'dailyCapUsdg', USDG_DECIMALS, { baseKey: 'dailyCap' }) : undefined;
   const maxPerTx = has('maxPerTx') || has('maxPerTxUsdg') ? parseAmount(args, 'maxPerTxUsdg', USDG_DECIMALS, { baseKey: 'maxPerTx' }) : undefined;
+  const principal = has('principal') || has('principalUsdg') ? parseAmount(args, 'principalUsdg', USDG_DECIMALS, { baseKey: 'principal' }) : undefined;
   const days = Number(args.days), unlockDays = Number(args.unlockDays);
   if (!(days > 0) || !(unlockDays > 0)) throw new Error('days and unlockDays must be positive numbers');
   if (unlockDays > days) throw new Error('unlockDays must not exceed days');
@@ -65,7 +66,7 @@ export async function opLoanBorrow(bank: BankLike, args: Args) {
     agentIndex = Number(args.agentIndex);
     if (!Number.isInteger(agentIndex) || agentIndex < 0 || agentIndex > 15) throw new Error('agentIndex must be 0..15');
   }
-  return bank.borrow(termsCode, { budget, dailyCap, maxPerTx, days, unlockDays, agentIndex });
+  return bank.borrow(termsCode, { budget, dailyCap, maxPerTx, principal, days, unlockDays, agentIndex });
 }
 
 export async function opStake(bank: BankLike, args: Args) {

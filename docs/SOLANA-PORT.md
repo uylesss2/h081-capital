@@ -16,7 +16,7 @@ work; no token is launched.
 - **Circuits, zkeys and verifying keys are byte-identical.** No circom or snarkjs setup step re-runs. The
   in-browser app and demo keep working untouched.
 - Poseidon parameters, domain tags (PK 1 … LENDER 12), commitment and nullifier formulas, Merkle depth 20,
-  the empty leaf `keccak256("stipend") mod p`, window/stream/pledge semantics, NOW_LOOKBACK 15 min,
+  the empty leaf `keccak256("stipend") mod p`, window/stream/pledge semantics, NOW_LOOKBACK 3 min (15 min before 2026-11-05),
   NOW_LOOKAHEAD 1 min, MAX_AMOUNT 2^128-1, GRANT_OUTPUTS 16, DELEGATE_OUTPUTS 4.
 - The EVM code in `contracts/` and its tests stay in the repo and keep passing; they become the reference
   implementation. `npm test` must still pass.
