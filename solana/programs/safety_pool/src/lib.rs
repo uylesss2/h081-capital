@@ -27,6 +27,14 @@
 //!   paid. A slash with an empty pool fails (`PoolEmpty`) so the cover stays open. A slash that takes the
 //!   whole pool, or leaves the share price below 1/MAX_SHARES_PER_ASSET, bumps the generation, retiring every
 //!   share (including unbonding ones); the next deposit starts a fresh share count.
+//! - Subrogation: the lender's claim on the stream outlives the loan's expiry, so a paid lender could still
+//!   collect every later receipt. `slash` therefore calls stream_loan `record_slash(loan_ref, paid)` by CPI,
+//!   signed by the pool's config PDA (the only signer stream_loan accepts for it): from then on stream_loan
+//!   forwards the loan's receipts to this pool's associated token account for the LOAN asset (`recovery`,
+//!   created by `slash` if missing; the slash caller pays its rent and the Subrogation account's) until the
+//!   amount paid is recovered, and only the rest to the lender. Recovered tokens are in the loan asset, not
+//!   the pool's mint, so they are not pool assets: the config authority moves them out with `sweep_recovery`
+//!   (never from the H081 vault) to convert them and `top_up` the pool. stream_loan's Slot/Ledger are unchanged.
 //! - `top_up(amount)`: anyone adds tokens to the pool's assets without minting shares, raising what every
 //!   outstanding share (unbonding ones too) redeems for. The H081 flywheel pays stakers this way from
 //!   PLATFORM fees only (docs/FLYWHEEL.md). Refused while no shares exist (nobody to pay; the tokens would
@@ -46,7 +54,7 @@ use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 pub mod stream_loan_view;
-use stream_loan_view::{load_slot, pending_in_escrow, pending_in_inbox, shortfall_of};
+use stream_loan_view::{load_slot, pending_in_escrow, pending_in_inbox, shortfall_of, ATA_PROGRAM_ID, STREAM_LOAN_ID};
 
 #[cfg(not(feature = "fast"))]
 declare_id!("EvKjwxVQX1RhyoBXisdbzk1JGLb5fMgZzHVLQAiPKJwe");
@@ -402,7 +410,9 @@ pub mod safety_pool {
         Ok(())
     }
 
-    /// Anyone: pays the lender of an insured loan stream_loan's shortfall, capped by the pool.
+    /// Anyone (the signer pays the rent of the recovery and Subrogation accounts): pays the lender of an
+    /// insured loan stream_loan's shortfall, capped by the pool, then records the payment in stream_loan so
+    /// the loan's later receipts repay this pool first (module docs, "Subrogation").
     pub fn slash(ctx: Context<Slash>, loan_ref: u64) -> Result<()> {
         require!(!ctx.accounts.cover.paid, SafetyError::AlreadyPaid);
         require!(!ctx.accounts.cover.released, SafetyError::Released);
@@ -420,6 +430,23 @@ pub mod safety_pool {
         let mint_key = ctx.accounts.config.mint;
         let bump = [ctx.accounts.config.bump];
         let seeds: &[&[u8]] = &[SAFETY_SEED, mint_key.as_ref(), &bump];
+        // subrogation: the recovery account (this pool's ATA for the loan asset) and the stream_loan record
+        {
+            let s = load_slot(&ctx.accounts.slot, loan_ref)?;
+            let a = &ctx.accounts;
+            require!(a.loan_mint.key() == s.asset && a.loan_token_program.key() == s.token_program, SafetyError::BadLoanMint);
+            let config_key = a.config.key();
+            require_keys_eq!(a.recovery.key(), stream_loan_view::ata(&config_key, &s.asset, &s.token_program), SafetyError::BadRecovery);
+            require_keys_eq!(a.subrogation.key(), stream_loan_view::subrogation_address(loan_ref), SafetyError::BadRecovery);
+            let config_info = a.config.to_account_info();
+            stream_loan_view::create_ata_idempotent(
+                &a.ata_program, &a.payer.to_account_info(), &a.recovery, &config_info, &a.loan_mint, &a.system_program.to_account_info(), &a.loan_token_program,
+            )?;
+            stream_loan_view::record_slash(
+                &a.stream_loan_program, &a.slot, &a.subrogation, &a.payer.to_account_info(), &config_info, &a.recovery,
+                &a.system_program.to_account_info(), loan_ref, pay, seeds,
+            )?;
+        }
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.key(),
@@ -499,6 +526,37 @@ pub mod safety_pool {
         let c = &mut ctx.accounts.config;
         c.exposure = c.exposure.saturating_sub(limit);
         emit!(CoverReleased { loan_ref, mint: c.mint, limit });
+        Ok(())
+    }
+
+    /// Config authority: moves `amount` of a slashed loan's recovered receipts (stream_loan forwarded them
+    /// to this pool's associated token account for the LOAN asset, see the module docs) to `destination`, to
+    /// be converted and paid back to stakers with `top_up`. Never touches the pool's own mint or its vault:
+    /// `recovery` must be the config PDA's ATA for a mint other than the pool's.
+    pub fn sweep_recovery(ctx: Context<SweepRecovery>, amount: u64) -> Result<()> {
+        require!(amount > 0, SafetyError::Amount);
+        let c = &ctx.accounts.config;
+        require!(ctx.accounts.asset_mint.key() != c.mint, SafetyError::NotRecoverable);
+        let tp = ctx.accounts.asset_token_program.key();
+        require_keys_eq!(ctx.accounts.recovery.key(), stream_loan_view::ata(&c.key(), &ctx.accounts.asset_mint.key(), &tp), SafetyError::BadRecovery);
+        let mint_key = c.mint;
+        let bump = [c.bump];
+        let seeds: &[&[u8]] = &[SAFETY_SEED, mint_key.as_ref(), &bump];
+        token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                tp,
+                TransferChecked {
+                    from: ctx.accounts.recovery.to_account_info(),
+                    mint: ctx.accounts.asset_mint.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.config.to_account_info(),
+                },
+                &[seeds],
+            ),
+            amount,
+            ctx.accounts.asset_mint.decimals,
+        )?;
+        emit!(RecoverySwept { mint: mint_key, asset: ctx.accounts.asset_mint.key(), amount, to: ctx.accounts.destination.key() });
         Ok(())
     }
 
@@ -763,6 +821,42 @@ pub struct Slash<'info> {
     pub token_program: Interface<'info, TokenInterface>,
     /// CHECK: stipend_pool escrow ["owed", loan asset, fieldOf(slot), loan_ref]; address checked, may not exist
     pub escrow: UncheckedAccount<'info>,
+    /// Pays the rent of the recovery account and of stream_loan's Subrogation account.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: the stream_loan program (address checked)
+    #[account(address = STREAM_LOAN_ID @ SafetyError::WrongStreamLoanProgram)]
+    pub stream_loan_program: UncheckedAccount<'info>,
+    /// CHECK: stream_loan Subrogation PDA ["subrogation", loan_ref] (address checked; created by the CPI)
+    #[account(mut)]
+    pub subrogation: UncheckedAccount<'info>,
+    /// CHECK: this pool's associated token account for the LOAN asset (address checked; created here if missing)
+    #[account(mut)]
+    pub recovery: UncheckedAccount<'info>,
+    /// CHECK: the loan asset's mint (must be the slot's asset)
+    pub loan_mint: UncheckedAccount<'info>,
+    /// CHECK: the loan asset's token program (must be the slot's)
+    pub loan_token_program: UncheckedAccount<'info>,
+    /// CHECK: associated token account program (address checked)
+    #[account(address = ATA_PROGRAM_ID @ SafetyError::BadRecovery)]
+    pub ata_program: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SweepRecovery<'info> {
+    #[account(seeds = [SAFETY_SEED, config.mint.as_ref()], bump = config.bump, has_one = authority @ SafetyError::ConfigAuthority)]
+    pub config: Account<'info, SafetyConfig>,
+    pub authority: Signer<'info>,
+    /// The recovered loan asset (not the pool's mint).
+    #[account(mint::token_program = asset_token_program)]
+    pub asset_mint: InterfaceAccount<'info, Mint>,
+    /// The config PDA's associated token account for `asset_mint` (address checked in the handler).
+    #[account(mut, token::mint = asset_mint, token::authority = config, token::token_program = asset_token_program)]
+    pub recovery: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut, token::mint = asset_mint, token::token_program = asset_token_program)]
+    pub destination: InterfaceAccount<'info, TokenAccount>,
+    pub asset_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -876,6 +970,15 @@ pub struct PoolRetired {
     pub generation: u64,
 }
 
+/// Recovered receipts of a slashed loan (in `asset`, the loan asset) moved out by the config authority.
+#[event]
+pub struct RecoverySwept {
+    pub mint: Pubkey,
+    pub asset: Pubkey,
+    pub amount: u64,
+    pub to: Pubkey,
+}
+
 /// Codes are 6000 + index.
 #[error_code]
 pub enum SafetyError {
@@ -943,6 +1046,14 @@ pub enum SafetyError {
     NotReleasable,
     #[msg("top-up larger than the pool's assets")]
     TopUpTooLarge,
+    #[msg("account is not the stream_loan program")]
+    WrongStreamLoanProgram,
+    #[msg("loan mint or token program is not the slot's")]
+    BadLoanMint,
+    #[msg("recovery account is not this pool's associated token account of the loan asset")]
+    BadRecovery,
+    #[msg("the pool's own mint cannot be swept")]
+    NotRecoverable,
 }
 
 #[cfg(test)]

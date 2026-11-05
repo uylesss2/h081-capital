@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 pub const REGISTRY_SEED: &[u8] = b"registry";
 pub const SLOT_SEED: &[u8] = b"slot";
 pub const LEDGER_SEED: &[u8] = b"ledger";
+pub const SUBROGATION_SEED: &[u8] = b"subrogation";
 
 /// Time after the allowance's expiry before an unpaid loan counts as a shortfall.
 pub const GRACE: u64 = 7 * 24 * 60 * 60;
@@ -54,6 +55,25 @@ pub struct Ledger {
     pub held: u64,
     /// total ever credited from the inbox (forwarded + held)
     pub received: u64,
+    pub bump: u8,
+}
+
+/// A safety-pool slash of this loan (recorded by `record_slash`, signed by the safety_pool config PDA).
+/// PDA ["subrogation", loan_ref u64 LE]; one per loan, created at the slash. After it exists, every receipt
+/// for the loan (synced inbox value in the loan asset) is forwarded to `to`, the safety pool's associated
+/// token account for the loan asset, until `paid` reaches `owed`; only the remainder reaches the lender.
+#[account]
+#[derive(InitSpace)]
+pub struct Subrogation {
+    pub loan_ref: u64,
+    /// the safety_pool config PDA that recorded the slash
+    pub safety_config: Pubkey,
+    /// where the subrogated receipts go (the safety pool's ATA for the loan asset)
+    pub to: Pubkey,
+    /// what the safety pool paid the lender for this loan
+    pub owed: u64,
+    /// what has been forwarded to `to` so far
+    pub paid: u64,
     pub bump: u8,
 }
 

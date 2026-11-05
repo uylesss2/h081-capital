@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha2';
 import { Connection, Keypair, PublicKey, SystemProgram, TransactionInstruction, type AccountMeta } from '@solana/web3.js';
 import { type Allowance, allowanceCommitment, allowanceNullifier, lenderClaimable, nextRho } from '../crypto.js';
 import { type AllowanceRecord, type LenderInfo, type LenderPayload, type MemoViews, type ViewingKey, unpackMemos } from '../encryption.js';
-import { LEVELS, spendInput } from '../inputs.js';
+import { LEVELS, minRemainingFor, spendInput } from '../inputs.js';
 import { MerkleTree } from '../merkle.js';
 import type { ProofResult } from '../prover.js';
 import { type SentTx, closeBuffer, send, simulate, uploadBuffer } from './buffer.js';
@@ -30,7 +30,8 @@ export const LOAN_ERROR = {
   NotTheLender: 6000, AlreadyFunded: 6001, WrongSlot: 6002, WrongAsset: 6003, StreamNotStarted: 6004, BadPayout: 6005, NoLoan: 6006,
   NothingOwed: 6007, NotAClaim: 6008, WrongPoolProgram: 6009, BadBuffer: 6010, BadPayload: 6011, BadTokenProgram: 6012, BadMint: 6013,
   BadInbox: 6014, BadLenderAccount: 6015, Overflow: 6016, BadEscrow: 6017, EscrowNotEmpty: 6018, BadTreasury: 6019,
-  UpgradeAuthority: 6020, PayoutNotProven: 6021, PrincipalTooLarge: 6022,
+  UpgradeAuthority: 6020, PayoutNotProven: 6021, PrincipalTooLarge: 6022, PrincipalMismatch: 6023, NotSafetyPool: 6024,
+  BadSubrogation: 6025, BadRecovery: 6026, BadSlashAmount: 6027,
 } as const;
 
 /**
@@ -39,8 +40,13 @@ export const LOAN_ERROR = {
  */
 export const payoutAudience = (payoutTo: PublicKey): bigint => fieldOf(payoutTo);
 
-/** Largest principal a stream proof backs (stream_loan::max_principal): minRemaining * pledgeBps / 10,000. */
+/**
+ * The principal a stream proof backs (stream_loan::max_principal): minRemaining * pledgeBps / 10,000. `fund`
+ * requires the principal to be exactly this, so the borrower fixes the amount by proving
+ * minRemaining = minRemainingFor(amount, pledgeBps) (src/inputs.ts).
+ */
 export const maxPrincipal = (minRemaining: bigint, pledgeBps: number | bigint): bigint => (minRemaining * BigInt(pledgeBps)) / 10_000n;
+export { minRemainingFor };
 
 /**
  * Owner of the treasury token accounts that receive the loan origination fee (stream_loan fee::TREASURY).
@@ -78,6 +84,14 @@ export function slotPda(loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): 
 /** Per (slot, mint) inbox accounting: ["ledger", loan_ref u64 LE, mint]. */
 export function ledgerPda(loanRef: bigint, mint: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID): PublicKey {
   return PublicKey.findProgramAddressSync([enc('ledger'), u64le(loanRef), mint.toBytes()], programId)[0];
+}
+
+/**
+ * A safety-pool slash recorded for the loan: ["subrogation", loan_ref u64 LE]. Exists only after a slash; while
+ * it does and `paid < owed`, sync/claim forward the loan's receipts to its `to` account before the lender.
+ */
+export function subrogationPda(loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): PublicKey {
+  return PublicKey.findProgramAddressSync([enc('subrogation'), u64le(loanRef)], programId)[0];
 }
 
 /** Associated token account of `owner` (on or off curve) for `mint`. */
@@ -133,10 +147,10 @@ export interface FundAccounts {
  * Fund against the stream proof staged in `buffer` (a stipend_pool Buffer holding borsh (Proof, StreamArgs)).
  * `payoutTo` receives principal - originationFee(principal), the treasury account the fee (it must exist when
  * the fee is above 0); the loan owes the full principal.
- * The proof's audience must be fieldOf(payoutTo) and the principal at most maxPrincipal(minRemaining, pledgeBps).
- * Whatever already sits in the inbox stays there and counts as repayment at the next sync (shares routed to an
- * unfunded slot are never forwarded); the pool escrow of the slot must be empty (pull it into the inbox first,
- * see SolanaLoanLenderWallet.fundUnchecked).
+ * The proof's audience must be fieldOf(payoutTo) and the principal exactly maxPrincipal(minRemaining, pledgeBps):
+ * the borrower's proof fixes the amount. Whatever already sits in the inbox (shares routed to the unfunded slot,
+ * never forwarded) is returned to `payoutTo` and does not count as repayment; the pool escrow of the slot must be
+ * empty (pull it into the inbox first, see SolanaLoanLenderWallet.fundUnchecked).
  */
 export function fundIx(a: FundAccounts, programId = LOCALNET_LOAN_PROGRAM_ID): TransactionInstruction {
   const tp = a.tokenProgram ?? SPL_TOKEN_PROGRAM_ID;
@@ -148,12 +162,30 @@ export function fundIx(a: FundAccounts, programId = LOCALNET_LOAN_PROGRAM_ID): T
   ], u64le(a.loanRef), u64le(a.principal));
 }
 
-/** Permissionless: credit and forward what arrived in the slot's inbox. `lender` is the slot's lender (for its ATA). */
-export function syncIx(payer: PublicKey, loanRef: bigint, mint: PublicKey, lender: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID): TransactionInstruction {
+/**
+ * Permissionless: credit and forward what arrived in the slot's inbox. `lender` is the slot's lender (for its ATA).
+ * `subrogationTo`: the `to` of the loan's Subrogation account when one exists with `paid < owed` (readSubrogation);
+ * any account otherwise (defaults to the Subrogation PDA itself).
+ */
+export function syncIx(
+  payer: PublicKey, loanRef: bigint, mint: PublicKey, lender: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID,
+  subrogationTo?: PublicKey,
+): TransactionInstruction {
+  const sub = subrogationPda(loanRef, programId);
   return ix(programId, 'sync', [
     w(slotPda(loanRef, programId)), w(ledgerPda(loanRef, mint, programId)), w(payer, true), r(mint), w(slotInbox(loanRef, mint, tokenProgram, programId)),
-    w(associatedTokenAddress(lender, mint, tokenProgram)), r(tokenProgram), r(SystemProgram.programId),
+    w(associatedTokenAddress(lender, mint, tokenProgram)), r(tokenProgram), r(SystemProgram.programId), w(sub), w(subrogationTo ?? sub),
   ], u64le(loanRef));
+}
+
+/**
+ * stream_loan `record_slash`: only a safety_pool SafetyConfig PDA may sign as `safetyConfig` (by CPI from
+ * safety_pool `slash`, which builds this itself); exposed so tests can show every other signer is refused.
+ */
+export function recordSlashIx(payer: PublicKey, loanRef: bigint, amount: bigint, safetyConfig: PublicKey, to: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID): TransactionInstruction {
+  return ix(programId, 'record_slash', [
+    r(slotPda(loanRef, programId)), w(subrogationPda(loanRef, programId)), w(payer, true), r(safetyConfig, true), r(to), r(SystemProgram.programId),
+  ], u64le(loanRef), u64le(amount));
 }
 
 export function collectIx(lender: PublicKey, loanRef: bigint, mint: PublicKey, destination: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID): TransactionInstruction {
@@ -168,13 +200,15 @@ export function collectIx(lender: PublicKey, loanRef: bigint, mint: PublicKey, d
  */
 export function claimIx(
   lender: PublicKey, loanRef: bigint, mint: PublicKey, spend: TransactionInstruction, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID,
+  subrogationTo?: PublicKey,
 ): TransactionInstruction {
   const slot = slotPda(loanRef, programId);
+  const sub = subrogationPda(loanRef, programId);
   // only the lender signs the outer transaction; the slot PDA (the pool's lender signer) is signed by CPI
   const passthrough = spend.keys.map((k) => ({ ...k, isSigner: k.isSigner && k.pubkey.equals(lender) }));
   return ix(programId, 'claim', [
     w(slot), w(ledgerPda(loanRef, mint, programId)), w(lender, true), r(spend.programId), r(mint), w(slotInbox(loanRef, mint, tokenProgram, programId)),
-    w(associatedTokenAddress(lender, mint, tokenProgram)), r(tokenProgram), r(SystemProgram.programId), ...passthrough,
+    w(associatedTokenAddress(lender, mint, tokenProgram)), r(tokenProgram), r(SystemProgram.programId), w(sub), w(subrogationTo ?? sub), ...passthrough,
   ], u64le(loanRef), u32le(spend.data.length), Uint8Array.from(spend.data));
 }
 
@@ -235,6 +269,19 @@ export interface LedgerAccount { loanRef: bigint; mint: PublicKey; held: bigint;
 export function decodeLedger(data: Uint8Array): LedgerAccount {
   const x = new Reader(data);
   return { loanRef: x.u64(), mint: x.key(), held: x.u64(), received: x.u64() };
+}
+
+/** The Subrogation account: a safety pool paid the lender `owed`; `paid` of the loan's receipts went to `to` so far. */
+export interface SubrogationAccount { loanRef: bigint; safetyConfig: PublicKey; to: PublicKey; owed: bigint; paid: bigint }
+export function decodeSubrogation(data: Uint8Array): SubrogationAccount {
+  const x = new Reader(data);
+  return { loanRef: x.u64(), safetyConfig: x.key(), to: x.key(), owed: x.u64(), paid: x.u64() };
+}
+
+/** The loan's Subrogation, or undefined before any slash. */
+export async function readSubrogation(connection: Connection, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<SubrogationAccount | undefined> {
+  const info = await connection.getAccountInfo(subrogationPda(loanRef, programId), 'confirmed');
+  return info && info.owner.equals(programId) ? decodeSubrogation(info.data) : undefined;
 }
 
 /** The LoanFunded event (`emit!`, logged as "Program data: <base64>"). `principal` is owed; `payoutTo` received principal - fee. */
@@ -363,7 +410,9 @@ export class SolanaLoanLenderWallet {
    * Fund a slot against a stream proof; the principal leaves the lender's associated token account:
    * principal - originationFee(principal) to `payoutTo` (a token account of `mint`), the fee to the treasury.
    * The loan owes the full principal. The proof must describe a live note this lender was handed (same
-   * agent, cap, expiry, pledge, routed total, start and asset, with the bounds holding).
+   * agent, cap, expiry, pledge, routed total, start and asset, with the bounds holding), and `principal` must
+   * be exactly what it backs, maxPrincipal(minRemaining, pledgeBps): the borrower fixed it by proving
+   * minRemaining = minRemainingFor(principal, pledgeBps).
    */
   async fund(loanRef: bigint, stream: { proof: ProofResult; args: StreamArgs }, mint: PublicKey, principal: bigint, payoutTo: PublicKey): Promise<SentTx> {
     const s = stream.args;
@@ -371,7 +420,6 @@ export class SolanaLoanLenderWallet {
     if (!s.lender.equals(slotPda(loanRef, this.programId))) throw new Error('stream proof names another lender');
     if (!s.asset.equals(mint)) throw new Error('stream proof names another asset');
     if (s.audience !== payoutAudience(payoutTo)) throw new Error('stream proof was not made for this payout account (audience must be fieldOf(payoutTo))');
-    if (principal <= 0n || principal > maxPrincipal(s.minRemaining, s.pledgeBps)) throw new Error('principal is above what the pledge can repay');
     await this.sync();
     const backing = this.current(loanRef).find((n) => {
       const a = n.allowance;
@@ -381,6 +429,9 @@ export class SolanaLoanLenderWallet {
         && a.remaining >= s.minRemaining && P.streamRate >= s.minRate;
     });
     if (!backing) throw new Error('stream proof does not match a live note handed to this lender');
+    if (principal <= 0n || principal !== maxPrincipal(s.minRemaining, s.pledgeBps)) {
+      throw new Error(`principal must be exactly what the proof backs: ${maxPrincipal(s.minRemaining, s.pledgeBps)} (minRemaining * pledgeBps / 10,000)`);
+    }
     return this.fundUnchecked(loanRef, stream, mint, principal, payoutTo);
   }
 
@@ -418,7 +469,13 @@ export class SolanaLoanLenderWallet {
   async syncLoan(loanRef: bigint, mint?: PublicKey, payer: Keypair = this.signer): Promise<SentTx> {
     const slot = await this.loan(loanRef);
     const m = mint ?? slot.asset;
-    return send(this.connection, payer, [syncIx(payer.publicKey, loanRef, m, slot.lender, await this.pool.tokenProgramOf(m), this.programId)]);
+    const sub = await this.subrogation(loanRef);
+    return send(this.connection, payer, [syncIx(payer.publicKey, loanRef, m, slot.lender, await this.pool.tokenProgramOf(m), this.programId, sub?.to)]);
+  }
+
+  /** The slash recorded for the loan by a safety pool, if any (its receipts go to `to` until `paid` reaches `owed`). */
+  async subrogation(loanRef: bigint): Promise<SubrogationAccount | undefined> {
+    return readSubrogation(this.connection, loanRef, this.programId);
   }
 
   /** The slot's lender takes shares the registry could not forward (lender account missing or frozen). */
@@ -579,10 +636,11 @@ export class SolanaLoanLenderWallet {
 
   /** Sends a prepared claim through the registry (`stream_loan.claim`); the share is credited in the same instruction. */
   async submitClaim(p: PreparedLoanClaim, loanRef = p.loanRef): Promise<SentTx> {
+    const sub = await this.subrogation(loanRef);
     const buf = await uploadBuffer(this.connection, this.pool.programId, this.signer, p.payload);
     try {
       const spend = spendIx(this.pool.programId, { ...p.accounts, buffer: buf.address });
-      return await send(this.connection, this.signer, [claimIx(this.signer.publicKey, loanRef, p.mint, spend, p.tokenProgram, this.programId)], { cuLimit: OP_CU_LIMIT });
+      return await send(this.connection, this.signer, [claimIx(this.signer.publicKey, loanRef, p.mint, spend, p.tokenProgram, this.programId, sub?.to)], { cuLimit: OP_CU_LIMIT });
     } catch (e) {
       await closeBuffer(this.connection, this.pool.programId, this.signer, buf.seed).catch(() => undefined);
       throw e;

@@ -48,4 +48,14 @@ pub enum LoanError {
     PayoutNotProven,
     #[msg("principal is zero or above what the pledge can repay (min_remaining * pledge_bps / 10,000)")]
     PrincipalTooLarge,
+    #[msg("principal must be exactly what the borrower's proof backs: min_remaining * pledge_bps / 10,000, above zero")]
+    PrincipalMismatch,
+    #[msg("signer is not a safety_pool config PDA")]
+    NotSafetyPool,
+    #[msg("subrogation account is not this loan's [\"subrogation\", loan_ref] PDA")]
+    BadSubrogation,
+    #[msg("recovery account is not the safety pool's associated token account of the loan asset")]
+    BadRecovery,
+    #[msg("slash amount is zero")]
+    BadSlashAmount,
 }

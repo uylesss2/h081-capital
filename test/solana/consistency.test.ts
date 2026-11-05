@@ -7,11 +7,11 @@ import { describe, expect, it } from 'vitest';
 import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { BUFFER_HEADER, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, POOL_INIT_LEN, POOL_SIZE, ROOT_HISTORY, escrowPda, fieldOf, initializePoolIxs } from '../../src/solana/index.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
-import { GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, decodeLedger, decodeSlot, ledgerPda, slotEscrow, slotInbox, slotPda } from '../../src/solana/lender.js';
+import { GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, decodeLedger, decodeSlot, ledgerPda, slotEscrow, slotInbox, slotPda, subrogationPda } from '../../src/solana/lender.js';
 import {
   CAPACITY_ERROR, CLASSIC_TOKEN_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_FAST_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID,
   LOCALNET_SAFETY_POOL_PROGRAM_ID, SAFETY_ERROR, SAFETY_POOL_ESCROW_PROGRAM_ID, SAFETY_STREAM_LOAN_PROGRAM_ID, SAFETY_VIRTUAL_ASSETS, SAFETY_VIRTUAL_SHARES, SAFETY_MAX_SHARES_PER_ASSET, CAPACITY_COOLDOWN,
-  STREAM_GRACE, ataAddress, encodeStreamLedger, encodeStreamSlot, streamEscrowPda, streamLedgerPda, streamSlotPda,
+  STREAM_GRACE, ataAddress, encodeStreamLedger, encodeStreamSlot, streamEscrowPda, streamLedgerPda, streamSlotPda, streamSubrogationPda,
 } from '../../src/solana/token.js';
 import { CAPACITY_WINDOW_SECS } from '../../relayer/solana.js';
 
@@ -59,6 +59,15 @@ describe('program ids', () => {
     expect(constPubkey('stream_loan/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_LOAN_PROGRAM_ID.toBase58());
     expect(constPubkey('safety_pool/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58());
     expect(constPubkey('capacity_stake/src/lib.rs', 'LOCALNET_ID')).toBe(LOCALNET_CAPACITY_STAKE_PROGRAM_ID.toBase58());
+    // stream_loan accepts a slash record only from these safety_pool programs' config PDAs (cfg-selected like POOL_PROGRAM_ID)
+    const safety = 'stream_loan/src/safety.rs';
+    expect(constPubkey(safety, 'LOCALNET_SAFETY_PROGRAM_ID')).toBe(LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58());
+    expect(constPubkey(safety, 'LOCALNET_SAFETY_FAST_PROGRAM_ID')).toBe(LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID.toBase58());
+    expect(constPubkey(safety, 'MAINNET_SAFETY_PROGRAM_ID')).toBe('HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt');
+    expect(src(safety)).toContain('#[cfg(not(feature = "mainnet"))]\npub const SAFETY_PROGRAM_IDS: &[Pubkey] = &[LOCALNET_SAFETY_PROGRAM_ID, LOCALNET_SAFETY_FAST_PROGRAM_ID];');
+    expect(src(safety)).toContain('#[cfg(feature = "mainnet")]\npub const SAFETY_PROGRAM_IDS: &[Pubkey] = &[MAINNET_SAFETY_PROGRAM_ID];');
+    expect(src(safety)).toContain('pub const SAFETY_SEED: &[u8] = b"safety";');
+    expect(src('safety_pool/src/lib.rs')).toContain('pub const SAFETY_SEED: &[u8] = b"safety";');
     // the mainnet build script patches exactly these lines (never a global replace, which would also patch LOCALNET_*)
     const build = readFileSync(resolve(SOL, 'scripts', 'build-phase2-mainnet.sh'), 'utf8');
     expect(build).toContain('s/^declare_id!');
@@ -111,6 +120,13 @@ describe('PDAs and seeds', () => {
     expect(src('safety_pool/src/stream_loan_view.rs')).toContain('pub const SLOT_SEED: &[u8] = b"slot";');
     expect(src('stream_loan/src/state.rs')).toContain('pub const LEDGER_SEED: &[u8] = b"ledger";');
     expect(src('safety_pool/src/stream_loan_view.rs')).toContain('pub const LEDGER_SEED: &[u8] = b"ledger";');
+    expect(src('stream_loan/src/state.rs')).toContain('pub const SUBROGATION_SEED: &[u8] = b"subrogation";');
+    expect(src('safety_pool/src/stream_loan_view.rs')).toContain('pub const SUBROGATION_SEED: &[u8] = b"subrogation";');
+    for (const ref of [1n, 1001n]) expect(streamSubrogationPda(ref).equals(subrogationPda(ref))).toBe(true);
+    // safety_pool builds the record_slash CPI by hand: the instruction and account names must be stream_loan's
+    expect(src('safety_pool/src/stream_loan_view.rs')).toContain('sighash("global", "record_slash")');
+    expect(src('stream_loan/src/lib.rs')).toContain('pub fn record_slash(ctx: Context<RecordSlash>, loan_ref: u64, amount: u64)');
+    expect(fields('stream_loan/src/lib.rs', 'RecordSlash').map((f) => f.split(':')[0])).toEqual(['slot', 'subrogation', 'payer', 'safety_config', 'to', 'system_program']);
   });
 });
 

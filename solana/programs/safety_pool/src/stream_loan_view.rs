@@ -1,13 +1,16 @@
-//! Read-only view of stream_loan accounts (same chain, read directly; no CPI, no crate dependency so
-//! the two programs build independently). Mirrors solana/programs/stream_loan/src/state.rs:
-//!   Slot   PDA ["slot", loan_ref u64 LE]          (Anchor account "Slot")
-//!   Ledger PDA ["ledger", loan_ref u64 LE, mint]  (Anchor account "Ledger")
+//! View of stream_loan accounts (same chain, read directly; no crate dependency so the two programs build
+//! independently) and the one CPI this program makes into it. Mirrors solana/programs/stream_loan/src/state.rs:
+//!   Slot        PDA ["slot", loan_ref u64 LE]          (Anchor account "Slot")
+//!   Ledger      PDA ["ledger", loan_ref u64 LE, mint]  (Anchor account "Ledger")
+//!   Subrogation PDA ["subrogation", loan_ref u64 LE]   (created by stream_loan `record_slash`, called from `slash`)
 //!   inbox  = associated token account of the slot PDA for the loan asset
 //!   escrow = stipend_pool token account ["owed", asset, fieldOf(slot PDA), loan_ref u64 LE]
 //! and its `shortfall_of`: routed shares still unsynced in the inbox, and shares the pool escrowed for
 //! the slot, count as paid.
-//! If stream_loan's layout, seeds or program id change, this file must change with them.
+//! If stream_loan's layout, seeds, instruction names or program id change, this file must change with them.
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use solana_sha256_hasher::hash;
 
 use crate::{SafetyError, GRACE};
@@ -22,6 +25,7 @@ const _: () = assert!(!same(&STREAM_LOAN_ID, &LOCALNET_STREAM_LOAN_ID), "mainnet
 pub const ATA_PROGRAM_ID: Pubkey = pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 pub const SLOT_SEED: &[u8] = b"slot";
 pub const LEDGER_SEED: &[u8] = b"ledger";
+pub const SUBROGATION_SEED: &[u8] = b"subrogation";
 /// stipend_pool program id and its escrow seed: the mainnet deployment with `--features mainnet`, the
 /// localnet key (solana/keys/stipend_pool-keypair.json) otherwise.
 pub const LOCALNET_POOL_PROGRAM_ID: Pubkey = pubkey!("AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3");
@@ -157,6 +161,95 @@ pub fn pending_in_escrow(slot_key: &Pubkey, s: &StreamSlot, escrow: &AccountInfo
         return Ok(0);
     }
     Ok(u64::from_le_bytes(d[64..72].try_into().unwrap()))
+}
+
+/// stream_loan's Subrogation PDA of a loan.
+pub fn subrogation_address(loan_ref: u64) -> Pubkey {
+    Pubkey::find_program_address(&[SUBROGATION_SEED, &loan_ref.to_le_bytes()], &STREAM_LOAN_ID).0
+}
+
+/// The associated token account of `owner` for `mint` under `token_program`.
+pub fn ata(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[owner.as_ref(), token_program.as_ref(), mint.as_ref()], &ATA_PROGRAM_ID).0
+}
+
+fn sighash(namespace: &str, name: &str) -> [u8; 8] {
+    let h = hash(format!("{namespace}:{name}").as_bytes()).to_bytes();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&h[..8]);
+    out
+}
+
+/// Associated Token Account `CreateIdempotent` (raw CPI; works for SPL Token and Token-2022 mints).
+#[allow(clippy::too_many_arguments)]
+pub fn create_ata_idempotent<'info>(
+    ata_program: &AccountInfo<'info>,
+    payer: &AccountInfo<'info>,
+    ata_account: &AccountInfo<'info>,
+    owner: &AccountInfo<'info>,
+    mint: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+) -> Result<()> {
+    let ix = Instruction {
+        program_id: ATA_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*payer.key, true),
+            AccountMeta::new(*ata_account.key, false),
+            AccountMeta::new_readonly(*owner.key, false),
+            AccountMeta::new_readonly(*mint.key, false),
+            AccountMeta::new_readonly(*system_program.key, false),
+            AccountMeta::new_readonly(*token_program.key, false),
+        ],
+        data: vec![1u8],
+    };
+    invoke(
+        &ix,
+        &[payer.clone(), ata_account.clone(), owner.clone(), mint.clone(), system_program.clone(), token_program.clone(), ata_program.clone()],
+    )?;
+    Ok(())
+}
+
+/// CPI stream_loan::record_slash(loan_ref, amount): creates the loan's Subrogation so stream_loan forwards
+/// the loan's receipts to `to` (this pool's ATA for the loan asset) until `amount` is recovered. Signed by
+/// the pool's config PDA (`config_seeds`); stream_loan accepts no other signer. Account order is
+/// stream_loan's RecordSlash: slot, subrogation, payer, safety_config, to, system_program.
+#[allow(clippy::too_many_arguments)]
+pub fn record_slash<'info>(
+    stream_loan_program: &AccountInfo<'info>,
+    slot: &AccountInfo<'info>,
+    subrogation: &AccountInfo<'info>,
+    payer: &AccountInfo<'info>,
+    config: &AccountInfo<'info>,
+    to: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    loan_ref: u64,
+    amount: u64,
+    config_seeds: &[&[u8]],
+) -> Result<()> {
+    require_keys_eq!(*stream_loan_program.key, STREAM_LOAN_ID, SafetyError::WrongStreamLoanProgram);
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&sighash("global", "record_slash"));
+    data.extend_from_slice(&loan_ref.to_le_bytes());
+    data.extend_from_slice(&amount.to_le_bytes());
+    let ix = Instruction {
+        program_id: STREAM_LOAN_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(*slot.key, false),
+            AccountMeta::new(*subrogation.key, false),
+            AccountMeta::new(*payer.key, true),
+            AccountMeta::new_readonly(*config.key, true),
+            AccountMeta::new_readonly(*to.key, false),
+            AccountMeta::new_readonly(*system_program.key, false),
+        ],
+        data,
+    };
+    invoke_signed(
+        &ix,
+        &[slot.clone(), subrogation.clone(), payer.clone(), config.clone(), to.clone(), system_program.clone(), stream_loan_program.clone()],
+        &[config_seeds],
+    )?;
+    Ok(())
 }
 
 /// Same rule as stream_loan::state::shortfall_of (GRACE is this program's copy of stream_loan's).

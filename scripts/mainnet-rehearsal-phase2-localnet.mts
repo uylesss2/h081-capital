@@ -560,14 +560,14 @@ async function run(conn: Connection, localGenesis: string) {
   const la2 = loanAccounts(ref2, USDG, T22, ID.loan, ID.pool);
   const vs = await viewShortfall(conn, stranger, S, ref2, la2);
   record('safety_pool sees loan 2 shortfall = principal (through stream_loan state)', vs === principal2, `shortfall ${vs}`);
-  await expectCode('slash of the healthy loan 1 is refused (no cover)', send(conn, stranger, [slashIx(S, H081, ref1, loanAccounts(ref1, USDG, T22, ID.loan, ID.pool), lenderH, SPL)]), 3012);
+  await expectCode('slash of the healthy loan 1 is refused (no cover)', send(conn, stranger, [slashIx(S, H081, ref1, loanAccounts(ref1, USDG, T22, ID.loan, ID.pool), lenderH, SPL, stranger.publicKey)]), 3012);
   const lenderHBefore = await bal(lenderH), assetsBefore = (await scfg()).assets;
-  const sl = await send(conn, stranger, [slashIx(S, H081, ref2, la2, lenderH, SPL)]);
+  const sl = await send(conn, stranger, [slashIx(S, H081, ref2, la2, lenderH, SPL, stranger.publicKey)]);
   cuOf('safety_pool slash', sl.computeUnits);
   const pay = [principal2, assetsBefore, COVER_LIMIT].reduce((a, x) => (x < a ? x : a));
   record('slash pays the lender min(shortfall, assets, cover) in H081 and marks the cover paid',
     (await bal(lenderH)) === lenderHBefore + pay && (await scfg()).assets === assetsBefore - pay && decodeCover((await conn.getAccountInfo(cov2, 'confirmed'))!.data).paid, `paid ${pay}`);
-  await expectCode('a second slash of the same cover is refused', send(conn, stranger, [slashIx(S, H081, ref2, la2, lenderH, SPL)]), SAFETY_ERROR.AlreadyPaid);
+  await expectCode('a second slash of the same cover is refused', send(conn, stranger, [slashIx(S, H081, ref2, la2, lenderH, SPL, stranger.publicKey)]), SAFETY_ERROR.AlreadyPaid);
 
   // total cap: fill to exactly 1,000,000 H081 of assets, one base unit more is refused
   for (let a = (await scfg()).assets; a < H081_MAX_TOTAL; a = (await scfg()).assets) {
