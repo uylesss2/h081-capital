@@ -19,6 +19,17 @@ export type SolanaOp = 'transact' | 'spend' | 'grant' | 'delegate';
 export const SOLANA_OPS: readonly SolanaOp[] = ['transact', 'spend', 'grant', 'delegate'];
 
 /**
+ * Largest encrypted output (`Vec<u8>` in ext) a relayer accepts, per kind of memo. The SDK's memos are bounded
+ * (src/encryption.ts, src/solana/wallet.ts: ephemeralPub 32 | nonce 24 | XChaCha20-Poly1305 of a JSON payload
+ * whose bigints are at most 64 hex digits): a note memo is at most 393 bytes, an allowance memo with three
+ * copies (agent, owner, lender) plus the Solana extras 6,192, a lender copy 2,062. Anything larger is not
+ * something the SDK produced, and would only make the relayer pay for more staging transactions.
+ */
+export const MAX_NOTE_MEMO = 1024;
+export const MAX_ALLOWANCE_MEMO = 8192;
+export const MAX_LENDER_MEMO = 3072;
+
+/**
  * What a wallet sends to a relayer (POST /v1/solana/relay). Account hints are optional: the relayer derives
  * every account it can from the payload and checks the hints it uses.
  */
@@ -73,7 +84,12 @@ class Reader {
   u64(): bigint { const t = this.take(8); return new DataView(t.buffer, t.byteOffset, 8).getBigUint64(0, true); }
   u128(): bigint { const t = this.take(16); let x = 0n; for (let i = 15; i >= 0; i--) x = (x << 8n) | BigInt(t[i]); return x; }
   i128(): bigint { return BigInt.asIntN(128, this.u128()); }
-  vec(): Uint8Array { return this.take(this.u32()); }
+  /** A borsh Vec<u8> of at most `max` bytes (the length is read before the bytes, so an oversized claim is refused without reading them). */
+  vec(max: number, what: string): Uint8Array {
+    const n = this.u32();
+    if (n > max) throw new PayloadError('ext_too_large', `${what} is ${n} bytes; the relayer accepts at most ${max}`);
+    return this.take(n);
+  }
   done(): void {
     if (this.o !== this.b.length) throw new PayloadError('payload_trailing', `${this.b.length - this.o} trailing bytes`);
   }
@@ -86,17 +102,24 @@ export interface DecodedTransact {
 }
 export interface DecodedSpend {
   op: 'spend';
-  root: bigint; nullifier: bigint; publicAmount: bigint; publicRecipient: PublicKey; publicAsset: PublicKey; fee: bigint; timestamp: bigint;
+  root: bigint; nullifier: bigint; newAllowanceCommitment: bigint; payCommitment: bigint; publicAmount: bigint; publicRecipient: PublicKey;
+  publicAsset: PublicKey; fee: bigint; timestamp: bigint; receipt: bigint;
   lenderAmount: bigint; lenderAddr: bigint; loanRef: bigint; isLenderClaim: boolean; extDataHash: bigint;
   relayer: PublicKey; feeRecipient: PublicKey;
 }
-export interface DecodedGrant { op: 'grant'; root: bigint; nullifiers: [bigint, bigint]; extDataHash: bigint }
-export interface DecodedDelegate { op: 'delegate'; root: bigint; nullifier: bigint; timestamp: bigint; extDataHash: bigint }
+export interface DecodedGrant {
+  op: 'grant'; root: bigint; nullifiers: [bigint, bigint]; allowanceCommitments: bigint[]; changeCommitment: bigint; totalCommitment: bigint; extDataHash: bigint;
+}
+export interface DecodedDelegate {
+  op: 'delegate'; root: bigint; nullifier: bigint; subCommitments: bigint[]; residualCommitment: bigint; timestamp: bigint; extDataHash: bigint;
+}
 export type DecodedOp = DecodedTransact | DecodedSpend | DecodedGrant | DecodedDelegate;
 
 /**
  * Decodes a staged payload and checks that its extDataHash matches the ext bytes (the program checks the
- * same; doing it here costs nothing and refuses junk before anything is staged).
+ * same; doing it here costs nothing and refuses junk before anything is staged). Every encrypted output is
+ * capped at the size the SDK emits (MAX_*_MEMO). Every public input the program derives from the args is
+ * kept, so a relayer can verify the proof (payload[0..PROOF_BYTES]) off-chain before it stages anything.
  */
 export function decodeRelayPayload(op: SolanaOp, payload: Uint8Array): DecodedOp {
   const r = new Reader(payload);
@@ -108,30 +131,33 @@ export function decodeRelayPayload(op: SolanaOp, payload: Uint8Array): DecodedOp
     const nullifiers: [bigint, bigint] = [r.f(), r.f()];
     const commitments: [bigint, bigint] = [r.f(), r.f()];
     const recipient = r.key(), relayer = r.key(), feeRecipient = r.key(), extAmount = r.i128(), fee = r.u128();
-    r.vec(); r.vec();
+    r.vec(MAX_NOTE_MEMO, 'encryptedOutputs[0]'); r.vec(MAX_NOTE_MEMO, 'encryptedOutputs[1]');
     out = { op, root, publicAmount, extDataHash: h, nullifiers, commitments, recipient, relayer, feeRecipient, extAmount, fee };
   } else if (op === 'spend') {
-    const root = r.f(), nullifier = r.f();
-    r.f(); r.f(); // successor and payout commitments
-    const publicAmount = r.u128(), publicRecipient = r.key(), publicAsset = r.key(), fee = r.u128(), timestamp = r.u64();
-    r.f(); // receipt
+    const root = r.f(), nullifier = r.f(), newAllowanceCommitment = r.f(), payCommitment = r.f();
+    const publicAmount = r.u128(), publicRecipient = r.key(), publicAsset = r.key(), fee = r.u128(), timestamp = r.u64(), receipt = r.f();
     const lenderAmount = r.u128(), lenderAddr = r.f(), loanRef = r.u64(), isLenderClaim = r.u8() === 1, h = r.f();
     const relayer = r.key(), feeRecipient = r.key();
-    r.vec(); r.vec(); r.vec();
-    out = { op, root, nullifier, publicAmount, publicRecipient, publicAsset, fee, timestamp, lenderAmount, lenderAddr, loanRef, isLenderClaim, extDataHash: h, relayer, feeRecipient };
+    r.vec(MAX_ALLOWANCE_MEMO, 'encryptedAllowance'); r.vec(MAX_NOTE_MEMO, 'encryptedPayment'); r.vec(MAX_LENDER_MEMO, 'encryptedLender');
+    out = {
+      op, root, nullifier, newAllowanceCommitment, payCommitment, publicAmount, publicRecipient, publicAsset, fee, timestamp, receipt,
+      lenderAmount, lenderAddr, loanRef, isLenderClaim, extDataHash: h, relayer, feeRecipient,
+    };
   } else if (op === 'grant') {
     const root = r.f();
     const nullifiers: [bigint, bigint] = [r.f(), r.f()];
-    for (let i = 0; i < GRANT_OUTPUTS + 2; i++) r.f();
-    const h = r.f();
-    for (let i = 0; i <= GRANT_OUTPUTS; i++) r.vec();
-    out = { op, root, nullifiers, extDataHash: h };
+    const allowanceCommitments = Array.from({ length: GRANT_OUTPUTS }, () => r.f());
+    const changeCommitment = r.f(), totalCommitment = r.f(), h = r.f();
+    for (let i = 0; i < GRANT_OUTPUTS; i++) r.vec(MAX_ALLOWANCE_MEMO, `encryptedAllowances[${i}]`);
+    r.vec(MAX_NOTE_MEMO, 'encryptedChange');
+    out = { op, root, nullifiers, allowanceCommitments, changeCommitment, totalCommitment, extDataHash: h };
   } else if (op === 'delegate') {
     const root = r.f(), nullifier = r.f();
-    for (let i = 0; i <= DELEGATE_OUTPUTS; i++) r.f();
-    const timestamp = r.u64(), h = r.f();
-    for (let i = 0; i <= DELEGATE_OUTPUTS; i++) r.vec();
-    out = { op, root, nullifier, timestamp, extDataHash: h };
+    const subCommitments = Array.from({ length: DELEGATE_OUTPUTS }, () => r.f());
+    const residualCommitment = r.f(), timestamp = r.u64(), h = r.f();
+    for (let i = 0; i < DELEGATE_OUTPUTS; i++) r.vec(MAX_ALLOWANCE_MEMO, `encryptedSubs[${i}]`);
+    r.vec(MAX_ALLOWANCE_MEMO, 'encryptedResidual');
+    out = { op, root, nullifier, subCommitments, residualCommitment, timestamp, extDataHash: h };
   } else {
     throw new PayloadError('bad_op', `unknown operation ${String(op)}`);
   }

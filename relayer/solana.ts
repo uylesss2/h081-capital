@@ -15,9 +15,10 @@ import {
   AddressLookupTableAccount, Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY, TransactionInstruction,
 } from '@solana/web3.js';
 import {
-  TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, unpackAccount,
+  ACCOUNT_SIZE, ExtensionType, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAccountLen,
+  getAccountTypeOfMintType, getAssociatedTokenAddressSync, getExtensionTypes, unpackAccount, unpackMint,
 } from '@solana/spl-token';
-import { type OpPlan, abandonPlan, planOperation, sendV0, simulateV0, stagePlan } from '../src/solana/alt.js';
+import { type OpPlan, abandonPlan, planOperation, planTransactions, sendV0, simulateV0, stagePlan } from '../src/solana/alt.js';
 import type { PriorityOptions } from '../src/solana/send.js';
 import { fieldOf } from '../src/solana/field.js';
 import { createVaultIx, delegateIx, grantIx, spendIx, transactIx, type SpendAccounts } from '../src/solana/ops.js';
@@ -28,14 +29,27 @@ import {
 } from '../src/solana/relay.js';
 import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, readCapacity } from '../src/solana/token.js';
 import { OP_CU_LIMIT } from '../src/solana/wallet.js';
-import { DEFAULT_FEE_BPS, LAUNCH_WALLET_DENYLIST, type RelayerConfig, isDenyListed } from './config.js';
+import { DEFAULT_CREATE_ACCOUNT_LAMPORTS, DEFAULT_FEE_BPS, DEFAULT_STAGING_LAMPORTS, LAUNCH_WALLET_DENYLIST, type RelayerConfig, isDenyListed } from './config.js';
 import { RelayError, badRequest, toRelayError } from './errors.js';
 import { InFlight } from './ratelimit.js';
+import { ProofVerifier, type RelayProofVerifier } from './verify.js';
 
-/** The pool accepts `now` up to 15 minutes old; staging takes time, so the relayer wants this much slack left. */
-export const TIMESTAMP_SLACK = 120n;
-const NOW_LOOKBACK = 900n;
-const NOW_LOOKAHEAD = 60n;
+/**
+ * The pool accepts `now` up to NOW_LOOKBACK old; staging takes time, so the relayer wants this much slack left.
+ * 60 s covers the staging transactions with margin and leaves a browser two minutes between choosing `now` and
+ * the relayer accepting the proof (with the old 15-minute look-back this was 120 s of slack).
+ */
+export const TIMESTAMP_SLACK = 60n;
+/** stipend_pool state.rs NOW_LOOKBACK (3 minutes) and NOW_LOOKAHEAD: the window a proof's `now` must land in. */
+export const NOW_LOOKBACK = 180n;
+export const NOW_LOOKAHEAD = 60n;
+
+/** Base fee of a one-signer transaction. */
+export const LAMPORTS_PER_SIGNATURE = 5_000;
+/** Rent-exempt balance of an account of `bytes`: (128 + bytes) * 3,480 lamports per byte-year * 2 years (mainnet's rent parameters). */
+export const rentExempt = (bytes: number) => (128 + bytes) * 6_960;
+/** Token-2022 account size assumed when the mint's extensions cannot be read (covers ImmutableOwner, TransferFeeAmount and TransferHookAccount). */
+export const TOKEN_2022_ACCOUNT_BYTES_FALLBACK = 200;
 
 export interface SolanaRelayerOptions {
   connection: Connection;
@@ -63,6 +77,26 @@ export interface SolanaRelayerOptions {
   priority?: PriorityLaneOptions;
   /** the chain transport (stage, simulate, send, abandon); injectable so tests need no validator */
   io?: RelayIo;
+  /**
+   * Surcharge per account the relayer creates for an operation (a withdrawal's or payout's ATA, a vault), per
+   * fee mint (base58) in base units of that mint. The rent of a created account belongs to the account's owner,
+   * who can close it and keep it, so the relayer never pays it uncovered: a mint without a surcharge here means
+   * the relayer creates nothing for it (400 account_creation_disabled), and with one the fee must be at least
+   * the relay fee plus the surcharge per created account (400 fee_too_low).
+   */
+  createAccountFees?: Map<string, bigint>;
+  /** lamports one surcharge is deemed to cover (default DEFAULT_CREATE_ACCOUNT_LAMPORTS) */
+  createAccountLamports?: number;
+  /** lamports the relay fee is deemed to cover for staging, per relay (default DEFAULT_STAGING_LAMPORTS) */
+  stagingLamports?: number;
+  /**
+   * Verifies every proof off-chain before anything is staged (ProofVerifier over the program's verifying keys).
+   * Without one the relayer relays nothing (503 proof_verifier_unavailable): a proof that fails on chain would
+   * still have cost the staging transactions.
+   */
+  verifier?: RelayProofVerifier;
+  /** operational log line (a buffer whose rent could not be recovered, ...); default console.error */
+  log?: (line: string) => void;
 }
 
 export interface PriorityLaneOptions { maxInFlight: number; maxLamports: number; priceCeil: number }
@@ -87,11 +121,15 @@ export interface Inspection {
   op: SolanaOp;
   fee: {
     paid: string; required: string | null; min: string | null; bps: number; publicAmount: string; mint: string | null; feeAccount: string | null;
+    /** surcharge per account the relayer would create, for the fee mint (null: none configured, or no fee mint) */
+    createAccountFee: string | null;
   };
+  /** whether the proof verifies off-chain (null: the terms did not pass, or this relayer cannot verify) */
+  proof: { verified: boolean | null };
   capacity: { needed: boolean; operator: string | null; used: string | null; limit: string | null; ok: boolean } | null;
   chain: { rootKnown: boolean; nullifiersUnspent: boolean[]; timestampFresh: boolean | null };
   accounts: { recipientExists: boolean | null; vaultExists: boolean | null; lenderTokenUsable: boolean | null } | null;
-  plan: { payloadBytes: number; setupTxs: number; writeTxs: number } | null;
+  plan: { payloadBytes: number; setupTxs: number; writeTxs: number; createdAccounts: number; lamports: { estimate: number; covered: number } } | null;
   refusals: Array<{ status: number; code: string; message: string }>;
 }
 
@@ -117,7 +155,7 @@ export const CAPACITY_DECIMALS = 6;
 /** SolanaRelayer options from the loaded configuration: treasury, fee rate and capacity_stake as configured. */
 export function solanaRelayerOptions(
   s: NonNullable<RelayerConfig['solana']>,
-  base: Pick<SolanaRelayerOptions, 'connection' | 'payer' | 'lookupTables' | 'allowUnpaid'>,
+  base: Pick<SolanaRelayerOptions, 'connection' | 'payer' | 'lookupTables' | 'allowUnpaid' | 'verifier' | 'log'>,
 ): SolanaRelayerOptions {
   const capacity = s.capacity && {
     freeTier: s.capacity.freeTier,
@@ -127,7 +165,13 @@ export function solanaRelayerOptions(
   return {
     ...base, programId: s.programId ? new PublicKey(s.programId) : undefined, minFees: s.minFees,
     minLamports: s.minLamports, maxInFlight: s.maxInFlight, treasury: new PublicKey(s.treasury), feeBps: s.feeBps, capacity,
+    createAccountFees: s.createAccountFees, createAccountLamports: s.createAccountLamports, stagingLamports: s.stagingLamports,
   };
+}
+
+/** The proof verifier the configuration names (reads and pins the verifying keys; throws when any is missing or does not match its pin). */
+export function proofVerifierFromConfig(s: NonNullable<RelayerConfig['solana']>): ProofVerifier {
+  return new ProofVerifier({ circuitsDir: s.circuitsDir, vkeySha256: s.vkeySha256 });
 }
 
 /** 30 days, the period shieldCap is measured over. */
@@ -231,6 +275,19 @@ export interface CheckedTerms {
   capacity?: CapacityTicket;
 }
 
+/** An account the final transaction creates at the relayer's expense. */
+export interface AccountCreation { account: PublicKey; what: string; lamports: number }
+
+/** What the hot wallet is estimated to spend on a relay, and what the fee policy covers. */
+export interface LamportBudget {
+  /** rent of created accounts + base fee of every transaction (+ the priority lane's cap per transaction) */
+  estimate: number;
+  /** stagingLamports + createAccountLamports per created account (+ the priority lane's cap per transaction) */
+  covered: number;
+  createdAccounts: number;
+  transactions: number;
+}
+
 /** An operation checked and planned, not sent. */
 export interface PreparedRelay {
   op: SolanaOp;
@@ -242,6 +299,7 @@ export interface PreparedRelay {
   fallbacks: TransactionInstruction[][];
   /** capacity to count when the relay is sent */
   capacity?: CapacityTicket;
+  lamports: LamportBudget;
 }
 
 const keyOrBad = (s: unknown, what: string): PublicKey => {
@@ -253,10 +311,13 @@ export class SolanaRelayer {
   readonly programId: PublicKey;
   readonly inFlight = new InFlight();
   private tokenPrograms = new Map<string, PublicKey>();
+  /** bytes of a token account of each known mint (legacy: 165; Token-2022: the mint's required account extensions) */
+  private accountBytes = new Map<string, number>();
   private busy = 0;
   private busyPriority = 0;
   readonly capacity?: CapacityGate;
   private readonly io: RelayIo;
+  private readonly log: (line: string) => void;
 
   constructor(readonly opts: SolanaRelayerOptions) {
     this.programId = opts.programId ?? LOCALNET_POOL_PROGRAM_ID;
@@ -265,9 +326,16 @@ export class SolanaRelayer {
     if (isDenyListed(owner)) throw new Error(`fee account owner ${owner.toBase58()} is an H081 launch wallet; platform fees never go to a launch wallet`);
     const bps = opts.feeBps ?? DEFAULT_FEE_BPS;
     if (!Number.isInteger(bps) || bps < 0 || bps > 10_000) throw new Error('feeBps must be an integer in 0..10000');
+    for (const m of opts.createAccountFees?.keys() ?? []) {
+      if (!opts.minFees.has(m)) throw new Error(`createAccountFees: ${m} is not a fee mint`);
+    }
     if (opts.capacity) this.capacity = new CapacityGate(opts.capacity);
     this.io = opts.io ?? { stagePlan, simulateV0, sendV0, abandonPlan };
+    this.log = opts.log ?? ((line) => console.error(line));
   }
+
+  get createAccountLamports(): number { return this.opts.createAccountLamports ?? DEFAULT_CREATE_ACCOUNT_LAMPORTS; }
+  get stagingLamports(): number { return this.opts.stagingLamports ?? DEFAULT_STAGING_LAMPORTS; }
 
   /** The priority lane's fee caps, when the lane exists. */
   get priorityLane(): PriorityLaneOptions | undefined { return this.opts.priority; }
@@ -317,8 +385,14 @@ export class SolanaRelayer {
       if (!info.owner.equals(TOKEN_PROGRAM_ID) && !info.owner.equals(TOKEN_2022_PROGRAM_ID)) throw badRequest('unknown_mint', `${k} is not an SPL Token / Token-2022 mint`);
       tp = info.owner;
       this.tokenPrograms.set(k, tp);
+      this.accountBytes.set(k, tokenAccountBytes(mint, info, tp));
     }
     return tp;
+  }
+
+  /** Rent the relayer would pay for a token account of `mint` (an ATA, or the pool's vault). */
+  private rentOfTokenAccount(mint: PublicKey): number {
+    return rentExempt(this.accountBytes.get(mint.toBase58()) ?? TOKEN_2022_ACCOUNT_BYTES_FALLBACK);
   }
 
   /** The fee account for a configured mint: the treasury's associated token account. */
@@ -342,7 +416,25 @@ export class SolanaRelayer {
       feeAccounts: Object.fromEntries(mints.map((m) => [m, this.feeAccount(new PublicKey(m)).toBase58()])),
       lookupTables: (this.opts.lookupTables ?? []).map((t) => t.key.toBase58()),
       ...(cap ? { capacity: { freeTier: cap.freeTier.toString(), assets: [...cap.assets] } } : {}),
+      // what creating an account for an operation costs on top of the fee (a mint missing here: the relayer creates none for it)
+      createAccountFees: Object.fromEntries([...(this.opts.createAccountFees ?? [])].map(([k, v]) => [k, v.toString()])),
+      createAccountLamports: this.createAccountLamports, stagingLamports: this.stagingLamports,
+      proofVerification: this.opts.verifier instanceof ProofVerifier ? { vkeySha256: this.opts.verifier.vkeySha256 } : { vkeySha256: null },
     };
+  }
+
+  /**
+   * Verifies the payload's Groth16 proof off-chain against the program's public inputs, before any read of
+   * the chain or any staging. 400 invalid_proof when it does not verify; 503 when this relayer cannot verify.
+   */
+  private async requireValidProof(checked: CheckedTerms): Promise<void> {
+    const v = this.opts.verifier;
+    if (!v) throw new RelayError(503, 'proof_verifier_unavailable', 'this relayer has no verifying keys loaded and relays nothing without them');
+    const d = checked.decoded;
+    if (d.op === 'transact' && (d.extAmount !== 0n || d.fee !== 0n) && !checked.mint) throw badRequest('mint_required', 'a transact that moves tokens needs the mint');
+    if (!(await v.verify(checked.payload, d, checked.mint))) {
+      throw badRequest('invalid_proof', `the ${d.op} proof does not verify against the program's public inputs; nothing was staged`);
+    }
   }
 
   /**
@@ -429,16 +521,74 @@ export class SolanaRelayer {
     return { recipientExists: null as boolean | null, vaultExists: null as boolean | null, lenderTokenUsable: null as boolean | null };
   }
 
-  /** The transactions of an operation (reads the accounts it names). Throws the relay API's 400s. */
-  private async planFor(req: SolanaRelayBody, checked: CheckedTerms): Promise<Pick<PreparedRelay, 'mint' | 'plan' | 'fallbacks'> & { accounts: ReturnType<SolanaRelayer['emptyAccounts']> }> {
+  /**
+   * The fee an operation must pay when the relayer creates `creations` for it: the relay fee plus the
+   * surcharge per created account, in the fee mint. Refuses (400) an operation that pays no fee, a fee mint
+   * without a surcharge, and a fee below the total. Nothing when no account is created.
+   */
+  private creationFeeRefusal(checked: CheckedTerms, creations: AccountCreation[]): RelayError | undefined {
+    if (creations.length === 0) return undefined;
+    const names = creations.map((c) => `${c.what} ${c.account.toBase58()}`).join(', ');
+    const n = creations.length;
+    const mint = checked.mint;
+    if (!mint || checked.fee === 0n) {
+      return new RelayError(400, 'account_creation_disabled', `${names} ${n === 1 ? 'does' : 'do'} not exist and this operation pays no fee; the relayer creates no account for free`);
+    }
+    const surcharge = this.opts.createAccountFees?.get(mint.toBase58());
+    if (surcharge === undefined) {
+      return new RelayError(400, 'account_creation_disabled',
+        `${names} ${n === 1 ? 'does' : 'do'} not exist and this relayer does not create accounts paid in ${mint.toBase58()} (no create-account surcharge for it); create ${n === 1 ? 'it' : 'them'} first`);
+    }
+    const min = this.opts.minFees.get(mint.toBase58()) ?? 0n;
+    const base = requiredFee(min, this.feeBps, publicAmountOf(checked.decoded));
+    const need = base + surcharge * BigInt(n);
+    if (checked.fee < need) {
+      return new RelayError(400, 'fee_too_low',
+        `fee ${checked.fee} is below ${need}: creating ${names} adds a surcharge of ${surcharge} per account (${n}) on top of the ${base} relay fee`);
+    }
+    return undefined;
+  }
+
+  /**
+   * What the hot wallet is estimated to spend on a plan against what the fee policy covers, and the refusal
+   * (400 lamport_budget_exceeded) when it would cost more: the surcharges and the relay fee are priced for
+   * what they cover, and anything beyond that is the relayer's uncovered loss.
+   */
+  private lamportBudget(plan: OpPlan, creations: AccountCreation[], lane?: 'priority'): { budget: LamportBudget; refusal?: RelayError } {
+    const transactions = planTransactions(plan);
+    const priorityPerTx = lane === 'priority' ? this.opts.priority?.maxLamports ?? 0 : 0;
+    const rent = creations.reduce((s, c) => s + c.lamports, 0);
+    const estimate = rent + transactions * (LAMPORTS_PER_SIGNATURE + priorityPerTx);
+    const covered = this.stagingLamports + creations.length * this.createAccountLamports + transactions * priorityPerTx;
+    const budget = { estimate, covered, createdAccounts: creations.length, transactions };
+    const refusal = estimate > covered
+      ? new RelayError(400, 'lamport_budget_exceeded',
+        `this relay would cost the relayer about ${estimate} lamports (${rent} of rent for ${creations.length} account(s), ${transactions} transactions), above the ${covered} its fee policy covers`)
+      : undefined;
+    return { budget, refusal };
+  }
+
+  /**
+   * The transactions of an operation (reads the accounts it names). Throws the relay API's 400s when it
+   * cannot plan; a plan that is refused on price (created accounts without their surcharge, lamports over
+   * budget) is returned with its `refusal`, so a preflight can report the accounts and the plan with it.
+   */
+  private async planFor(req: SolanaRelayBody, checked: CheckedTerms, lane?: 'priority'):
+  Promise<Pick<PreparedRelay, 'mint' | 'plan' | 'fallbacks' | 'lamports'> & { accounts: ReturnType<SolanaRelayer['emptyAccounts']>; creations: AccountCreation[]; refusal?: RelayError }> {
     const { payload, decoded: d } = checked;
     const reqMint = req.mint === undefined ? undefined : keyOrBad(req.mint, 'mint');
     const accounts = this.emptyAccounts();
     const payer = this.relayer;
     const pre: TransactionInstruction[] = [];
+    // every instruction in `pre` creates an account the relayer pays rent for; the fee must cover it (requireCreationFee)
+    const creations: AccountCreation[] = [];
     const ensureVault = async (mint: PublicKey, tp: PublicKey) => {
-      accounts.vaultExists = !!(await this.connection.getAccountInfo(vaultPda(this.programId, mint), 'confirmed'));
-      if (!accounts.vaultExists) pre.push(createVaultIx(this.programId, payer, mint, tp));
+      const vault = vaultPda(this.programId, mint);
+      accounts.vaultExists = !!(await this.connection.getAccountInfo(vault, 'confirmed'));
+      if (!accounts.vaultExists) {
+        pre.push(createVaultIx(this.programId, payer, mint, tp));
+        creations.push({ account: vault, what: 'vault', lamports: this.rentOfTokenAccount(mint) });
+      }
     };
     let ops: Array<(buffer: PublicKey) => TransactionInstruction>;
     let mint: PublicKey | undefined;
@@ -462,6 +612,7 @@ export class SolanaRelayer {
           const ata = getAssociatedTokenAddressSync(token!.mint, owner, true, token!.tokenProgram);
           if (!ata.equals(recipientToken)) throw badRequest('recipient_mismatch', 'recipientOwner does not own the withdrawal account');
           pre.push(createAssociatedTokenAccountIdempotentInstruction(payer, ata, owner, token!.mint, token!.tokenProgram));
+          creations.push({ account: ata, what: 'withdrawal account', lamports: this.rentOfTokenAccount(token!.mint) });
         }
       }
       const feeToken = d.fee > 0n ? d.feeRecipient : undefined;
@@ -479,6 +630,7 @@ export class SolanaRelayer {
           accounts.recipientExists = !!(await this.connection.getAccountInfo(ata, 'confirmed'));
           if (!accounts.recipientExists) {
             pre.push(createAssociatedTokenAccountIdempotentInstruction(payer, ata, d.publicRecipient, mint, tokenProgram));
+            creations.push({ account: ata, what: 'payout account', lamports: this.rentOfTokenAccount(mint) });
           }
           if (d.fee > 0n) spendAccounts.feeToken = d.feeRecipient;
         }
@@ -505,18 +657,27 @@ export class SolanaRelayer {
     } catch (e) {
       throw badRequest('too_large', e instanceof Error ? e.message : String(e));
     }
+    const { budget, refusal: overBudget } = this.lamportBudget(plan, creations, lane);
     const fallbacks = ops.slice(1).map((mk) => [...plan.final.slice(0, -1), mk(plan.buffer)]);
-    return { mint, plan, fallbacks, accounts };
+    return { mint, plan, fallbacks, accounts, creations, lamports: budget, refusal: this.creationFeeRefusal(checked, creations) ?? overBudget };
   }
 
-  /** Decodes, checks the fee and the chain state, and plans the transactions. Reads only. */
-  async prepare(body: unknown): Promise<PreparedRelay> {
+  /**
+   * Decodes, checks the fee, verifies the proof, checks the chain state, and plans the transactions (with the
+   * accounts they create priced into the fee and the lamports they cost within budget). Reads only.
+   */
+  async prepare(body: unknown, opts: RelayOptions = {}): Promise<PreparedRelay> {
     const req = (body ?? {}) as SolanaRelayBody;
     const checked = await this.checkTerms(body);
+    await this.requireValidProof(checked);
     const refusal = this.chainRefusals(await this.chainFacts(checked.decoded))[0];
     if (refusal) throw refusal;
-    const planned = await this.planFor(req, checked);
-    return { op: checked.op, decoded: checked.decoded, fee: checked.fee, mint: planned.mint, plan: planned.plan, fallbacks: planned.fallbacks, capacity: checked.capacity };
+    const planned = await this.planFor(req, checked, opts.lane);
+    if (planned.refusal) throw planned.refusal;
+    return {
+      op: checked.op, decoded: checked.decoded, fee: checked.fee, mint: planned.mint, plan: planned.plan, fallbacks: planned.fallbacks,
+      capacity: checked.capacity, lamports: planned.lamports,
+    };
   }
 
   /**
@@ -545,10 +706,23 @@ export class SolanaRelayer {
     const min = feeMint ? this.opts.minFees.get(feeMint.toBase58()) : undefined;
     const paid = d.op === 'transact' || d.op === 'spend' ? d.fee : 0n;
     const feeAccount = feeMint && this.tokenPrograms.has(feeMint.toBase58()) ? this.feeAccount(feeMint).toBase58() : null;
+    const surcharge = feeMint ? this.opts.createAccountFees?.get(feeMint.toBase58()) : undefined;
     const fee: Inspection['fee'] = {
       paid: paid.toString(), required: min === undefined ? null : requiredFee(min, this.feeBps, amount).toString(), min: min === undefined ? null : min.toString(),
-      bps: this.feeBps, publicAmount: amount.toString(), mint: feeMint?.toBase58() ?? null, feeAccount,
+      bps: this.feeBps, publicAmount: amount.toString(), mint: feeMint?.toBase58() ?? null, feeAccount, createAccountFee: surcharge?.toString() ?? null,
     };
+    // the proof, as prepare checks it right after the terms (nothing is staged either way)
+    const proof: Inspection['proof'] = { verified: null };
+    if (checked) {
+      try {
+        await this.requireValidProof(checked);
+        proof.verified = true;
+      } catch (e) {
+        const r = toRelayError(e);
+        if (r.code === 'invalid_proof') proof.verified = false;
+        refusals.push(r);
+      }
+    }
     let capacity: Inspection['capacity'] = null;
     if (this.capacity) {
       const t = checked?.capacity;
@@ -565,13 +739,17 @@ export class SolanaRelayer {
       try {
         const planned = await this.planFor(req, checked);
         accounts = planned.accounts;
-        plan = { payloadBytes: payload.length, setupTxs: planned.plan.setup.length, writeTxs: planned.plan.writes.length };
+        plan = {
+          payloadBytes: payload.length, setupTxs: planned.plan.setup.length, writeTxs: planned.plan.writes.length,
+          createdAccounts: planned.lamports.createdAccounts, lamports: { estimate: planned.lamports.estimate, covered: planned.lamports.covered },
+        };
+        if (planned.refusal) refusals.push(planned.refusal);
       } catch (e) {
         refusals.push(toRelayError(e));
       }
     }
     return {
-      ok: refusals.length === 0, op, fee, capacity,
+      ok: refusals.length === 0, op, fee, proof, capacity,
       chain: { rootKnown: facts.rootKnown, nullifiersUnspent: facts.nullifiersUnspent, timestampFresh: facts.timestampFresh },
       accounts, plan, refusals: refusals.map((r) => ({ status: r.status, code: r.code, message: r.message })),
     };
@@ -612,7 +790,7 @@ export class SolanaRelayer {
   async relay(body: unknown, opts: RelayOptions = {}): Promise<RelayResult> {
     const release = this.acquire(opts.lane);
     try {
-      return await this.submit(await this.prepare(body), opts);
+      return await this.submit(await this.prepare(body, opts), opts);
     } finally {
       release();
     }
@@ -649,7 +827,7 @@ export class SolanaRelayer {
     try {
       await io.stagePlan(this.connection, payer, p.plan, priority);
     } catch (e) {
-      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
+      await this.abandon(p, 'staging_failed');
       throw new RelayError(502, 'staging_failed', e instanceof Error ? e.message : String(e));
     }
     let chosen: TransactionInstruction[] | undefined;
@@ -660,16 +838,47 @@ export class SolanaRelayer {
       if (logs.length === 0) logs = sim.logs;
     }
     if (!chosen) {
-      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
+      await this.abandon(p, 'simulation_failed');
       throw new RelayError(422, 'simulation_failed', logs.slice(-6).join(' | ') || 'the operation does not simulate');
     }
     try {
       const sent = await io.sendV0(this.connection, payer, chosen, tables, [], priority);
       return { signature: sent.signature, computeUnits: sent.computeUnits };
     } catch (e) {
-      await io.abandonPlan(this.connection, this.programId, payer, p.plan);
+      await this.abandon(p, 'send_failed');
       throw new RelayError(502, 'send_failed', e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * Closes the staged buffer of a relay that failed (its rent comes back to the hot wallet). The transport
+   * retries the close; a buffer that still holds its rent is logged with what is needed to close it by hand
+   * (buffer_close by the hot wallet with the seed), never silently forgotten.
+   */
+  private async abandon(p: PreparedRelay, why: string): Promise<void> {
+    const where = `buffer ${p.plan.buffer.toBase58()} (seed ${p.plan.seed}, ${p.plan.lookupTables.length} tables) after ${why}`;
+    try {
+      const r = await this.io.abandonPlan(this.connection, this.programId, this.opts.payer, p.plan);
+      if (!r.closed) this.log(`solana: ${where}: not closed after ${r.attempts} attempts (${r.error ?? 'unknown error'}); its rent stays locked until buffer_close succeeds`);
+    } catch (e) {
+      this.log(`solana: ${where}: close failed: ${e instanceof Error ? e.message : String(e)}; its rent stays locked until buffer_close succeeds`);
+    }
+  }
+}
+
+/**
+ * Bytes of a token account of `mint`: 165 for SPL Token; for Token-2022 the base account plus ImmutableOwner
+ * (every ATA has it) and the account extensions the mint's own extensions require (transfer fee, transfer
+ * hook, ...). Falls back to a conservative size when the mint data does not parse.
+ */
+export function tokenAccountBytes(mint: PublicKey, info: { data: Uint8Array; owner: PublicKey }, tokenProgram: PublicKey): number {
+  if (!tokenProgram.equals(TOKEN_2022_PROGRAM_ID)) return ACCOUNT_SIZE;
+  try {
+    const m = unpackMint(mint, { ...info, data: Buffer.from(info.data), executable: false, lamports: 0 }, tokenProgram);
+    const fromMint = getExtensionTypes(m.tlvData).map(getAccountTypeOfMintType).filter((t) => t !== ExtensionType.Uninitialized);
+    return getAccountLen([...new Set([ExtensionType.ImmutableOwner, ...fromMint])]);
+  } catch {
+    return TOKEN_2022_ACCOUNT_BYTES_FALLBACK;
   }
 }
 

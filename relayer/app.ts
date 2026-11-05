@@ -11,7 +11,7 @@ import { ConfigError, type RelayerConfig, type X402Config } from './config.js';
 import { EvmRelayer } from './evm.js';
 import { RateLimiter } from './ratelimit.js';
 import type { RelayerServerOptions } from './server.js';
-import { SolanaRelayer, solanaRelayerOptions } from './solana.js';
+import { SolanaRelayer, proofVerifierFromConfig, solanaRelayerOptions } from './solana.js';
 import type { X402Asset } from './x402/catalog.js';
 import { CdpFacilitator } from './x402/facilitator.js';
 import { LoanMarketReader } from './x402/loans.js';
@@ -35,13 +35,22 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
     const secret = s.keypairJson ?? readFileSync(s.keypairPath!, 'utf8');
     const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(secret) as number[]));
     const lookupTables = await Promise.all(s.lookupTables.map((t) => fetchLookupTable(connection, new PublicKey(t))));
-    const base = solanaRelayerOptions(s, { connection, payer, lookupTables, allowUnpaid: cfg.allowUnpaid });
+    // every proof is verified off-chain before staging; a missing or unpinned-mismatching verifying key stops the relayer
+    let verifier: ReturnType<typeof proofVerifierFromConfig>;
+    try {
+      verifier = proofVerifierFromConfig(s);
+    } catch (e) {
+      throw new ConfigError(`RELAYER_SOLANA_CIRCUITS_DIR (${s.circuitsDir}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const base = solanaRelayerOptions(s, { connection, payer, lookupTables, allowUnpaid: cfg.allowUnpaid, verifier, log });
     solana = await new SolanaRelayer({ ...base, priority: cfg.x402?.priority }).init();
     const created = await solana.ensureFeeAccounts();
     const note = created.length ? `, created fee accounts ${created.join(', ')}` : '';
     const cap = solana.capacity ? `capacity on (free tier ${solana.capacity.opts.freeTier})` : 'capacity off';
+    const surcharges = s.createAccountFees.size ? [...s.createAccountFees].map(([m, v]) => `${m}=${v}`).join(' ') : 'none (no account creation)';
     log(`solana: relayer ${payer.publicKey.toBase58()} for program ${solana.programId.toBase58()}, `
-      + `fee ${solana.feeBps} bps to treasury ${solana.feeOwner.toBase58()}, ${cap}${note}`);
+      + `fee ${solana.feeBps} bps to treasury ${solana.feeOwner.toBase58()}, ${cap}${note}, create-account surcharge ${surcharges}`);
+    log(`solana: verifying keys from ${s.circuitsDir}: ${Object.entries(verifier.vkeySha256).map(([k, v]) => `${k} ${v}`).join(', ')}`);
     if (cfg.x402) {
       // an x402-only problem never takes the free relay API down: a deliberate refusal (ConfigError) still
       // stops the relayer, anything else (RPC failure, missing payment account) leaves the seller off
