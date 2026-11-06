@@ -4,10 +4,11 @@ import { describe, expect, it } from 'vitest';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {
-  DELEGATE_OUTPUTS, GRANT_OUTPUTS, PayloadError, SPEND_ARGS_BYTES, TRANSACT_ARGS_BYTES, checkFee, concatBytes, decodeRelayPayload, encodeDelegateArgs,
-  encodeDelegateExt, encodeGrantArgs, encodeGrantExt, encodeSpendArgs, encodeSpendExt, encodeTransactArgs, encodeTransactExt, extDataHash, fromB64,
-  nullifiersOf, toB64, type FeeTerms, type SpendArgs,
+  DELEGATE_OUTPUTS, GRANT_OUTPUTS, MAX_ALLOWANCE_MEMO, MAX_LENDER_MEMO, MAX_NOTE_MEMO, PayloadError, SPEND_ARGS_BYTES, TRANSACT_ARGS_BYTES, checkFee, concatBytes,
+  decodeRelayPayload, encodeDelegateArgs, encodeDelegateExt, encodeGrantArgs, encodeGrantExt, encodeSpendArgs, encodeSpendExt, encodeTransactArgs, encodeTransactExt,
+  extDataHash, fromB64, nullifiersOf, solAllowanceMemo, solSealForLender, toB64, type FeeTerms, type SpendArgs,
 } from '../../src/solana/index.js';
+import { noteMemo, randomViewingKey } from '../../src/encryption.js';
 
 const proof = new Uint8Array(256).fill(7);
 const relayer = Keypair.generate().publicKey;
@@ -18,20 +19,21 @@ const terms = (o: Partial<FeeTerms> = {}): FeeTerms => ({
   relayer, minFees: new Map([[usd.toBase58(), 1_000n]]), feeAccount: (m) => getAssociatedTokenAddressSync(m, relayer, true, TOKEN_PROGRAM_ID), ...o,
 });
 
-function transactPayload(o: { extAmount?: bigint; fee?: bigint; relayer?: PublicKey; feeRecipient?: PublicKey; tamper?: boolean } = {}) {
+function transactPayload(o: { extAmount?: bigint; fee?: bigint; relayer?: PublicKey; feeRecipient?: PublicKey; tamper?: boolean; memo?: number } = {}) {
   const ext = encodeTransactExt({
     recipient: Keypair.generate().publicKey, relayer: o.relayer ?? relayer, feeRecipient: o.feeRecipient ?? feeAta,
-    extAmount: o.extAmount ?? -5_000n, fee: o.fee ?? 1_000n, encryptedOutputs: [new Uint8Array(120).fill(1), new Uint8Array(120).fill(2)],
+    extAmount: o.extAmount ?? -5_000n, fee: o.fee ?? 1_000n, encryptedOutputs: [new Uint8Array(120).fill(1), new Uint8Array(o.memo ?? 120).fill(2)],
   });
   const h = o.tamper ? 5n : extDataHash(ext);
   const args = encodeTransactArgs({ root: 11n, publicAmount: 0n, extDataHash: h, inputNullifiers: [21n, 22n], outputCommitments: [31n, 32n] });
   return concatBytes(proof, args, ext);
 }
 
-function spendPayload(o: Partial<SpendArgs> & { relayer?: PublicKey; feeRecipient?: PublicKey } = {}) {
+function spendPayload(o: Partial<SpendArgs> & { relayer?: PublicKey; feeRecipient?: PublicKey; memos?: [number, number, number] } = {}) {
+  const [a, p, l] = o.memos ?? [300, 0, 0];
   const ext = encodeSpendExt({
-    relayer: o.relayer ?? relayer, feeRecipient: o.feeRecipient ?? feeAta, encryptedAllowance: new Uint8Array(300).fill(3),
-    encryptedPayment: new Uint8Array(), encryptedLender: new Uint8Array(),
+    relayer: o.relayer ?? relayer, feeRecipient: o.feeRecipient ?? feeAta, encryptedAllowance: new Uint8Array(a).fill(3),
+    encryptedPayment: new Uint8Array(p), encryptedLender: new Uint8Array(l),
   });
   const args: SpendArgs = {
     root: 11n, nullifier: 41n, newAllowanceCommitment: 42n, payCommitment: 0n, publicAmount: 50_000n, publicRecipient: other, publicAsset: usd, fee: 2_000n,
@@ -41,8 +43,8 @@ function spendPayload(o: Partial<SpendArgs> & { relayer?: PublicKey; feeRecipien
   return concatBytes(proof, encodeSpendArgs(args), ext);
 }
 
-function grantPayload() {
-  const ext = encodeGrantExt({ encryptedAllowances: Array.from({ length: GRANT_OUTPUTS }, (_, i) => new Uint8Array(i < 3 ? 200 : 0)), encryptedChange: new Uint8Array(90) });
+function grantPayload(memo = 200, change = 90) {
+  const ext = encodeGrantExt({ encryptedAllowances: Array.from({ length: GRANT_OUTPUTS }, (_, i) => new Uint8Array(i < 3 ? memo : 0)), encryptedChange: new Uint8Array(change) });
   const args = encodeGrantArgs({
     root: 11n, inputNullifiers: [51n, 52n], allowanceCommitments: Array.from({ length: GRANT_OUTPUTS }, (_, i) => BigInt(100 + i)), changeCommitment: 60n,
     totalCommitment: 61n, extDataHash: extDataHash(ext),
@@ -50,8 +52,8 @@ function grantPayload() {
   return concatBytes(proof, args, ext);
 }
 
-function delegatePayload() {
-  const ext = encodeDelegateExt({ encryptedSubs: Array.from({ length: DELEGATE_OUTPUTS }, () => new Uint8Array(150)), encryptedResidual: new Uint8Array(150) });
+function delegatePayload(sub = 150, residual = 150) {
+  const ext = encodeDelegateExt({ encryptedSubs: Array.from({ length: DELEGATE_OUTPUTS }, () => new Uint8Array(sub)), encryptedResidual: new Uint8Array(residual) });
   const args = encodeDelegateArgs({ root: 11n, nullifier: 71n, subCommitments: [1n, 2n, 3n, 4n], residualCommitment: 5n, timestamp: 1_700_000_000n, extDataHash: extDataHash(ext) });
   return concatBytes(proof, args, ext);
 }
@@ -81,6 +83,8 @@ describe('decoding staged payloads', () => {
     if (d.op !== 'spend') throw new Error('not a spend');
     expect(SPEND_ARGS_BYTES).toBe(353);
     expect(d.nullifier).toBe(41n);
+    // the commitments the proof's public inputs need are kept
+    expect([d.newAllowanceCommitment, d.payCommitment, d.receipt]).toEqual([42n, 0n, 43n]);
     expect(d.publicAmount).toBe(50_000n);
     expect(d.publicRecipient.equals(other)).toBe(true);
     expect(d.publicAsset.equals(usd)).toBe(true);
@@ -90,13 +94,48 @@ describe('decoding staged payloads', () => {
     expect(nullifiersOf(d)).toEqual([41n]);
   });
 
-  it('reads grant and delegate payloads (nullifiers, timestamp)', () => {
+  it('reads grant and delegate payloads (nullifiers, commitments, timestamp)', () => {
     const g = decodeRelayPayload('grant', grantPayload());
     expect(nullifiersOf(g)).toEqual([51n, 52n]);
+    if (g.op !== 'grant') throw new Error('not a grant');
+    expect(g.allowanceCommitments).toEqual(Array.from({ length: GRANT_OUTPUTS }, (_, i) => BigInt(100 + i)));
+    expect([g.changeCommitment, g.totalCommitment]).toEqual([60n, 61n]);
     const d = decodeRelayPayload('delegate', delegatePayload());
     if (d.op !== 'delegate') throw new Error('not a delegate');
     expect(d.nullifier).toBe(71n);
     expect(d.timestamp).toBe(1_700_000_000n);
+    expect([...d.subCommitments, d.residualCommitment]).toEqual([1n, 2n, 3n, 4n, 5n]);
+  });
+
+  it('caps every encrypted output at the size the SDK emits, before reading its bytes (400 ext_too_large)', () => {
+    // the caps hold the largest memos the SDK produces (every bigint at 64 hex digits, three allowance copies, Solana extras)
+    const MAX = (1n << 254n) - 1n;
+    const vk = randomViewingKey();
+    const policy = { lifetimeCap: MAX, windowCap: MAX, windowLen: MAX, maxPerTx: MAX, expiry: MAX, recipientRoot: MAX, ownerPk: MAX, streamRate: MAX, streamStart: MAX, lender: MAX, pledgeBps: MAX };
+    const a = { asset: MAX, remaining: MAX, agentPk: MAX, policy, windowId: MAX, windowSpent: MAX, rho: MAX, pledgePaid: MAX };
+    const views = { owner: vk.pub, agent: randomViewingKey().pub };
+    const lender = { lenderAddr: MAX, loanRef: MAX, viewPub: randomViewingKey().pub };
+    const extra = { mint: Keypair.generate().publicKey, lenderKey: Keypair.generate().publicKey };
+    expect(noteMemo({ asset: MAX, amount: MAX, pk: MAX, blinding: MAX }, vk.pub).length).toBeLessThanOrEqual(MAX_NOTE_MEMO);
+    expect(solAllowanceMemo(a, views, lender, extra).length).toBeLessThanOrEqual(MAX_ALLOWANCE_MEMO);
+    expect(solSealForLender(a, views, lender, extra).length).toBeLessThanOrEqual(MAX_LENDER_MEMO);
+    // at the cap: fine; one byte over: refused, whichever vector it is
+    expect(code(() => decodeRelayPayload('transact', transactPayload({ memo: MAX_NOTE_MEMO })))).toBe('ok');
+    expect(code(() => decodeRelayPayload('transact', transactPayload({ memo: MAX_NOTE_MEMO + 1 })))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('spend', spendPayload({ memos: [MAX_ALLOWANCE_MEMO, MAX_NOTE_MEMO, MAX_LENDER_MEMO] })))).toBe('ok');
+    expect(code(() => decodeRelayPayload('spend', spendPayload({ memos: [MAX_ALLOWANCE_MEMO + 1, 0, 0] })))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('spend', spendPayload({ memos: [300, MAX_NOTE_MEMO + 1, 0] })))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('spend', spendPayload({ memos: [300, 0, MAX_LENDER_MEMO + 1] })))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('grant', grantPayload(MAX_ALLOWANCE_MEMO + 1)))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('grant', grantPayload(200, MAX_NOTE_MEMO + 1)))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('delegate', delegatePayload(MAX_ALLOWANCE_MEMO + 1)))).toBe('ext_too_large');
+    expect(code(() => decodeRelayPayload('delegate', delegatePayload(150, MAX_ALLOWANCE_MEMO + 1)))).toBe('ext_too_large');
+    // a length claim far beyond the payload is refused as too large, not as truncated: the bytes are never read
+    const p = transactPayload();
+    const lenAt = p.length - 4 - 120; // the second vector's u32 length
+    const q = Uint8Array.from(p);
+    new DataView(q.buffer).setUint32(lenAt, 0x7fff_ffff, true);
+    expect(code(() => decodeRelayPayload('transact', q))).toBe('ext_too_large');
   });
 
   it('refuses truncated, padded, mislabelled and hash-mismatched payloads', () => {

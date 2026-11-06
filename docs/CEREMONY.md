@@ -144,3 +144,29 @@ To run the same steps on new keys: `node scripts/ceremony.mjs init --dir D --pta
 Anyone can extend these keys with `snarkjs zkey contribute` on each final zkey, followed by a new public
 beacon; that keeps this round's security and adds theirs. The resulting verifying keys would then replace
 `vk.rs` through a program upgrade, and the app's proving keys would be replaced with the new final zkeys.
+
+## Round 2, 2026-11-05: `spend`, `delegate` and `stream`
+
+Three circuits were changed after a security review (window id made monotonic in `spend`; subs inherit the
+parent's consumed window and stream in `delegate`; `stream` proves knowledge of the agent's or owner's key).
+Their R1CS differ from the keys above, so a new phase-2 round was run for these three only; `transact`,
+`grant` and `disclose` keep the 2026-10-31 keys. Same phase 1 (the Hermez `pot17`, blake2b checked at init),
+same tooling and procedure (init, three contributions, beacon, verify, export), same caveat: all three
+contributions were made by the project team on one machine, so you are trusting the team.
+
+Random beacon: Solana mainnet-beta finalized block hash `8fwKSJAyRQ42oo9HmaTCMYx1ApVKLDRFSwmQmVRRz5W7`
+(slot `465735503`, `getLatestBlockhash` fetched after the last contribution at 2026-11-05T14:14:50Z; the RPC
+answer is `docs/ceremony/beacon-rpc-2026-11-05.json`), decoded: `71fb4bf03ca1838f016b94ccbf5e0d6e90e4881ab80cedea4965e481ec43fa90`,
+2^10 iterations. `ceremony.mjs verify` and `snarkjs zkey verify` both ok for all three.
+
+| circuit | constraints | public | r1cs sha256 | final zkey sha256 | vkey sha256 |
+|---|---|---|---|---|---|
+| spend | 27479 | 15 | `dc249460cc0088f5d4a2e21c6f899e687cc272fcdabd074176424908fb9b99d3` | `709c59049c6e133ba981ba32a962af42f839d7600ada4e0e51237654d4e02b91` | `64f489ef7061fdb6225ad9262876d65a0e666316d72da04209fa246d04ec7530` |
+| delegate | 37796 | 9 | `2aae851941199b35877dc360e312352a5d84463e3c251775bd976177dfb2db44` | `6e47fc61d6023562c6d3a8429e09fc5b3d9b0df5fcd91243f50508e11074e631` | `82e35d8206e84c60d15e5a14aff6de0e40864e98980811376e4b336eb6a3456b` |
+| stream | 15006 | 13 | `824fa499c979c58666a48c3905d23c3f878181c64b6df1f5093d212c73d94d2b` | `466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb` | `a84b8f8c6395cf62b19c8df12aeba5b349175609fed64ccab3be33c5bfd8aea2` |
+
+Contribution hashes: `docs/ceremony/ATTESTATION-2026-11-05.md`; transcripts and verifying keys in
+`docs/ceremony/{spend,delegate,stream}/` (overwriting round 1's for these three). The program embeds these
+through `generated/vk.rs` from the first upgrade after this date. Proofs made with the round-1 keys for
+these three circuits verify only until that upgrade: refresh the proving artifacts (the site and the SDK
+fetch them by hash).

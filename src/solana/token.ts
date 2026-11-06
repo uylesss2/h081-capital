@@ -53,6 +53,7 @@ export const SAFETY_ERROR = {
   BadLoanAccount: 6014, WrongPool: 6015, NotEmpty: 6016, Overflow: 6017, NoShares: 6018, LaunchWallet: 6019,
   UpgradeAuthority: 6020, ConfigAuthority: 6021, DepositsPaused: 6022, DepositCap: 6023, NotInsurable: 6024, CoverTooLarge: 6025,
   PremiumTooLow: 6026, ExposureCap: 6027, TooShort: 6028, Released: 6029, NotReleasable: 6030, TopUpTooLarge: 6031,
+  WrongStreamLoanProgram: 6032, BadLoanMint: 6033, BadRecovery: 6034, NotRecoverable: 6035,
 } as const;
 
 /** The BPF upgradeable loader's ProgramData address of a program (init instructions check its upgrade authority). */
@@ -280,6 +281,11 @@ export const coverPda = (programId: PublicKey, loanRef: bigint) => pda(programId
 export const streamSlotPda = (loanRef: bigint, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID) => pda(streamLoan, enc('slot'), u64le(loanRef));
 /** stream_loan Ledger: ["ledger", loan_ref u64 LE, mint]. */
 export const streamLedgerPda = (loanRef: bigint, mint: PublicKey, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID) => pda(streamLoan, enc('ledger'), u64le(loanRef), mint.toBytes());
+/** stream_loan Subrogation (a recorded slash): ["subrogation", loan_ref u64 LE]. Created by `slash` through stream_loan. */
+export const streamSubrogationPda = (loanRef: bigint, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID) => pda(streamLoan, enc('subrogation'), u64le(loanRef));
+/** Where stream_loan sends a slashed loan's receipts: the pool config PDA's associated token account for the LOAN asset. */
+export const safetyRecoveryAta = (programId: PublicKey, mint: PublicKey, asset: PublicKey, assetTokenProgram: PublicKey) =>
+  ataAddress(safetyConfigPda(programId, mint), asset, assetTokenProgram);
 /** stipend_pool escrow of a slot: ["owed", mint, fieldOf(slot PDA) 32 B BE, loan_ref u64 LE] under the pool program. */
 export const streamEscrowPda = (loanRef: bigint, mint: PublicKey, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID, poolProgram = SAFETY_POOL_ESCROW_PROGRAM_ID) =>
   pda(poolProgram, enc('owed'), mint.toBytes(), be32(fieldOf(streamSlotPda(loanRef, streamLoan))), u64le(loanRef));
@@ -357,22 +363,51 @@ export function safetyTopUpIx(programId: PublicKey, funder: PublicKey, mint: Pub
   ], u64le(amount));
 }
 
-/** The loan's accounts slash/shortfall read: the slot, its inbox ATA for the loan asset, its ledger, and the pool escrow of the slot. */
-export interface LoanAccounts { slot: PublicKey; inbox: PublicKey; ledger: PublicKey; escrow: PublicKey }
+/**
+ * The loan's accounts slash/shortfall read: the slot, its inbox ATA for the loan asset, its ledger, the pool escrow
+ * of the slot, and (slash) the loan asset, its token program and the stream_loan Subrogation PDA.
+ */
+export interface LoanAccounts {
+  slot: PublicKey; inbox: PublicKey; ledger: PublicKey; escrow: PublicKey;
+  asset: PublicKey; assetTokenProgram: PublicKey; subrogation: PublicKey; streamLoan: PublicKey;
+}
 export function loanAccounts(loanRef: bigint, asset: PublicKey, assetTokenProgram: PublicKey, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID, poolProgram = SAFETY_POOL_ESCROW_PROGRAM_ID): LoanAccounts {
   const slot = streamSlotPda(loanRef, streamLoan);
   return {
     slot, inbox: ataAddress(slot, asset, assetTokenProgram), ledger: streamLedgerPda(loanRef, asset, streamLoan),
     escrow: streamEscrowPda(loanRef, asset, streamLoan, poolProgram),
+    asset, assetTokenProgram, subrogation: streamSubrogationPda(loanRef, streamLoan), streamLoan,
   };
 }
 
-/** Permissionless. `lenderToken` is a token account of the pool's mint owned by the cover's lender. */
-export function slashIx(programId: PublicKey, mint: PublicKey, loanRef: bigint, loan: LoanAccounts, lenderToken: PublicKey, tokenProgram = TOKEN22_PROGRAM_ID): TransactionInstruction {
+/**
+ * Permissionless. `lenderToken` is a token account of the pool's mint owned by the cover's lender. `payer` (the
+ * transaction's fee payer) pays the rent of the pool's recovery account for the loan asset (created if missing)
+ * and of the stream_loan Subrogation record the slash creates by CPI, so that the loan's later receipts repay
+ * the pool before the lender.
+ */
+export function slashIx(
+  programId: PublicKey, mint: PublicKey, loanRef: bigint, loan: LoanAccounts, lenderToken: PublicKey, tokenProgram = TOKEN22_PROGRAM_ID, payer?: PublicKey,
+): TransactionInstruction {
+  if (!payer) throw new Error('slashIx: pass the fee payer (it pays the rent of the recovery and Subrogation accounts)');
   return anchorIx(programId, 'slash', [
     w(safetyConfigPda(programId, mint)), w(coverPda(programId, loanRef)), r(loan.slot), r(loan.inbox), r(loan.ledger), r(mint),
     w(safetyVaultPda(programId, mint)), w(lenderToken), r(tokenProgram), r(loan.escrow),
+    w(payer, true), r(loan.streamLoan), w(loan.subrogation), w(safetyRecoveryAta(programId, mint, loan.asset, loan.assetTokenProgram)),
+    r(loan.asset), r(loan.assetTokenProgram), r(ATA_PROGRAM_ID), r(SystemProgram.programId),
   ], u64le(loanRef));
+}
+
+/**
+ * Config authority: moves `amount` of recovered receipts (loan asset `asset`, forwarded by stream_loan after a slash
+ * into the pool's recovery ATA) to `destination`, a token account of `asset`. Refused for the pool's own mint.
+ */
+export function sweepRecoveryIx(
+  programId: PublicKey, authority: PublicKey, mint: PublicKey, asset: PublicKey, assetTokenProgram: PublicKey, destination: PublicKey, amount: bigint,
+): TransactionInstruction {
+  return anchorIx(programId, 'sweep_recovery', [
+    r(safetyConfigPda(programId, mint)), r(authority, true), r(asset), w(safetyRecoveryAta(programId, mint, asset, assetTokenProgram)), w(destination), r(assetTokenProgram),
+  ], u64le(amount));
 }
 
 /** Anyone: frees an unpaid cover's exposure once its loan is settled or fully repaid. */

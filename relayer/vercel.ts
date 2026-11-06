@@ -12,15 +12,16 @@ import { createRelayerHandler } from './server.js';
 let ready: Promise<RequestListener> | undefined;
 
 /**
- * The environment, plus the disclose circuit artifacts the bundle ships next to the function
- * (deploy/relayer-vercel/circuits, see scripts/relayer-vercel.mjs) when RELAYER_X402_CIRCUITS_DIR is unset.
+ * The environment, plus the circuit artifacts the bundle ships next to the function (deploy/relayer-vercel/
+ * circuits, see scripts/relayer-vercel.mjs): the relay circuits' verifying keys (RELAYER_SOLANA_CIRCUITS_DIR,
+ * always bundled) and the disclose prover's artifacts (RELAYER_X402_CIRCUITS_DIR, when bundled), unless the
+ * environment names directories itself.
  */
 function environment(): Record<string, string | undefined> {
   const env = { ...process.env };
-  if (!env.RELAYER_X402_CIRCUITS_DIR) {
-    const bundled = join(dirname(fileURLToPath(import.meta.url)), '..', 'circuits');
-    if (existsSync(join(bundled, 'disclose'))) env.RELAYER_X402_CIRCUITS_DIR = bundled;
-  }
+  const bundled = join(dirname(fileURLToPath(import.meta.url)), '..', 'circuits');
+  if (!env.RELAYER_SOLANA_CIRCUITS_DIR && existsSync(join(bundled, 'transact', 'transact.vkey.json'))) env.RELAYER_SOLANA_CIRCUITS_DIR = bundled;
+  if (!env.RELAYER_X402_CIRCUITS_DIR && existsSync(join(bundled, 'disclose', 'disclose.zkey'))) env.RELAYER_X402_CIRCUITS_DIR = bundled;
   return env;
 }
 

@@ -1,10 +1,20 @@
 // Relayer configuration from environment variables (no file is read except the Solana keypair path the
 // operator names). See relayer/README.md for the list. Keys never live in this repository.
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PublicKey } from '@solana/web3.js';
 import { getAddress } from 'ethers';
+import { RELAY_CIRCUITS, type RelayCircuit, vkeyPinEnv } from './verify.js';
 import { DEFAULT_X402_PRICES, X402_SERVICE_IDS, type X402ServiceId } from './x402/catalog.js';
 import { DEFAULT_FACILITATOR_TIMEOUT_MS, DEFAULT_FACILITATOR_URL } from './x402/facilitator.js';
 import { SOLANA_MAINNET_NETWORK } from './x402/types.js';
+
+/** Where the verifying keys live when nothing names a directory: the repository's build/circuits. */
+export const DEFAULT_CIRCUITS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'build', 'circuits');
+/** Lamports one create-account surcharge is deemed to cover: a Token-2022 ATA with the usual extensions (about 2.1M of rent) and its share of fees. */
+export const DEFAULT_CREATE_ACCOUNT_LAMPORTS = 2_500_000;
+/** Lamports the relay fee is deemed to cover per relay for staging (base fees of up to 200 transactions). */
+export const DEFAULT_STAGING_LAMPORTS = 1_000_000;
 
 /** capacity_stake's localnet program id (src/solana/token.ts LOCALNET_CAPACITY_STAKE_PROGRAM_ID). */
 const LOCALNET_CAPACITY_ID = '6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3';
@@ -62,6 +72,16 @@ export interface RelayerConfig {
     treasury: string;
     /** capacity_stake enforcement; absent = off */
     capacity?: { programId?: string; mint: string; freeTier: bigint; assets: string[] };
+    /** per-mint surcharge (base units of the fee mint) for every account the relayer creates for an operation; a mint missing here: no creation */
+    createAccountFees: Map<string, bigint>;
+    /** lamports one surcharge covers (rent of the created account plus its fees) */
+    createAccountLamports: number;
+    /** lamports the relay fee covers for staging transactions, per relay */
+    stagingLamports: number;
+    /** build/circuits-style directory with <name>/<name>.vkey.json for the relay circuits (proofs are verified before staging) */
+    circuitsDir: string;
+    /** pinned sha256 per relay circuit's verifying key (RELAYER_VKEY_SHA256_<NAME>) */
+    vkeySha256: Partial<Record<RelayCircuit, string>>;
   };
   x402?: X402Config;
 }
@@ -176,10 +196,26 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         assets: assets.map((a) => new PublicKey(a).toBase58()),
       };
     }
+    // Accounts the relayer creates (a withdrawal's or payout's ATA, a vault) cost it rent the owner of the account
+    // can take back by closing it; a mint without a surcharge here means the relayer creates nothing for it.
+    const createAccountFees = parseFees('RELAYER_SOLANA_CREATE_ACCOUNT_FEE', env.RELAYER_SOLANA_CREATE_ACCOUNT_FEE, (k) => new PublicKey(k).toBase58());
+    for (const m of createAccountFees.keys()) {
+      if (!minFees.has(m)) throw new ConfigError(`RELAYER_SOLANA_CREATE_ACCOUNT_FEE: ${m} is not a fee mint (RELAYER_SOLANA_MIN_FEES)`);
+    }
+    const vkeySha256: Partial<Record<RelayCircuit, string>> = {};
+    for (const name of RELAY_CIRCUITS) {
+      const pin = env[vkeyPinEnv(name)]?.toLowerCase() || undefined;
+      if (pin && !/^[0-9a-f]{64}$/.test(pin)) throw new ConfigError(`${vkeyPinEnv(name)} must be a hex sha256`);
+      if (pin) vkeySha256[name] = pin;
+    }
     cfg.solana = {
       rpc: env.RELAYER_SOLANA_RPC, programId: env.RELAYER_SOLANA_PROGRAM_ID || undefined, keypairPath, keypairJson, minFees, lookupTables,
       minLamports: int(env, 'RELAYER_SOLANA_MIN_LAMPORTS', 50_000_000), maxInFlight: int(env, 'RELAYER_SOLANA_MAX_IN_FLIGHT', 4, 1),
-      feeBps, treasury, capacity,
+      feeBps, treasury, capacity, createAccountFees,
+      createAccountLamports: int(env, 'RELAYER_SOLANA_CREATE_ACCOUNT_LAMPORTS', DEFAULT_CREATE_ACCOUNT_LAMPORTS, 1),
+      stagingLamports: int(env, 'RELAYER_SOLANA_STAGING_LAMPORTS', DEFAULT_STAGING_LAMPORTS, 0),
+      circuitsDir: env.RELAYER_SOLANA_CIRCUITS_DIR || env.RELAYER_X402_CIRCUITS_DIR || DEFAULT_CIRCUITS_DIR,
+      vkeySha256,
     };
   }
   if (!cfg.evm && !cfg.solana) throw new ConfigError('configure at least one chain: RELAYER_EVM_RPC and/or RELAYER_SOLANA_RPC');

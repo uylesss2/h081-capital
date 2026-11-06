@@ -36,6 +36,11 @@ Configuration comes from environment variables set by the operator (nothing read
 | `RELAYER_FEE_BPS` | platform fee on the public amount (withdrawal, or a spend's public amount plus lender share), basis points (default 20 = 0.20%); the fee is max(minimum, this) |
 | `RELAYER_SOLANA_PROGRAM_ID` | stipend_pool program id (default: the localnet id) |
 | `RELAYER_SOLANA_MIN_FEES` | `mint=amount,...` minimum fee per mint, base units |
+| `RELAYER_SOLANA_CREATE_ACCOUNT_FEE` | `mint=amount,...` surcharge, in base units of the fee mint, for **each account the relayer creates** for an operation (a withdrawal's or payout's token account, a vault). The rent of a created account belongs to its owner, who can close it and keep it, so the relayer never pays it uncovered: a fee mint missing here means the relayer creates nothing for it (`400 account_creation_disabled`; the client must create the account first), and with a surcharge the fee must be at least the relay fee plus the surcharge per created account (`400 fee_too_low`, the message names the surcharge). Default: none |
+| `RELAYER_SOLANA_CREATE_ACCOUNT_LAMPORTS` | lamports one surcharge is deemed to cover (default 2,500,000: a Token-2022 token account with the usual extensions, about 2.1M of rent, plus fees); price the surcharge for it |
+| `RELAYER_SOLANA_STAGING_LAMPORTS` | lamports the relay fee is deemed to cover for staging transactions, per relay (default 1,000,000 = the base fee of 200 transactions). Every relay's estimated cost to the hot wallet (rent of created accounts + 5,000 lamports per transaction, plus the priority lane's cap per transaction on that lane) must stay within staging + surcharges, else `400 lamport_budget_exceeded` |
+| `RELAYER_SOLANA_CIRCUITS_DIR` | `build/circuits`-style directory holding `<name>/<name>.vkey.json` for transact, grant, spend and delegate: **every proof is verified off-chain against these keys before anything is staged** (`400 invalid_proof`), and the relayer refuses to start without them. Default: `RELAYER_X402_CIRCUITS_DIR`, else the repository's `build/circuits`; the Vercel bundle ships them with the function |
+| `RELAYER_VKEY_SHA256_TRANSACT`, `..._GRANT`, `..._SPEND`, `..._DELEGATE` | optional pinned sha256 of each verifying key (printed by `scripts/relayer-vercel.mjs` and in the startup log); a mismatch refuses to start. The keys must be the ones the deployed program embeds (`solana/programs/stipend_pool/src/generated/vk.rs`, generated from the same files) |
 | `RELAYER_SOLANA_LOOKUP_TABLES` | comma-separated lookup tables to build v0 transactions against |
 | `RELAYER_SOLANA_MIN_LAMPORTS`, `RELAYER_SOLANA_MAX_IN_FLIGHT` | refuse when underfunded / busy |
 | `RELAYER_SOLANA_CAPACITY_MINT` | enables capacity_stake enforcement for this staked mint (H081) |
@@ -63,13 +68,15 @@ which case Solana relaying must be configured):
 | `RELAYER_X402_SERVICE_NAME`, `RELAYER_X402_TAGS`, `RELAYER_X402_ICON_URL` | Bazaar listing: name (default `H081 Capital`, at most 32 ASCII), at most 5 tags (default `solana,privacy,bank,agents,loans`), optional https png/jpg/webp/gif icon |
 | `RELAYER_X402_PRIORITY_MAX_IN_FLIGHT`, `RELAYER_X402_PRIORITY_MAX_LAMPORTS`, `RELAYER_X402_PRIORITY_PRICE_CEIL` | the priority lane: its own in-flight count (default 4), priority fee cap per transaction in lamports (default 4,000,000) and ceiling in micro-lamports per CU (default 5,000,000) |
 | `RELAYER_X402_LOAN_PROGRAM_ID` | stream_loan program the loan-market service reads (default the mainnet id `8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`) |
-| `RELAYER_X402_CIRCUITS_DIR`, `RELAYER_X402_DISCLOSE_VKEY_SHA256` | `build/circuits`-style directory with `disclose/` artifacts (enables prove-disclose; the Vercel bundle sets it when the artifacts ship with the function) and the pinned sha256 of `disclose.vkey.json` |
+| `RELAYER_X402_CIRCUITS_DIR`, `RELAYER_X402_DISCLOSE_VKEY_SHA256` | `build/circuits`-style directory with `disclose/` artifacts (enables prove-disclose; the Vercel bundle sets it when the artifacts ship with the function) and the pinned sha256 of `disclose.vkey.json`. At bundle time (`scripts/relayer-vercel.mjs`) the same variable names the directory whose relay verifying keys are copied into the bundle (required; default `build/circuits`) |
 
 ## API
 
 ```
 GET  /v1/health
-GET  /v1/info                 chains, relayer addresses, minimum fees, fee accounts, lookup tables, x402 { enabled, catalog }
+GET  /v1/info                 chains, relayer addresses, minimum fees, fee accounts, lookup tables, x402 { enabled, catalog };
+                              solana also carries createAccountFees { mint: surcharge }, createAccountLamports, stagingLamports
+                              and proofVerification { vkeySha256: { transact, grant, spend, delegate } }
 POST /v1/solana/relay         { op, payload (base64), mint?, recipientOwner?, lenderToken? } -> { signature, computeUnits, op, fee }
 POST /v1/evm/relay            { to, data }                                                   -> { hash, fn, fee }
 
@@ -81,7 +88,14 @@ POST /v1/x402/prove/disclose          paid, settle-first:  { root, kind, bound, 
 ```
 
 Errors are `{ error: { code, message } }`: 400 malformed, 402 fee not acceptable, 409 stale root or spent
-nullifier, 413 body too large, 422 simulation failed, 429 rate limited, 503 chain disabled or busy.
+nullifier, 413 body too large, 422 simulation failed, 429 rate limited, 503 chain disabled or busy. Solana 400s
+that protect the hot wallet: `invalid_proof` (the Groth16 proof does not verify against the program's public
+inputs; nothing was staged), `ext_too_large` (an encrypted output above what the SDK emits: 1 KiB for a note
+memo, 8 KiB for an allowance memo, 3 KiB for a lender copy), `account_creation_disabled` (the operation needs an
+account the relayer would pay rent for and no surcharge is configured for its mint, or it pays no fee),
+`fee_too_low` (the fee does not cover the relay fee plus the create-account surcharge; the 402 of the same code
+is the plain relay-fee rule), `lamport_budget_exceeded` (the relay would cost the hot wallet more than the fee
+policy covers); 503 `proof_verifier_unavailable` (no verifying keys loaded: the relayer relays nothing).
 
 x402 flow (v2, `exact` scheme on Solana): a paid route without a `PAYMENT-SIGNATURE` header answers 402
 with the `PAYMENT-REQUIRED` header (base64 JSON `PaymentRequired`: `resource`, `accepts` = one `exact`
@@ -101,10 +115,19 @@ not served), `invalid_payment_requirements`, `payment_invalid` (`reason` = the f
 result is served with the pending receipt and a `x402 pending <signature>` log line for reconciliation.
 Owner runbook: `docs/X402-SELLER.md`.
 
-Solana flow: decode `borsh(Proof, Args, ext)` for the named op, check the fee (mint listed, amount at least
-the minimum, paid to the treasury's fee account), check root/nullifiers/timestamp, stage the payload in a
-buffer the relayer owns, simulate the final transaction, then send. Deposits and lender claims are never
-relayed (the depositor or lender must sign).
+Solana flow: decode `borsh(Proof, Args, ext)` for the named op (every encrypted output capped at the size the
+SDK emits), check the fee (mint listed, amount at least the minimum, paid to the treasury's fee account),
+**verify the Groth16 proof off-chain** against the public inputs the program derives and the program's
+verifying keys, check root/nullifiers/timestamp (a spend or delegate `now` must be at most 3 minutes old on
+chain, `NOW_LOOKBACK`; the relayer wants 2 minutes of that left for staging), plan the transactions (an account
+the final transaction creates is priced into the fee, and the lamports the whole relay costs must be within
+budget), stage the payload in a buffer the relayer owns, simulate the final transaction, then send. A relay
+that fails after staging closes its buffer (retried; a buffer still holding its rent is logged with its address
+and seed). Deposits and lender claims are never relayed (the depositor or lender must sign).
+
+Tests: `npm run test:relayer`. `test/relayer/fixtures/relay-payloads.json` holds a real withdrawal and a real
+public spend (Groth16 proofs made once with the ceremony build) and `fixtures/circuits/` the matching
+verifying keys; `fixtures/make-relay-fixtures.mts <build/circuits>` regenerates them when the circuits change.
 
 ## SDK side
 

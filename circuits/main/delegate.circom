@@ -13,6 +13,12 @@ include "circomlib/circuits/comparators.circom";
 // owner's policy. The owner can reclaim any note in the tree.
 //   fixed by the parent:  windowLen, recipientRoot, ownerPk, (residual) expiry
 //   tightened per sub:    windowCap, maxPerTx, expiry, streamRate, streamStart
+// What the parent has already consumed is not forgotten: the subs together
+// start the current window with at least what the residual's cap cannot
+// absorb of the parent's windowSpent, and a sub's stream starts no earlier
+// than the parent's start, than now, and than the point where the parent's
+// stream had released what the parent already spent. Without those, an
+// agent could self-delegate to reset its window or re-mint its stream.
 // Pledges: every sub and the residual carry the parent's lender and
 // pledgeBps unchanged. A pledge is immutable and only the owner creates one
 // (grant.circom), so an agent can neither re-point a lender nor lend to
@@ -63,6 +69,8 @@ template Delegate(levels, nSubs) {
     signal input subStreamRate[nSubs];
     signal input subStreamStart[nSubs];
     signal input subRho[nSubs];
+    // what each sub starts the current window with (see "the window already spent" below)
+    signal input subWindowSpent[nSubs];
 
     // the residual's share of the window cap and stream
     signal input resWindowCap;
@@ -131,6 +139,16 @@ template Delegate(levels, nSubs) {
     rLifetime.in <== lifetimeCap;
     component rPaid = Range(AMOUNT_BITS());
     rPaid.in <== pledgePaid;
+    component rSpent = Range(AMOUNT_BITS());
+    rSpent.in <== windowSpent;
+    component rStart = Range(TIME_BITS());
+    rStart.in <== streamStart;
+    // what the parent has drawn from its lifetime budget so far (remaining never exceeds the cap)
+    component capOk = Leq(AMOUNT_BITS());
+    capOk.a <== remaining;
+    capOk.b <== lifetimeCap;
+    capOk.out === 1;
+    signal spentSoFar <== lifetimeCap - remaining;
 
     component hasCap = NonZero();
     hasCap.in <== windowCap;
@@ -165,9 +183,16 @@ template Delegate(levels, nSubs) {
     component maxLe[nSubs];
     component expLe[nSubs];
     component startGe[nSubs];
+    component startAfterParent[nSubs];
+    component frontierOk[nSubs];
+    component rSSpent[nSubs];
+    component spentLe[nSubs];
+    signal gap[nSubs];
+    signal drawnBySubStart[nSubs];
     var sumAmount = 0;
     var sumCap = 0;
     var sumRate = 0;
+    var sumWindowSpent = 0;
     for (var i = 0; i < nSubs; i++) {
         rAmt[i] = Range(AMOUNT_BITS());
         rAmt[i].in <== subAmount[i];
@@ -210,6 +235,30 @@ template Delegate(levels, nSubs) {
         startGe[i].a <== now;
         startGe[i].b <== subStreamStart[i];
         startGe[i].when <== hasRate.out;
+        // ... nor earlier than the parent's own start (a cliff cannot be skipped by self-delegating) ...
+        startAfterParent[i] = LeqWhen(TIME_BITS());
+        startAfterParent[i].a <== streamStart;
+        startAfterParent[i].b <== subStreamStart[i];
+        startAfterParent[i].when <== hasRate.out;
+        // ... nor earlier than the point the parent's stream had already released what the parent spent:
+        // spentSoFar <= streamRate * (subStreamStart - streamStart). A sub starts with spentSoFar = 0, so
+        // without this a self-delegation at a back-dated `now` re-mints allotment the parent already used.
+        gap[i] <== hasRate.out * (subStreamStart[i] - streamStart);
+        drawnBySubStart[i] <== streamRate * gap[i];
+        frontierOk[i] = LeqWhen(130);
+        frontierOk[i].a <== spentSoFar;
+        frontierOk[i].b <== drawnBySubStart[i];
+        frontierOk[i].when <== hasRate.out;
+
+        // the window already spent: a sub under a capped parent may start the window partly spent (at most
+        // its own cap); an uncapped parent's subs start at zero
+        rSSpent[i] = Range(AMOUNT_BITS());
+        rSSpent[i].in <== subWindowSpent[i];
+        spentLe[i] = LeqWhen(AMOUNT_BITS());
+        spentLe[i].a <== subWindowSpent[i];
+        spentLe[i].b <== subWindowCap[i];
+        spentLe[i].when <== hasCap.out;
+        (1 - hasCap.out) * subWindowSpent[i] === 0;
 
         subPolicy[i] = PolicyHash();
         subPolicy[i].lifetimeCap <== subAmount[i];
@@ -230,7 +279,7 @@ template Delegate(levels, nSubs) {
         sub[i].agentPk <== subAgentPk[i];
         sub[i].policyHash <== subPolicy[i].out;
         sub[i].windowId <== windowId;
-        sub[i].windowSpent <== 0;
+        sub[i].windowSpent <== subWindowSpent[i];
         sub[i].rho <== subRho[i];
         sub[i].pledgePaid <== 0;
         sub[i].out === subCommitment[i];
@@ -238,7 +287,23 @@ template Delegate(levels, nSubs) {
         sumAmount += subAmount[i];
         sumCap += subWindowCap[i];
         sumRate += subStreamRate[i];
+        sumWindowSpent += subWindowSpent[i];
     }
+
+    // --- the window already spent is not forgotten ---
+    // The residual keeps the parent's windowSpent, so this window it can still spend at most
+    // max(0, resWindowCap - windowSpent). Whatever the residual's cap cannot absorb must be carried
+    // by the subs: sum(subWindowSpent) >= windowSpent - resWindowCap. Then, across the whole tree,
+    // what can still be spent this window never exceeds windowCap - windowSpent. (A stale windowId
+    // makes the inherited figure moot: the first spend in a later window starts from zero anyway.)
+    component resAbsorbs = Leq(AMOUNT_BITS());
+    resAbsorbs.a <== windowSpent;
+    resAbsorbs.b <== resWindowCap;
+    signal excessSpent <== (1 - resAbsorbs.out) * (windowSpent - resWindowCap);
+    component carriedOk = LeqWhen(132);
+    carriedOk.a <== excessSpent;
+    carriedOk.b <== sumWindowSpent;
+    carriedOk.when <== hasCap.out;
 
     // --- the shares add up to no more than the parent's ---
     signal residualRemaining <== remaining - sumAmount;

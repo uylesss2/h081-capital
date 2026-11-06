@@ -16,7 +16,10 @@ pub const ESCROW_SEED: &[u8] = b"owed";
 /// Solana are additionally limited to u64.
 pub const MAX_AMOUNT: u128 = u128::MAX;
 /// `now` in a spend or delegate proof must fall inside this window around the Clock sysvar.
-pub const NOW_LOOKBACK: i64 = 15 * 60;
+/// Lookback 3 minutes (was 15): the circuit derives the spend window from `now`, so a proof dated across a
+/// window boundary could reset the window spend; a narrow band limits how far `now` can be moved. The
+/// relayer mirrors this constant (relayer/solana.ts NOW_LOOKBACK).
+pub const NOW_LOOKBACK: i64 = 3 * 60;
 pub const NOW_LOOKAHEAD: i64 = 60;
 pub const GRANT_OUTPUTS: usize = 16;
 pub const DELEGATE_OUTPUTS: usize = 4;

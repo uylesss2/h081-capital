@@ -223,10 +223,32 @@ export async function stagePlan(connection: Connection, payer: Keypair, plan: Op
   return sigs;
 }
 
-/** Closes a staged buffer (refunds its rent). Ignores a buffer that was never opened or already closed. */
-export async function abandonPlan(connection: Connection, programId: PublicKey, payer: Keypair, plan: OpPlan): Promise<void> {
-  if (!(await connection.getAccountInfo(plan.buffer, 'confirmed'))) return;
-  await sendV0(connection, payer, [bufferCloseIx(programId, payer.publicKey, plan.seed)]).catch(() => undefined);
+/** What abandonPlan did: whether the buffer is gone, how many close attempts it took, and the last error when it is not. */
+export interface AbandonResult { closed: boolean; attempts: number; error?: string }
+
+/**
+ * Closes a staged buffer (refunds its rent). A buffer that was never opened or is already closed counts as
+ * closed. A failed close is retried (`attempts`, default 3, a short pause between); the result says whether
+ * the rent came back so the caller can log a buffer that still holds it. Never throws.
+ */
+export async function abandonPlan(
+  connection: Connection, programId: PublicKey, payer: Keypair, plan: OpPlan,
+  opts: { attempts?: number; pauseMs?: number; send?: typeof sendV0 } = {},
+): Promise<AbandonResult> {
+  const attempts = Math.max(1, opts.attempts ?? 3);
+  const send = opts.send ?? sendV0;
+  let error: string | undefined;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      if (!(await connection.getAccountInfo(plan.buffer, 'confirmed'))) return { closed: true, attempts: i - 1 };
+      await send(connection, payer, [bufferCloseIx(programId, payer.publicKey, plan.seed)]);
+      return { closed: true, attempts: i };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      if (i < attempts) await new Promise((r) => setTimeout(r, opts.pauseMs ?? 500));
+    }
+  }
+  return { closed: false, attempts, error };
 }
 
 /**

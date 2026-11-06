@@ -42,8 +42,10 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'shielded balance funds an allowance of `budget` USDG to a sub-account that unlocks as a stream over `unlockDays`, ' +
     'with `pledgeBps` of every payment from it routed to the lender (from the terms code), then makes the stream proof ' +
     'and returns it as an `h081-loan-proof:` code. Hand that code to the lender: when they fund the slot, the principal ' +
-    'minus the 0.25% origination fee lands in the agent wallet\'s USDG account. This is a two-party flow with no ' +
-    'automatic matching: without a lender who funds, nothing is borrowed. Needs the grant (44 MB) and stream circuits. ' +
+    'minus the 0.25% origination fee lands in the agent wallet\'s USDG account. Give `principal` to borrow a set amount: ' +
+    'the proof fixes it and the program lets the lender fund exactly that, nothing else (default: the most the pledge can ' +
+    'back). This is a two-party flow with no automatic matching: without a lender who funds, nothing is borrowed. Needs ' +
+    'the grant (44 MB) and stream circuits. ' +
     NOTICE_SHORT,
   h081_stake:
     'capacity_stake: stake H081 from the agent wallet to earn relayer capacity (desks and shield capacity: how much ' +
@@ -90,11 +92,13 @@ export const LoanBorrowZ = z.object({
   budget: amountZ.optional(), budgetUsdg: decimalZ.optional(),
   dailyCap: amountZ.optional(), dailyCapUsdg: decimalZ.optional(),
   maxPerTx: amountZ.optional(), maxPerTxUsdg: decimalZ.optional(),
+  principal: amountZ.optional(), principalUsdg: decimalZ.optional(),
   days: z.number().positive().max(3650),
   unlockDays: z.number().positive().max(3650),
   agentIndex: z.number().int().min(0).max(15).optional(),
 }).strict()
   .refine(exactlyOne('budget', 'budgetUsdg'), oneOfMsg('budget', 'budgetUsdg'))
+  .refine((o) => !(o.principal !== undefined && o.principalUsdg !== undefined), { message: 'give principal or principalUsdg, not both' })
   .refine((o) => o.unlockDays <= o.days, { message: 'unlockDays must not exceed days' });
 
 export const STAKE_ACTIONS = ['view', 'stake', 'request_unstake', 'unstake'] as const;
@@ -159,13 +163,15 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
       dailyCapUsdg: decimalJ('USDG'),
       maxPerTx: { ...amountJ, description: 'most per payment (base units); default: no per-payment cap' },
       maxPerTxUsdg: decimalJ('USDG'),
+      principal: { ...amountJ, description: 'the loan amount asked for (base units): the lender must fund exactly this; at most budget * pledgeBps / 10000. Default: that maximum' },
+      principalUsdg: decimalJ('USDG'),
       days: { type: 'number', exclusiveMinimum: 0, maximum: 3650, description: 'lifetime of the allowance in days' },
       unlockDays: { type: 'number', exclusiveMinimum: 0, maximum: 3650, description: 'the budget unlocks linearly over this many days (<= days)' },
       agentIndex: { type: 'integer', minimum: 0, maximum: 15, description: 'which sub-account to use (default: the first free one)' },
     },
     required: ['termsCode', 'days', 'unlockDays'],
     additionalProperties: false,
-    description: 'exactly one of budget (base units) or budgetUsdg (decimal)',
+    description: 'exactly one of budget (base units) or budgetUsdg (decimal); at most one of principal / principalUsdg',
   },
   h081_stake: {
     type: 'object',

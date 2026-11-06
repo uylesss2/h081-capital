@@ -686,7 +686,7 @@ export class Wallet {
   async proveStream(owned: OwnedAllowance, bounds: { minRemaining: bigint; minRate: bigint; audience: bigint }): Promise<{ proof: ProofResult; args: StreamArgs }> {
     if (!owned.lender) throw new Error('allowance is not pledged');
     await this.sync();
-    const built = streamInput({ root: this.tree.root, allowance: owned.allowance, path: this.tree.path(owned.index), lender: owned.lender, ...bounds });
+    const built = streamInput({ root: this.tree.root, allowance: owned.allowance, path: this.tree.path(owned.index), lender: owned.lender, spender: this.account.keys, ...bounds });
     const proof = await this.prover.prove('stream', built.input);
     const [root, minRemaining, minRate, lenderAddr, loanRef, pledgeBps, expiry, lifetimeCap, pledgePaid, agentPk, audience, streamStart, asset] = built.publicSignals;
     return {

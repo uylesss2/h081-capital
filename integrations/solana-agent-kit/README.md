@@ -69,7 +69,7 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_BANK_WITHDRAW` | `h081_bank_withdraw` | `{amount|usdg, to?: wallet, direct?: boolean}` |
 | `H081_BANK_BALANCE` | `h081_bank_balance` | `{}` |
 | `H081_LOAN_QUOTE` | `h081_loan_quote` | `{termsCode?, minRemaining?|minRemainingUsdg?, pledgeBps?, principal?|principalUsdg?, loanRef?}` |
-| `H081_LOAN_BORROW` | `h081_loan_borrow` | `{termsCode, budget|budgetUsdg, dailyCap?|dailyCapUsdg?, maxPerTx?|maxPerTxUsdg?, days, unlockDays, agentIndex?}` |
+| `H081_LOAN_BORROW` | `h081_loan_borrow` | `{termsCode, budget|budgetUsdg, dailyCap?|dailyCapUsdg?, maxPerTx?|maxPerTxUsdg?, principal?|principalUsdg?, days, unlockDays, agentIndex?}` |
 | `H081_STAKE` | `h081_stake` | `{action: view|stake|request_unstake|unstake, amount?|h081?}` |
 | `H081_PROTOCOL_INFO` | `h081_protocol_info` | `{}` |
 

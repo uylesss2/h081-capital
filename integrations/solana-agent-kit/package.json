@@ -1,6 +1,6 @@
 {
   "name": "@h081lll/solana-agent-kit-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Solana Agent Kit v2 plugin for H081 Capital, the private bank for AI agents on Solana: shielded USDG deposits and withdrawals, balance, loan quotes and pledges, H081 staking. Live on Solana mainnet; not audited yet; use at your own risk.",
   "license": "MIT",
   "private": false,

@@ -328,9 +328,25 @@ export interface StreamParams {
   path: MerklePath;
   /** preimage of policy.lender */
   lender: LenderRef;
+  /** the agent the note is for, or its owner: nobody else can speak for the note (a lender holds its contents) */
+  spender: SpendingKey;
   minRemaining: bigint;
   minRate: bigint;
   audience: bigint;
+}
+
+/**
+ * The `minRemaining` to prove when the borrower wants exactly `principal`: the smallest bound whose pledged
+ * share, floor(minRemaining * bps / 10000), is `principal`. stream_loan requires the lender to fund exactly
+ * that figure, so the borrower, not the lender, sets the loan amount; and the bound reveals only the amount
+ * asked for, not the balance.
+ */
+export function minRemainingFor(principal: bigint, pledgeBps: bigint): bigint {
+  if (pledgeBps <= 0n || pledgeBps > BPS) throw new Error('pledgeBps must be 1..10000');
+  if (principal <= 0n) throw new Error('principal must be positive');
+  const m = (principal * BPS + pledgeBps - 1n) / pledgeBps;
+  if ((m * pledgeBps) / BPS !== principal) throw new Error('no bound yields exactly this principal'); // cannot happen for bps <= 10000
+  return m;
 }
 
 /**
@@ -344,7 +360,9 @@ export function streamInput(p: StreamParams) {
   assertPledge(P, p.lender);
   if (p.minRemaining > a.remaining) throw new Error('minRemaining exceeds the balance');
   if (p.minRate > P.streamRate) throw new Error('minRate exceeds the stream rate');
+  if (p.spender.pk !== a.agentPk && p.spender.pk !== P.ownerPk) throw new Error('only the agent or the owner can prove a stream over this allowance');
   const input: CircuitInput = {
+    sk: p.spender.sk,
     root: p.root,
     minRemaining: p.minRemaining,
     minRate: p.minRate,
@@ -395,10 +413,29 @@ export interface DelegateParams {
 }
 
 /**
+ * The earliest a sub's stream may start under `a` at `now`: no earlier than now, than the parent's own start,
+ * and than the point where the parent's stream had released what the parent has already spent
+ * (streamStart + ceil(spentSoFar / streamRate)). A sub starts with nothing spent against its stream, so an
+ * earlier start would hand it allotment the parent already used.
+ */
+export function subStreamStartFloor(a: Allowance, now: bigint): bigint {
+  const P = a.policy;
+  if (P.streamRate === 0n) return 0n;
+  const spentSoFar = P.lifetimeCap - a.remaining;
+  const frontier = P.streamStart + (spentSoFar + P.streamRate - 1n) / P.streamRate;
+  let floor = now > P.streamStart ? now : P.streamStart;
+  if (frontier > floor) floor = frontier;
+  return floor;
+}
+
+/**
  * Every sub and the residual carry the parent's pledge unchanged: only the owner creates a pledge (at grant),
  * so an agent cannot lend its allowance to itself and step around the owner's rules. A streamed sub starts
- * at `now` unless told otherwise, so a self-delegation restarts the stream; a lender reading the successor
- * memo should treat a later streamStart as a change of terms.
+ * at `subStreamStartFloor` unless told a later time, so a self-delegation restarts the stream without
+ * re-minting anything; a lender reading the successor memo should treat a later streamStart as a change of
+ * terms. Under a capped parent the subs inherit, between them, whatever of the parent's current windowSpent
+ * the residual's cap cannot absorb (greedily, first sub first), so this window the tree can still spend at
+ * most windowCap - windowSpent.
  */
 export function delegateInput(p: DelegateParams) {
   const a = p.allowance;
@@ -408,22 +445,27 @@ export function delegateInput(p: DelegateParams) {
   const parentPledged = P.pledgeBps !== 0n;
   const parentLender = p.lender ?? NO_LENDER;
   assertPledge(P, parentPledged ? parentLender : undefined);
-  const subs: Allowance[] = p.subs.map((s) => ({
-    asset: a.asset, remaining: s.amount, agentPk: s.agentPk, windowId: a.windowId, windowSpent: 0n, rho: randomField(), pledgePaid: 0n,
-    policy: {
-      lifetimeCap: s.amount, windowCap: s.windowCap ?? P.windowCap, windowLen: P.windowLen, maxPerTx: s.maxPerTx ?? P.maxPerTx,
-      expiry: s.expiry ?? P.expiry, recipientRoot: P.recipientRoot, ownerPk: P.ownerPk,
-      streamRate: s.streamRate ?? P.streamRate, streamStart: s.streamStart ?? (P.streamRate !== 0n ? p.now : 0n),
-      lender: P.lender, pledgeBps: P.pledgeBps,
-    },
-  }));
+  const startFloor = subStreamStartFloor(a, p.now);
+  const subs: Allowance[] = p.subs.map((s) => {
+    const streamStart = s.streamStart ?? (P.streamRate !== 0n ? startFloor : 0n);
+    if (P.streamRate !== 0n && streamStart < startFloor) throw new Error(`a sub stream may not start before ${startFloor} (the parent's start, now, and what the parent already drew)`);
+    return {
+      asset: a.asset, remaining: s.amount, agentPk: s.agentPk, windowId: a.windowId, windowSpent: 0n, rho: randomField(), pledgePaid: 0n,
+      policy: {
+        lifetimeCap: s.amount, windowCap: s.windowCap ?? P.windowCap, windowLen: P.windowLen, maxPerTx: s.maxPerTx ?? P.maxPerTx,
+        expiry: s.expiry ?? P.expiry, recipientRoot: P.recipientRoot, ownerPk: P.ownerPk,
+        streamRate: s.streamRate ?? P.streamRate, streamStart,
+        lender: P.lender, pledgeBps: P.pledgeBps,
+      },
+    };
+  });
   // unused slots: zero amount, the tightest harmless policy, the parent's pledge
   while (subs.length < DELEGATE_OUTPUTS) {
     subs.push({
       asset: a.asset, remaining: 0n, agentPk: randomField(), windowId: a.windowId, windowSpent: 0n, rho: randomField(), pledgePaid: 0n,
       policy: {
         lifetimeCap: 0n, windowCap: P.windowCap === 0n ? 0n : 1n, windowLen: P.windowLen, maxPerTx: P.maxPerTx === 0n ? 0n : 1n,
-        expiry: P.expiry, recipientRoot: P.recipientRoot, ownerPk: P.ownerPk, streamRate: P.streamRate === 0n ? 0n : 1n, streamStart: P.streamRate === 0n ? 0n : p.now,
+        expiry: P.expiry, recipientRoot: P.recipientRoot, ownerPk: P.ownerPk, streamRate: P.streamRate === 0n ? 0n : 1n, streamStart: P.streamRate === 0n ? 0n : startFloor,
         lender: P.lender, pledgeBps: P.pledgeBps,
       },
     });
@@ -440,6 +482,16 @@ export function delegateInput(p: DelegateParams) {
   // an empty residual may drop its cap and rate; a live one keeps them
   if (residualRemaining !== 0n && P.windowCap !== 0n && residualWindowCap === 0n) throw new Error('residual needs a window cap');
   if (residualRemaining !== 0n && P.streamRate !== 0n && residualStreamRate === 0n) throw new Error('residual needs a stream rate');
+  // the window already spent: what the residual's cap cannot absorb is carried by the subs, first sub first
+  if (P.windowCap !== 0n) {
+    let carry = a.windowSpent > residualWindowCap ? a.windowSpent - residualWindowCap : 0n;
+    for (const s of subs) {
+      const take = carry < s.policy.windowCap ? carry : s.policy.windowCap;
+      s.windowSpent = take;
+      carry -= take;
+    }
+    if (carry !== 0n) throw new Error('the subs cannot absorb what the parent already spent this window'); // unreachable while sumCap + resCap <= windowCap
+  }
   const resLifetimeCap = P.lifetimeCap - sumAmount;
   const resLifetimeShare = divBps(resLifetimeCap, P.pledgeBps);
   if (a.pledgePaid > resLifetimeShare.q) throw new Error('delegating that much would shrink the lender\'s share below what it was already paid');
@@ -461,7 +513,7 @@ export function delegateInput(p: DelegateParams) {
     sk: p.agent.sk, pathIndices: p.path.pathIndices, pathElements: p.path.pathElements,
     subAgentPk: subs.map((s) => s.agentPk), subAmount: subs.map((s) => s.remaining), subWindowCap: subs.map((s) => s.policy.windowCap),
     subMaxPerTx: subs.map((s) => s.policy.maxPerTx), subExpiry: subs.map((s) => s.policy.expiry), subStreamRate: subs.map((s) => s.policy.streamRate),
-    subStreamStart: subs.map((s) => s.policy.streamStart), subRho: subs.map((s) => s.rho),
+    subStreamStart: subs.map((s) => s.policy.streamStart), subRho: subs.map((s) => s.rho), subWindowSpent: subs.map((s) => s.windowSpent),
     resWindowCap: residualWindowCap, resStreamRate: residualStreamRate,
     resLifetimeShare: resLifetimeShare.q, resLifetimeShareRem: resLifetimeShare.rem,
   };

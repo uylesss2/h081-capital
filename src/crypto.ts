@@ -135,8 +135,10 @@ export function availableNow(a: Allowance, now: bigint): bigint {
     const spentSoFar = p.lifetimeCap - a.remaining;
     avail = allotted > spentSoFar ? (allotted - spentSoFar < avail ? allotted - spentSoFar : avail) : 0n;
   }
+  const newWindowId = now / p.windowLen;
+  if (newWindowId < a.windowId) return 0n; // the circuit refuses a spend whose `now` is in an earlier window than the note's
   if (p.windowCap !== 0n) {
-    const carried = now / p.windowLen === a.windowId ? a.windowSpent : 0n;
+    const carried = newWindowId === a.windowId ? a.windowSpent : 0n;
     const left = p.windowCap > carried ? p.windowCap - carried : 0n;
     if (left < avail) avail = left;
   }
@@ -221,6 +223,8 @@ export function splitSpend(a: Allowance, amount: bigint, claim = false): SpendSp
  */
 export function spendAllowance(a: Allowance, amount: bigint, now: bigint, enforce = true, claim = false): Allowance {
   const newWindowId = now / a.policy.windowLen;
+  // the window never moves backwards (spend.circom): a stale `now` has no proof, for the agent and the owner alike
+  if (!claim && newWindowId < a.windowId) throw new Error(`now ${now} falls in window ${newWindowId}, before the note's window ${a.windowId}; use a current timestamp`);
   const carried = newWindowId === a.windowId ? a.windowSpent : 0n;
   const { lenderAmount } = splitSpend(a, amount, claim);
   return {

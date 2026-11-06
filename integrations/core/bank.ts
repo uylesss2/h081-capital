@@ -17,6 +17,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, type TransactionInstr
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { Account } from '../../src/account.js';
 import { initCrypto } from '../../src/crypto.js';
+import { minRemainingFor } from '../../src/inputs.js';
 import { type Prover } from '../../src/prover.js';
 import { RelayerClient, type RelayerInfo } from '../../src/relayer-client.js';
 import { SolanaPool, SolanaWallet, type SolOwnedAllowance, type SolRelay } from '../../src/solana/wallet.js';
@@ -37,6 +38,8 @@ export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paus
 
 export interface RelayTerms {
   url: string; relayer: PublicKey; feeRecipient: PublicKey; minFee: bigint; feeBps: number; treasury?: string; freeTier?: bigint;
+  /** what the relayer adds to the fee when it has to create the recipient's token account; undefined = it will not create one */
+  createAccountFee?: bigint;
 }
 
 export interface AllowanceView {
@@ -79,10 +82,10 @@ export interface LoanQuote {
 export interface SlotView {
   loanRef: bigint; lender: string; funded: boolean; settled: boolean; principal: bigint; repaid: bigint; expiry: bigint; pledgeBps: bigint; payoutTo: string;
 }
-export interface BorrowRules { budget: bigint; dailyCap?: bigint; maxPerTx?: bigint; days: number; unlockDays: number; agentIndex?: number }
+export interface BorrowRules { budget: bigint; dailyCap?: bigint; maxPerTx?: bigint; /** the loan amount asked for; the lender must fund exactly this (default: the most the pledge can back) */ principal?: bigint; days: number; unlockDays: number; agentIndex?: number }
 export interface BorrowResult {
   agentIndex: number; allowanceId: bigint; loanRef: bigint; pledgeBps: bigint; grantSignature: string; proofCode: string;
-  maxPrincipal: bigint; originationFeeAtMax: bigint; payoutAccount: string; streamRate: bigint; expiry: bigint; next: string;
+  principal: bigint; maxPrincipal: bigint; originationFeeAtMax: bigint; payoutAccount: string; streamRate: bigint; expiry: bigint; next: string;
 }
 
 export interface BankOptions {
@@ -322,9 +325,12 @@ export class H081Bank {
       const want = getAssociatedTokenAddressSync(this.usdg, treasury, true, await this.tokenProgram());
       if (!feeAccount.equals(want)) throw wrong(`not the treasury's associated ${sym} account ${want.toBase58()}`);
     }
+    // the surcharge the relayer wants when it must create the recipient's token account (it pays the rent)
+    const surcharge = (sol as { createAccountFees?: Record<string, string> }).createAccountFees?.[mint];
     return {
       url, relayer: relayerKey, feeRecipient: feeAccount, minFee: BigInt(minFee),
       feeBps: sol.feeBps ?? 0, treasury: sol.treasury, freeTier: sol.capacity?.freeTier === undefined ? undefined : BigInt(sol.capacity.freeTier),
+      createAccountFee: surcharge === undefined ? undefined : BigInt(surcharge),
     };
   }
 
@@ -375,6 +381,15 @@ export class H081Bank {
     let operator: string | undefined;
     if (terms) {
       fee = H081Bank.relayFee(amount, terms);
+      // the relayer pays the rent of a missing recipient token account only against its surcharge (it refuses otherwise)
+      const ata = getAssociatedTokenAddressSync(this.usdg, dest, true, await this.tokenProgram());
+      if (!(await this.connection.getAccountInfo(ata, 'confirmed'))) {
+        if (terms.createAccountFee === undefined) {
+          throw new Error(`${dest.toBase58()} has no ${sym} token account yet and the relayer ${terms.url} does not create accounts. Create ${ata.toBase58()} first, or ${directHint}.`);
+        }
+        fee += terms.createAccountFee;
+        this.log(`${dest.toBase58()} has no ${sym} account: the relayer creates it for a surcharge of ${fromUnits(terms.createAccountFee, d)} ${sym} on top of the fee`);
+      }
       if (fee >= amount) throw new Error(`the relay fee ${fromUnits(fee, d)} ${sym} is not below the amount; withdraw more or use direct: true.`);
       relay = { via: this.relayer, relayer: terms.relayer, feeRecipient: terms.feeRecipient, fee };
       const pub = amount - fee;
@@ -571,16 +586,22 @@ export class H081Bank {
     if (!owned || !owned.lender || !owned.lenderKey) throw new Error(`the pledged allowance was granted (${grantSignature}) but not found after sync; retry h081_loan_borrow later with the same agentIndex ${i}`);
     const payout = await this.pool.ensureAta(this.signer, this.usdg, this.signer.publicKey);
     const P = owned.allowance.policy;
-    const minRemaining = owned.allowance.remaining;
+    // The proof's bound fixes the loan amount: stream_loan funds exactly max_principal(minRemaining, pledgeBps), so the
+    // borrower names the principal here and the bound reveals the ask, not the balance. Default: the whole pledge.
+    const ceiling = maxPrincipal(owned.allowance.remaining, P.pledgeBps);
+    const principal = rules.principal ?? ceiling;
+    if (principal <= 0n) throw new Error('the principal must be positive');
+    if (principal > ceiling) throw new Error(`PrincipalTooLarge: at most ${fromUnits(ceiling, d)} ${sym} against a budget of ${fromUnits(owned.allowance.remaining, d)} ${sym} pledged at ${t.pledgeBps} bps.`);
+    const minRemaining = minRemainingFor(principal, BigInt(t.pledgeBps));
     const s = await a.wallet.proveStream(owned, { minRemaining, minRate: P.streamRate, audience: payoutAudience(payout) });
     const ok = await this.prover.verify('stream', s.proof).catch(() => true); // a missing vkey must not block; the lender verifies on chain
     if (!ok) throw new Error('the stream proof did not verify locally; the proving artifacts may be corrupt (run fetch-circuits)');
     const proofCode = encodeProofCode({ v: 1, cluster: this.config.cluster, program: this.config.loanProgramId.toBase58(), ref: t.loanRef, payout, proof: s.proof.proof, args: s.args });
-    const max = maxPrincipal(minRemaining, P.pledgeBps);
+    const max = maxPrincipal(minRemaining, P.pledgeBps); // == principal
     return {
-      agentIndex: i, allowanceId: owned.commitment, loanRef: t.loanRef, pledgeBps: t.pledgeBps, grantSignature, proofCode, maxPrincipal: max,
+      agentIndex: i, allowanceId: owned.commitment, loanRef: t.loanRef, pledgeBps: t.pledgeBps, grantSignature, proofCode, principal: max, maxPrincipal: max,
       originationFeeAtMax: originationFee(max), payoutAccount: payout.toBase58(), streamRate, expiry,
-      next: `hand proofCode to the lender; they can fund up to ${fromUnits(max, d)} ${sym} against it, and the principal minus the 0.25% origination fee arrives in ${payout.toBase58()} when they do`,
+      next: `hand proofCode to the lender; they fund exactly ${fromUnits(max, d)} ${sym} against it (the program accepts no other amount), and the principal minus the 0.25% origination fee arrives in ${payout.toBase58()} when they do`,
     };
   }
 

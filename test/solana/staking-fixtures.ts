@@ -25,7 +25,10 @@ export interface StakingMeta {
   t0: number;
   liveExpiry: number;
   lenderSecret: number[];
+  /** the loan asset: a real classic SPL mint (6 decimals) so slash can create the pool's recovery ATA and tests can mint receipts */
   asset: string;
+  /** mint authority of `asset` (throwaway localnet key) */
+  assetAuthoritySecret: number[];
   loans: Record<keyof typeof REF, { loanRef: string; principal: string; repaid: string; pending: string; escrowed: string }>;
 }
 
@@ -50,14 +53,28 @@ function tokenAccountData(mint: PublicKey, owner: PublicKey, amount: bigint): Ui
   return d;
 }
 
+/** A classic SPL mint (82 bytes): COption mint authority, supply, decimals, initialized, no freeze authority. */
+function mintData(authority: PublicKey, supply: bigint, decimals = 6): Uint8Array {
+  const d = new Uint8Array(82);
+  const dv = new DataView(d.buffer);
+  dv.setUint32(0, 1, true); // Some(authority)
+  d.set(authority.toBytes(), 4);
+  dv.setBigUint64(36, supply, true);
+  d[44] = decimals;
+  d[45] = 1; // is_initialized
+  return d;
+}
+
 export function writeFixtures(t0: bigint): StakingMeta {
   rmSync(FIXTURE_DIR, { recursive: true, force: true });
   mkdirSync(FIXTURE_DIR, { recursive: true });
   const lender = Keypair.generate();
-  const asset = Keypair.generate().publicKey; // the loan asset (USDG-like); only its address is read
+  const assetAuthority = Keypair.generate();
+  const asset = Keypair.generate().publicKey; // the loan asset (USDG-like): a real classic SPL mint, written below
   const liveExpiry = t0 + LIVE_SECONDS;
   const loans = {} as StakingMeta['loans'];
   let n = 0;
+  let supply = 0n;
   const put = (pubkey: PublicKey, owner: PublicKey, data: Uint8Array) => writeFileSync(resolve(FIXTURE_DIR, `a${n++}.json`), JSON.stringify(accountJson(pubkey, owner, data)));
 
   // stipend_pool escrow token accounts are owned by the token program, authority = the pool's ["vault_auth"] PDA
@@ -74,6 +91,7 @@ export function writeFixtures(t0: bigint): StakingMeta {
     put(addr, owner, encodeStreamSlot(s));
     let pending = 0n;
     if (inbox) {
+      supply += inbox.amount;
       put(ataAddress(addr, asset, CLASSIC_TOKEN_PROGRAM_ID), CLASSIC_TOKEN_PROGRAM_ID, tokenAccountData(asset, addr, inbox.amount));
       const [ledger, lbump] = PublicKey.findProgramAddressSync(
         [new TextEncoder().encode('ledger'), new Uint8Array(new BigUint64Array([loanRef]).buffer), asset.toBytes()], SAFETY_STREAM_LOAN_PROGRAM_ID);
@@ -81,7 +99,10 @@ export function writeFixtures(t0: bigint): StakingMeta {
       put(ledger, SAFETY_STREAM_LOAN_PROGRAM_ID, encodeStreamLedger({ loanRef, mint: asset, held: inbox.held, received: inbox.held + 10n, bump: lbump }));
       pending = inbox.amount - inbox.held;
     }
-    if (escrowed > 0n) put(streamEscrowPda(loanRef, asset), CLASSIC_TOKEN_PROGRAM_ID, tokenAccountData(asset, vaultAuth, escrowed));
+    if (escrowed > 0n) {
+      supply += escrowed;
+      put(streamEscrowPda(loanRef, asset), CLASSIC_TOKEN_PROGRAM_ID, tokenAccountData(asset, vaultAuth, escrowed));
+    }
     loans[name] = { loanRef: loanRef.toString(), principal: s.principal.toString(), repaid: s.repaid.toString(), pending: pending.toString(), escrowed: escrowed.toString() };
   };
 
@@ -104,7 +125,13 @@ export function writeFixtures(t0: bigint): StakingMeta {
   // a shortfall of 2M tokens minus one base unit: slashing a 2M-token pool for it leaves dust
   slot('dust', { principal: 2_000_000_000_000n - 1n });
 
-  const meta: StakingMeta = { t0: Number(t0), liveExpiry: Number(liveExpiry), lenderSecret: Array.from(lender.secretKey), asset: asset.toBase58(), loans };
+  // the loan asset itself: its supply is what the fixture accounts hold; tests mint receipts with assetAuthority
+  put(asset, CLASSIC_TOKEN_PROGRAM_ID, mintData(assetAuthority.publicKey, supply));
+
+  const meta: StakingMeta = {
+    t0: Number(t0), liveExpiry: Number(liveExpiry), lenderSecret: Array.from(lender.secretKey), asset: asset.toBase58(),
+    assetAuthoritySecret: Array.from(assetAuthority.secretKey), loans,
+  };
   writeFileSync(resolve(FIXTURE_DIR, 'meta.json'), JSON.stringify(meta, null, 2));
   return meta;
 }

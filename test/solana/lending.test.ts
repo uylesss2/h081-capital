@@ -12,7 +12,8 @@ import {
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID, GRACE, LOAN_ERROR, LOAN_TREASURY, LOCALNET_LOAN_PROGRAM_ID, ORIGINATION_FEE_BPS, SPL_TOKEN_PROGRAM_ID, SolanaLoanLenderWallet,
   associatedTokenAddress, claimIx, decodeRegistry, decodeSlot, collectIx, decodeLedger, fundIx, ledgerPda, loanFundedEvents, loanInitializeIx,
-  loanTreasuryAccount, maxPrincipal, openSlotIx, originationFee, payoutAudience, registryPda, settleIx, shortfallIx, slotEscrow, slotInbox, slotPda, syncIx,
+  loanTreasuryAccount, maxPrincipal, minRemainingFor, openSlotIx, originationFee, payoutAudience, recordSlashIx, registryPda, settleIx, shortfallIx, slotEscrow,
+  slotInbox, slotPda, subrogationPda, syncIx,
 } from '../../src/solana/lender.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { TOKEN22_PROGRAM_ID } from '../../src/solana/token.js';
@@ -337,7 +338,11 @@ suite('stream-backed lending through stream_loan', () => {
   });
 
   it('proveStream verifies on chain; fund checks the lender, the slot, the asset and the proof, then pays the principal out', async () => {
-    const stream = await b.proveStream(current(b), { minRemaining: 1_000n * U, minRate: 10n * U, audience: payoutAudience(payout) });
+    // the borrower fixes the amount it borrows: minRemaining is the smallest bound whose pledged share is the principal
+    const minRemaining = minRemainingFor(principal, BPS);
+    expect(minRemaining).toBe(750n * U);
+    expect(maxPrincipal(minRemaining, BPS)).toBe(principal);
+    const stream = await b.proveStream(current(b), { minRemaining, minRate: 10n * U, audience: payoutAudience(payout) });
     expect(stream.args.audience).toBe(fieldOf(payout));
     expect(stream.args.lender.equals(slotPda(ref))).toBe(true);
     expect(stream.args.loanRef).toBe(ref);
@@ -357,7 +362,9 @@ suite('stream-backed lending through stream_loan', () => {
     await send(connection, authority, [createAtaIx(authority.publicKey, strangerKp.publicKey, mint)]);
     await expect(lender.fund(ref, stream, mint, principal, strangerAta)).rejects.toThrow(/not made for this payout account/);
     expect(maxPrincipal(1_000n * U, Number(BPS))).toBe(400n * U);
-    await expect(lender.fund(ref, stream, mint, 400n * U + 1n, payout)).rejects.toThrow(/above what the pledge can repay/);
+    // ... and for exactly the amount the proof backs: neither more nor less (a smaller loan would still take the whole pledge)
+    await expect(lender.fund(ref, stream, mint, principal + 1n, payout)).rejects.toThrow(/must be exactly what the proof backs/);
+    await expect(lender.fund(ref, stream, mint, principal - 1n, payout)).rejects.toThrow(/must be exactly what the proof backs/);
 
     // the program's own checks
     ref2 = await lender.openSlot();
@@ -389,9 +396,12 @@ suite('stream-backed lending through stream_loan', () => {
     const lenderSide = await sideAccount(strangerKp, mint, lenderKp.publicKey);
     await expectCode(lender.fundUnchecked(ref, stream, mint, principal, lenderSide), LOAN_ERROR.BadPayout);
     await expectCode(lender.fundUnchecked(ref, stream, mint, principal, slotInbox(ref, mint)), LOAN_ERROR.BadPayout);
-    // the principal is capped by what the pledge can repay: min_remaining * pledge_bps / 10,000
-    await expectCode(lender.fundUnchecked(ref, stream, mint, 400n * U + 1n, payout), LOAN_ERROR.PrincipalTooLarge);
-    await expectCode(lender.fundUnchecked(ref, stream, mint, 0n, payout), LOAN_ERROR.PrincipalTooLarge);
+    // the principal is exactly what the pledge backs, min_remaining * pledge_bps / 10,000: the lender cannot lend one
+    // unit and capture the whole pledge, nor more than the proof backs
+    await expectCode(lender.fundUnchecked(ref, stream, mint, principal + 1n, payout), LOAN_ERROR.PrincipalMismatch);
+    await expectCode(lender.fundUnchecked(ref, stream, mint, principal - 1n, payout), LOAN_ERROR.PrincipalMismatch);
+    await expectCode(lender.fundUnchecked(ref, stream, mint, 1n, payout), LOAN_ERROR.PrincipalMismatch);
+    await expectCode(lender.fundUnchecked(ref, stream, mint, 0n, payout), LOAN_ERROR.PrincipalMismatch);
 
     const treasury = loanTreasuryAccount(mint);
     const fee = originationFee(principal);
@@ -421,10 +431,21 @@ suite('stream-backed lending through stream_loan', () => {
     expect(loan.streamStart).toBe(streamStart);
     expect(loan.asset.equals(mint)).toBe(true);
     expect(loan.payoutTo.equals(payout)).toBe(true);
-    expect(loan.minRemaining).toBe(1_000n * U);
+    expect(loan.minRemaining).toBe(minRemaining);
     // the inbox exists now, so routed shares land in it
     expect(await connection.getAccountInfo(slotInbox(ref, mint), 'confirmed')).not.toBeNull();
     await expectCode(lender.fundUnchecked(ref, stream, mint, principal, payout), LOAN_ERROR.AlreadyFunded);
+  });
+
+  it('record_slash (subrogation) takes only a safety_pool config PDA as signer; no stranger can redirect a loan\'s receipts', async () => {
+    // a plain keypair signing as the "safety config" (the payer itself, then the lender)
+    await expectCode(send(connection, strangerKp, [recordSlashIx(strangerKp.publicKey, ref, 1n, strangerKp.publicKey, lenderAta)]), LOAN_ERROR.NotSafetyPool);
+    await expectCode(send(connection, strangerKp, [recordSlashIx(strangerKp.publicKey, ref, 1n, lenderKp.publicKey, lenderAta)], { signers: [lenderKp] }), LOAN_ERROR.NotSafetyPool);
+    // an unfunded slot has nothing to record
+    await expectCode(send(connection, strangerKp, [recordSlashIx(strangerKp.publicKey, ref2, 1n, strangerKp.publicKey, lenderAta)]), LOAN_ERROR.NoLoan);
+    expect(await connection.getAccountInfo(subrogationPda(ref), 'confirmed')).toBeNull();
+    // without a recorded slash, sync accepts any stand-in for the subrogation `to` account
+    await lender.syncLoan(ref, undefined, strangerKp);
   });
 
   it('a stream that has not started cannot be funded', async () => {
@@ -434,7 +455,7 @@ suite('stream-backed lending through stream_loan', () => {
     lender.ingest(res.lenderPayloads[0]!);
     await f.sync();
     const future = await f.proveStream(f.agentAllowances(mint)[0], { minRemaining: 100n * U, minRate: 1n * U, audience: payoutAudience(payout) });
-    await expectCode(lender.fund(ref2, future, mint, 10n * U, payout), LOAN_ERROR.StreamNotStarted);
+    await expectCode(lender.fund(ref2, future, mint, 40n * U, payout), LOAN_ERROR.StreamNotStarted);
   });
 
   it('every spend routes the pledged share to the slot inbox; sync credits it as repayment and forwards it to the lender', async () => {
@@ -547,19 +568,25 @@ suite('stream-backed lending through stream_loan', () => {
     await c.sync();
     const stream = await c.proveStream(current(c), { minRemaining: 1_000n * U, minRate: 10n * U, audience: payoutAudience(payout) });
     const principalC = 400n * U;
-    // tokens that reach the inbox before funding wait there (never forwarded to the lender) and count as repayment
+    // tokens that reach the inbox before funding wait there (never forwarded to the lender); `fund` returns them to
+    // the borrower's payout account: they repaid nothing, and the lender must not count them as repayment
     const early = 1_000n;
     await send(connection, authority, [createAtaIx(authority.publicKey, slotPda(refC), mint), mintToIx(mint, slotInbox(refC, mint), authority.publicKey, early)]);
     const payoutBefore = await bal(payout);
-    await lender.fund(refC, stream, mint, principalC, payout);
-    expect(await bal(payout)).toBe(payoutBefore + principalC - originationFee(principalC));
+    const lenderAtFund = await bal(lenderAta);
+    const fundTx = await lender.fund(refC, stream, mint, principalC, payout);
+    expect(await bal(payout)).toBe(payoutBefore + principalC - originationFee(principalC) + early);
+    expect(await bal(lenderAta)).toBe(lenderAtFund - principalC);
+    expect(fundTx.logs.some((l) => l.startsWith('Program data: '))).toBe(true); // LoanFunded + PreFundReturned
     expect((await lender.loan(refC)).expiry).toBe(expiry);
     expect((await lender.loan(refC)).repaid).toBe(0n);
     expect((await lender.ledger(refC, mint))!.held).toBe(0n);
-    expect(await bal(slotInbox(refC, mint))).toBe(early);
-    // the borrower received principal - fee, but the shortfall (and so repayment) is on the full principal; the
-    // early tokens still in the inbox already count as paid
-    expect(await lender.shortfall(refC)).toBe(principalC - early);
+    expect(await bal(slotInbox(refC, mint))).toBe(0n);
+    // the borrower received principal - fee (+ its early tokens back), but the shortfall (and so repayment) is on
+    // the full principal: the early tokens count for nothing
+    expect(await lender.shortfall(refC)).toBe(principalC);
+    await lender.syncLoan(refC, undefined, strangerKp);
+    expect((await lender.loan(refC)).repaid).toBe(0n);
     // loan `ref` has not expired: no shortfall
     expect(await lender.shortfall(ref)).toBe(0n);
     // the agent is expired; the owner reclaims and the lender's share is still routed
@@ -576,18 +603,18 @@ suite('stream-backed lending through stream_loan', () => {
     const reclaim = await owner.prepareSpend(target, half, owner.address);
     await owner.submitSpend({ ...reclaim, accounts: { ...reclaim.accounts, lenderToken: undefined } });
     expect(await bal(slotEscrow(refC, mint))).toBe(share);
-    expect(await bal(slotInbox(refC, mint))).toBe(early);
-    expect(await lender.shortfall(refC)).toBe(principalC - early - share);
+    expect(await bal(slotInbox(refC, mint))).toBe(0n);
+    expect(await lender.shortfall(refC)).toBe(principalC - share);
     // pulled into the inbox: routed but not yet synced still counts
     await pool.pullLenderShare(strangerKp, mint, slotPda(refC), refC);
-    expect(await bal(slotInbox(refC, mint))).toBe(early + share);
-    expect(await lender.shortfall(refC)).toBe(principalC - early - share);
+    expect(await bal(slotInbox(refC, mint))).toBe(share);
+    expect(await lender.shortfall(refC)).toBe(principalC - share);
     const lenderBefore = await bal(lenderAta);
     await lender.syncLoan(refC, undefined, strangerKp);
-    // the early tokens are repayment too, and reach the lender only now that the loan is funded
-    expect((await lender.loan(refC)).repaid).toBe(early + share);
-    expect(await lender.shortfall(refC)).toBe(principalC - early - share);
-    expect(await bal(lenderAta)).toBe(lenderBefore + early + share);
+    // the share routed after funding is repayment and reaches the lender
+    expect((await lender.loan(refC)).repaid).toBe(share);
+    expect(await lender.shortfall(refC)).toBe(principalC - share);
+    expect(await bal(lenderAta)).toBe(lenderBefore + share);
     await expectCode(lender.collect(refC, mint, lenderAta), LOAN_ERROR.NothingOwed);
     // only the slot lender settles; afterwards no shortfall is reported
     await expectCode(send(connection, strangerKp, [settleIx(strangerKp.publicKey, refC)]), LOAN_ERROR.NotTheLender);
@@ -598,7 +625,7 @@ suite('stream-backed lending through stream_loan', () => {
     expect(await lender.shortfall(refC)).toBe(0n);
   });
 
-  it('fund refuses a slot whose pool escrow holds shares; the SDK pulls them into the inbox first, where they count as repayment', async () => {
+  it('fund refuses a slot whose pool escrow holds shares; the SDK pulls them into the inbox first, and fund returns them to the borrower', async () => {
     const refE = await lender.openSlot();
     const g = new SolanaWallet(Account.random(), pool, agentKp);
     const now = await pool.now();
@@ -614,18 +641,21 @@ suite('stream-backed lending through stream_loan', () => {
     await owner.reclaim(target);
     const escrow = slotEscrow(refE, mint);
     expect(await bal(escrow)).toBe(share);
-    await expectCode(lender.fundUnchecked(refE, stream, mint, 1n * U, payout, { pullEscrow: false }), LOAN_ERROR.EscrowNotEmpty);
+    const principalE = maxPrincipal(100n * U, BPS); // 40 tokens: what the proof backs
+    await expectCode(lender.fundUnchecked(refE, stream, mint, principalE, payout, { pullEscrow: false }), LOAN_ERROR.EscrowNotEmpty);
     const payoutBefore = await bal(payout);
-    await lender.fundUnchecked(refE, stream, mint, 1n * U, payout);
-    expect(await bal(payout)).toBe(payoutBefore + 1n * U - 2_500n);
+    await lender.fundUnchecked(refE, stream, mint, principalE, payout);
+    // the pulled share went through the inbox and back to the borrower with the principal: it repays nothing
+    expect(await bal(payout)).toBe(payoutBefore + principalE - originationFee(principalE) + share);
     expect(await bal(escrow)).toBe(0n);
-    expect(await bal(slotInbox(refE, mint))).toBe(share);
+    expect(await bal(slotInbox(refE, mint))).toBe(0n);
     const loan = await lender.loan(refE);
     expect(loan.funded).toBe(true);
     expect(loan.repaid).toBe(0n);
     expect((await lender.ledger(refE, mint))!.held).toBe(0n);
     await lender.syncLoan(refE);
-    expect((await lender.loan(refE)).repaid).toBe(share);
+    expect((await lender.loan(refE)).repaid).toBe(0n);
+    expect(await lender.shortfall(refE)).toBe(0n); // no expiry on this allowance
   });
 
   it('a tiny loan pays no origination fee (rounds down to 0); the treasury account is still address-checked', async () => {
@@ -635,8 +665,9 @@ suite('stream-backed lending through stream_loan', () => {
     const res = await owner.grant(mint, [{ to: t.address, amount: 10n * U, streamRate: 1n * U, streamStart: now - 1_000n, expiry: now + 86400n, pledge: lender.terms(refT, BPS) }]);
     lender.ingest(res.lenderPayloads[0]!);
     await t.sync();
-    const stream = await t.proveStream(current(t), { minRemaining: 10n * U, minRate: 1n * U, audience: payoutAudience(payout) });
     const tiny = 399n;
+    const stream = await t.proveStream(current(t), { minRemaining: minRemainingFor(tiny, BPS), minRate: 1n * U, audience: payoutAudience(payout) });
+    expect(stream.args.minRemaining).toBe(998n); // ceil(399 * 10,000 / 4,000); floor(998 * 4,000 / 10,000) = 399
     expect(originationFee(tiny)).toBe(0n);
     await expectCode(lender.fundUnchecked(refT, stream, mint, tiny, payout, { treasury: lenderAta }), LOAN_ERROR.BadTreasury);
     const treasury = loanTreasuryAccount(mint);

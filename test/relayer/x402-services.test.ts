@@ -18,7 +18,7 @@ import { LEVELS } from '../../src/inputs.js';
 import { MerkleTree } from '../../src/merkle.js';
 import { Prover } from '../../src/prover.js';
 import { GRACE, registryPda, slotPda } from '../../src/solana/lender.js';
-import { poolPda } from '../../src/solana/pda.js';
+import { poolPda, vaultPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE } from '../../src/solana/program.js';
 import { concatBytes, encodeTransactArgs, encodeTransactExt, extDataHash, fromBe, toB64 } from '../../src/solana/index.js';
 import { clockAccount, encodeRegistry, encodeSlot } from './helpers/x402.js';
@@ -123,24 +123,27 @@ function poolAccount(roots: bigint[]) {
   return { data, owner: programId, lamports: 1, executable: false };
 }
 const mintData = () => { const b = Buffer.alloc(82); b[44] = 6; return b; };
+const recipientOwner = Keypair.generate().publicKey;
+const recipientAta = getAssociatedTokenAddressSync(usd, recipientOwner, true, TOKEN_PROGRAM_ID);
+/** The proofs here are placeholders (filled with 7s); the verifier is stubbed. proof-verify.test.ts covers the real one. */
+const okVerifier = { verify: async () => true };
 
+/** By default the vault and the recipient's account exist, so the relayer creates nothing (create-account-fee.test.ts covers creation). */
 function stubCluster(o: { roots?: bigint[]; lamports?: number; existing?: PublicKey[] } = {}) {
   const pool = poolAccount(o.roots ?? [11n]);
+  const existing = o.existing ?? [recipientAta, vaultPda(programId, usd)];
   return {
     getAccountInfo: async (k: PublicKey) => {
       if (k.equals(usd)) return { owner: TOKEN_PROGRAM_ID, data: mintData(), lamports: 1, executable: false };
       if (k.equals(poolPda(programId))) return pool;
       if (k.equals(SYSVAR_CLOCK_PUBKEY)) return clockAccount(NOW);
-      if ((o.existing ?? []).some((e) => e.equals(k))) return { owner: TOKEN_PROGRAM_ID, data: Buffer.alloc(165), lamports: 1, executable: false };
+      if (existing.some((e) => e.equals(k))) return { owner: TOKEN_PROGRAM_ID, data: Buffer.alloc(165), lamports: 1, executable: false };
       return null;
     },
     getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(() => null),
     getBalance: async () => o.lamports ?? 1_000_000_000,
   } as unknown as Connection;
 }
-
-const recipientOwner = Keypair.generate().publicKey;
-const recipientAta = getAssociatedTokenAddressSync(usd, recipientOwner, true, TOKEN_PROGRAM_ID);
 
 function withdrawal(o: { amount: bigint; fee: bigint; root?: bigint; nullifiers?: [bigint, bigint]; recipient?: PublicKey }) {
   const ext = encodeTransactExt({
@@ -154,17 +157,21 @@ const body = (payload: Uint8Array, extra: Record<string, unknown> = {}) => ({ op
 const ctx = (b: unknown) => ({ body: b, url: new URL('http://x/'), clientKey: 'k', log: () => undefined });
 
 describe('relay preflight (SolanaRelayer.inspect)', () => {
-  const relayer = (connection = stubCluster()) => new SolanaRelayer({ connection, payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]) }).init();
+  const relayer = (connection = stubCluster()) => new SolanaRelayer({ connection, payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), verifier: okVerifier }).init();
 
-  it('reports ok with the fee rule, chain state, accounts and plan for a relayable withdrawal', async () => {
+  it('reports ok with the fee rule, proof, chain state, accounts and plan for a relayable withdrawal', async () => {
     const r = await relayer();
     const out = await r.inspect(body(withdrawal({ amount: 5_000_000n, fee: 10_000n })));
     expect(out.ok).toBe(true);
     expect(out.refusals).toEqual([]);
-    expect(out.fee).toEqual({ paid: '10000', required: '10000', min: MIN.toString(), bps: 20, publicAmount: '5000000', mint: usd.toBase58(), feeAccount: treasuryAta.toBase58() });
+    expect(out.fee).toEqual({
+      paid: '10000', required: '10000', min: MIN.toString(), bps: 20, publicAmount: '5000000', mint: usd.toBase58(), feeAccount: treasuryAta.toBase58(), createAccountFee: null,
+    });
+    expect(out.proof).toEqual({ verified: true });
     expect(out.chain).toEqual({ rootKnown: true, nullifiersUnspent: [true, true], timestampFresh: null });
-    expect(out.accounts).toEqual({ recipientExists: false, vaultExists: false, lenderTokenUsable: null });
-    expect(out.plan).toMatchObject({ payloadBytes: expect.any(Number), setupTxs: expect.any(Number), writeTxs: expect.any(Number) });
+    expect(out.accounts).toEqual({ recipientExists: true, vaultExists: true, lenderTokenUsable: null });
+    expect(out.plan).toMatchObject({ payloadBytes: expect.any(Number), setupTxs: expect.any(Number), writeTxs: expect.any(Number), createdAccounts: 0 });
+    expect(out.plan!.lamports.estimate).toBeLessThanOrEqual(out.plan!.lamports.covered);
     expect(out.capacity).toBeNull();
     // through the service
     expect(await preflight(r).run(ctx(body(withdrawal({ amount: 5_000_000n, fee: 10_000n }))), undefined)).toMatchObject({ ok: true });
@@ -182,8 +189,18 @@ describe('relay preflight (SolanaRelayer.inspect)', () => {
     const poor = await relayer(stubCluster({ lamports: 1 }));
     expect((await poor.inspect(body(withdrawal({ amount: 5_000_000n, fee: 10_000n })))).refusals.map((x) => x.code)).toEqual(['relayer_underfunded']);
     // the planning step's 400s are findings too
-    const noOwner = await r.inspect({ ...body(withdrawal({ amount: 5_000_000n, fee: 10_000n })), recipientOwner: undefined });
+    const bare = await relayer(stubCluster({ existing: [vaultPda(programId, usd)] }));
+    const noOwner = await bare.inspect({ ...body(withdrawal({ amount: 5_000_000n, fee: 10_000n })), recipientOwner: undefined });
     expect(noOwner.refusals.map((x) => x.code)).toEqual(['recipient_account_missing']);
+    // a missing account the relayer would have to pay for, with no surcharge configured
+    const unpaidRent = await bare.inspect(body(withdrawal({ amount: 5_000_000n, fee: 10_000n })));
+    expect(unpaidRent.refusals.map((x) => x.code)).toEqual(['account_creation_disabled']);
+    // a proof that does not verify is a finding, and prepare refuses it before reading the chain
+    const bad = await new SolanaRelayer({ connection: stubCluster(), payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), verifier: { verify: async () => false } }).init();
+    const invalid = await bad.inspect(body(withdrawal({ amount: 5_000_000n, fee: 10_000n })));
+    expect(invalid.proof).toEqual({ verified: false });
+    expect(invalid.refusals.map((x) => x.code)).toEqual(['invalid_proof']);
+    await expect(bad.prepare(body(withdrawal({ amount: 5_000_000n, fee: 10_000n })))).rejects.toMatchObject({ status: 400, code: 'invalid_proof' });
     // prepare: unchanged behaviour
     await expect(r.prepare(body(withdrawal({ amount: 5_000_000n, fee: 9_999n })))).rejects.toMatchObject({ status: 402, code: 'fee_too_low' });
     await expect(r.prepare(body(withdrawal({ amount: 5_000_000n, fee: 10_000n, root: 12n })))).rejects.toMatchObject({ status: 409, code: 'unknown_root' });
@@ -211,10 +228,10 @@ describe('priority lane', () => {
       stagePlan: async (_c, _p, _plan, priority) => { stages.push({ priority }); if (free) await gate.p; return []; },
       simulateV0: async () => ({ err: null, logs: [], computeUnits: 1 }),
       sendV0: async (_c, _p, _ixs, _t, _s, priority) => { sends.push({ priority }); return { signature: `sig${sends.length}`, computeUnits: 5, logs: [] }; },
-      abandonPlan: async () => undefined,
+      abandonPlan: async () => ({ closed: true, attempts: 0 }),
     };
     const lane = { maxInFlight: 1, maxLamports: 4_000_000, priceCeil: 5_000_000 };
-    const r = await new SolanaRelayer({ connection: stubCluster(), payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), maxInFlight: 1, priority: lane, io }).init();
+    const r = await new SolanaRelayer({ connection: stubCluster(), payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), maxInFlight: 1, priority: lane, io, verifier: okVerifier }).init();
     const paid = (n: bigint) => body(withdrawal({ amount: 5_000_000n, fee: 10_000n, nullifiers: [n, n + 1n] }));
     // a free-lane relay blocks in staging...
     const slow = r.relay(paid(100n));
@@ -239,7 +256,7 @@ describe('priority lane', () => {
     expect(sends[1].priority).toBeUndefined();
     expect(stages[0].priority).toBeUndefined();
     // without a lane the paid route cannot be served
-    const noLane = await new SolanaRelayer({ connection: stubCluster(), payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), io }).init();
+    const noLane = await new SolanaRelayer({ connection: stubCluster(), payer, treasury, programId, minFees: new Map([[usd.toBase58(), MIN]]), io, verifier: okVerifier }).init();
     await expect(relayPriority(noLane).prepare!(ctx(paid(600n)))).rejects.toMatchObject({ status: 503, code: 'lane_disabled' });
   });
 });

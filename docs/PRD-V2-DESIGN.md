@@ -129,8 +129,14 @@ makes `allotted` unprovable only when hasStream and the claim path must reuse th
 with `when = hasStream * isLenderClaim + streamEnforced` (keep it a single bit).
 
 A claim leaves the agent's window state untouched: `next.windowId` and `next.windowSpent` are the note's own
-values when `isLenderClaim == 1`, so a lender's `now` (up to 15 minutes behind block time) cannot roll the
+values when `isLenderClaim == 1`, so a lender's `now` (up to 3 minutes behind block time) cannot roll the
 window back and hand the agent a fresh cap. The receipt uses the same selected window id.
+
+For every other spend the window id is monotonic: `windowId <= newWindowId` (both 64-bit), enforced when
+`isLenderClaim == 0`. Without it the agent's own `now` could do what the lender's must not: the program only
+bounds `now` to a band around the clock, so a note spent to its cap at the start of window W+1 could be spent
+again with a `now` one second before the boundary (window W, `carried = 0`), and so on at every boundary
+(found 2026-11-05). An owner reclaim obeys the same rule, since it rewrites the note's window too.
 
 ### 2.5 Successor note and public asset
 
@@ -172,8 +178,20 @@ the parent's `lender`, both 0 when unpledged, checked with `LenderBinding`).
 - `pledge()` in the SDK is therefore an owner-side operation: the owner reclaims what is left and grants it
   again to the same agent under the same rules plus the pledge (two transactions).
 - Sub notes have `pledgePaid = 0`; the residual keeps the parent's `pledgePaid`.
-- A streamed sub starts at `now` unless told otherwise, so a self-delegation restarts the stream. A lender
-  that reads a successor memo with a later `streamStart` should treat it as a change of terms.
+- What the parent has already consumed is not forgotten (fixes of 2026-11-05, after an external report):
+  - Window: the residual keeps the parent's `windowId`/`windowSpent`, so this window it can still spend at
+    most `max(0, resWindowCap - windowSpent)`; the subs carry `subWindowSpent[i]` (new witnesses, each at most
+    the sub's cap, zero under an uncapped parent) with `sum(subWindowSpent) >= windowSpent - resWindowCap`.
+    Across the tree what can still be spent this window never exceeds `windowCap - windowSpent`. Before this,
+    an agent that had spent its cap could self-delegate to fresh subs and spend the cap again, up to its whole
+    lifetime allowance in one window. The SDK fills the subs greedily, first sub first.
+  - Stream: a sub's `streamStart` is at least `now`, at least the parent's `streamStart` (a cliff cannot be
+    skipped), and at least the point where the parent's stream had released what the parent already spent:
+    `spentSoFar <= streamRate * (subStreamStart - streamStart)`. A sub starts with nothing spent against its
+    stream, so an earlier start (e.g. a `now` at the program's look-back) re-minted allotment the parent had
+    used; repeated self-delegation drained a stream hundreds of times faster than its rate. The SDK's default
+    is `subStreamStartFloor(parent, now)`. A lender that reads a successor memo with a later `streamStart`
+    should treat it as a change of terms.
 - Relax the residual rules so a zero residual is legal: the "residual windowCap must be non-zero when the parent
   has a cap" and the same for streamRate apply only when `residualRemaining != 0`
   (`(1 - resCapNZ) * hasCap * resNZ === 0`, same for rate). The sums `resWindowCap + sumCap <= windowCap` and

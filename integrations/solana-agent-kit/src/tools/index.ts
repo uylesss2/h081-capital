@@ -15,7 +15,7 @@ export const h081BankDeposit = (agent: AgentLike, input: { amount?: string; usdg
 export const h081BankWithdraw = (agent: AgentLike, input: { amount?: string; usdg?: string; to?: string; direct?: boolean }) => run(agent, 'h081_bank_withdraw', input);
 export const h081BankBalance = (agent: AgentLike, input: Record<string, never> = {}) => run(agent, 'h081_bank_balance', input);
 export const h081LoanQuote = (agent: AgentLike, input: { termsCode?: string; minRemaining?: string; minRemainingUsdg?: string; pledgeBps?: number; principal?: string; principalUsdg?: string; loanRef?: string }) => run(agent, 'h081_loan_quote', input);
-export const h081LoanBorrow = (agent: AgentLike, input: { termsCode: string; budget?: string; budgetUsdg?: string; dailyCap?: string; dailyCapUsdg?: string; maxPerTx?: string; maxPerTxUsdg?: string; days: number; unlockDays: number; agentIndex?: number }) => run(agent, 'h081_loan_borrow', input);
+export const h081LoanBorrow = (agent: AgentLike, input: { termsCode: string; budget?: string; budgetUsdg?: string; dailyCap?: string; dailyCapUsdg?: string; maxPerTx?: string; maxPerTxUsdg?: string; principal?: string; principalUsdg?: string; days: number; unlockDays: number; agentIndex?: number }) => run(agent, 'h081_loan_borrow', input);
 export const h081Stake = (agent: AgentLike, input: { action: 'view' | 'stake' | 'request_unstake' | 'unstake'; amount?: string; h081?: string }) => run(agent, 'h081_stake', input);
 export const h081ProtocolInfo = (agent: AgentLike, input: Record<string, never> = {}) => run(agent, 'h081_protocol_info', input);
 

@@ -46,7 +46,7 @@ export function relayPriority(solana: SolanaRelayer): X402Service<{ prepared: Pr
     async prepare(ctx) {
       const release = solana.acquire('priority');
       try {
-        return { prepared: await solana.prepare(ctx.body), release };
+        return { prepared: await solana.prepare(ctx.body, { lane: 'priority' }), release };
       } catch (e) {
         release();
         throw e;
@@ -67,16 +67,20 @@ export function preflight(solana: SolanaRelayer): X402Service<void> {
   return {
     id: 'preflight', ...X402_ROUTES.preflight, flow: 'settle-after', mimeType: 'application/json',
     description: 'Checks whether a stipend_pool operation (the same body as POST /v1/solana/relay) would be relayed, without sending anything: '
-      + 'relay fee against the minimum and 0.20% rule, capacity_stake capacity, known root, unspent nullifiers, fresh timestamp, the accounts the final '
-      + 'transaction needs and the transaction plan. Returns ok plus every refusal the relay API would answer with. ' + DISCLAIMER,
+      + 'relay fee against the minimum and 0.20% rule, the proof itself, capacity_stake capacity, known root, unspent nullifiers, fresh timestamp, the accounts '
+      + 'it would create (and their surcharge) and the transaction plan. Returns ok plus every refusal the relay API would answer with. ' + DISCLAIMER,
     inputExample: RELAY_EXAMPLE, inputSchema: RELAY_BODY_SCHEMA,
     outputExample: {
       ok: false, op: 'transact',
-      fee: { paid: '40000', required: '50000', min: '50000', bps: 20, publicAmount: '5000000', mint: '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH', feeAccount: 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo' },
+      fee: {
+        paid: '40000', required: '50000', min: '50000', bps: 20, publicAmount: '5000000', mint: '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH',
+        feeAccount: 'DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo', createAccountFee: '400000',
+      },
+      proof: { verified: true },
       capacity: { needed: false, operator: null, used: null, limit: null, ok: true },
       chain: { rootKnown: true, nullifiersUnspent: [true, true], timestampFresh: null },
       accounts: { recipientExists: true, vaultExists: true, lenderTokenUsable: null },
-      plan: { payloadBytes: 1200, setupTxs: 1, writeTxs: 0 },
+      plan: { payloadBytes: 1200, setupTxs: 1, writeTxs: 0, createdAccounts: 0, lamports: { estimate: 10000, covered: 1000000 } },
       refusals: [{ status: 402, code: 'fee_too_low', message: 'fee 40000 is below 50000 (max of the minimum 50000 and 20 bps of 5000000)' }],
     },
     outputSchema: {

@@ -252,6 +252,10 @@ describe('hierarchical delegation', () => {
   it('the sub-agent spends under the sub-policy; the owner sees and can reclaim the sub-allowance', async () => {
     const vendor = await vendorSigner.getAddress();
     const before = await token.balanceOf(vendor);
+    // a1 had already spent its 300/day in this window, so the sub inherits a spent window (the subs carry what
+    // the residual's cap cannot absorb) and can pay nothing more today: the tree still obeys 300/day as a whole
+    await expect(s1.pay(current(s1), 1n * U, vendor)).rejects.toThrow();
+    await increaseTime(86400);
     await s1.pay(current(s1), 50n * U, vendor);
     expect(await token.balanceOf(vendor)).toBe(before + 50n * U);
     await expect(s1.pay(current(s1), 51n * U, vendor)).rejects.toThrow(); // sub max per tx

@@ -20,10 +20,11 @@ import {
   TOKEN22_PROGRAM_ID, ataAddress, capacityConfigPda, capacityInitConfigIx, capacityOf, capacityVaultPda, closePositionIx, closeStakeIx,
   coverPda, createAtaIdempotentIx, createMintIxs, sharesFor, transferCheckedIx, decodeCapacityConfig, decodeCover, decodePosition, decodeSafetyConfig, decodeStake,
   decodeStreamSlot, insureIx, loanAccounts, minPremium, mintToIx, positionPda, readCapacity, readSafetyPosition, redeemable, releaseCoverIx, requestUnbondIx,
-  requestUnstakeIx, safetyConfigPda, safetyDepositIx, safetyInitPoolIx, safetySetDepositCapsIx, safetySetDepositsPausedIx, safetySetUnderwritingIx,
+  requestUnstakeIx, safetyConfigPda, safetyDepositIx, safetyInitPoolIx, safetyRecoveryAta, safetySetDepositCapsIx, safetySetDepositsPausedIx, safetySetUnderwritingIx,
   safetyTopUpIx, safetyVaultPda, safetyWithdrawIx, setStakeCapsIx, setStakingPausedIx, simulateReturn, slashIx,
-  stakeIx, stakePda, streamSlotPda, tokenBalance, unstakeIx, viewCapacity, viewShortfall, padTo, type CreateMintOptions,
+  stakeIx, stakePda, streamSlotPda, streamSubrogationPda, sweepRecoveryIx, tokenBalance, unstakeIx, viewCapacity, viewShortfall, padTo, type CreateMintOptions, type LoanAccounts,
 } from '../../src/solana/token.js';
+import { LOAN_ERROR, decodeSubrogation, recordSlashIx, syncIx } from '../../src/solana/lender.js';
 import { REF, readStakingMeta, type StakingMeta } from './staking-fixtures.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 
@@ -47,8 +48,11 @@ const stranger = Keypair.generate();
 /** config authority of every pool/config created here: caps, pause, underwriting */
 const uw = Keypair.generate();
 let lender: Keypair;
+/** mint authority of the fixtures' loan asset: mints the receipts that reach a slot's inbox */
+let assetAuthority: Keypair;
 let meta: StakingMeta;
 let asset: PublicKey;
+const CLASSIC = CLASSIC_TOKEN_PROGRAM_ID;
 let streamLoanLoaded = false;
 // Runs only under vitest.staking.config.ts (STAKING_REQUIRED=1, fresh fixtures); skipped by other suites
 // whose include globs reach test/solana, even if a staking validator happens to be up.
@@ -115,6 +119,8 @@ async function waitUntilChain(t: number) {
   }
 }
 const loanOf = (loanRef: bigint) => loanAccounts(loanRef, asset, CLASSIC_TOKEN_PROGRAM_ID);
+/** Every slash here is sent by `stranger`, which pays the rent of the pool's recovery account and stream_loan's Subrogation. */
+const slashBy = (prog: PublicKey, mint: PublicKey, ref: bigint, loan: LoanAccounts, lenderToken: PublicKey) => slashIx(prog, mint, ref, loan, lenderToken, T22, stranger.publicKey);
 const cfgOf = async (prog: PublicKey, mint: PublicKey) => decodeSafetyConfig(await account(safetyConfigPda(prog, mint)));
 /** A pool created by the upgrade authority, config authority `uw`, effectively uncapped. */
 const initPool = (prog: PublicKey, mint: PublicKey, caps = { maxTotal: BIG, maxPerDeposit: BIG }, tp = T22) =>
@@ -134,6 +140,7 @@ beforeAll(async () => {
   if (!reachable) return;
   meta = readStakingMeta();
   lender = Keypair.fromSecretKey(Uint8Array.from(meta.lenderSecret));
+  assetAuthority = Keypair.fromSecretKey(Uint8Array.from(meta.assetAuthoritySecret));
   asset = new PublicKey(meta.asset);
   for (const id of [CS, CSF, SP, SPF]) {
     const acc = await connection.getAccountInfo(id);
@@ -141,7 +148,7 @@ beforeAll(async () => {
   }
   streamLoanLoaded = !!(await connection.getAccountInfo(SAFETY_STREAM_LOAN_PROGRAM_ID))?.executable;
   await airdrop(payer.publicKey, 100);
-  for (const k of [s1, s2, s3, stranger, lender, uw, UA]) await airdrop(k.publicKey);
+  for (const k of [s1, s2, s3, stranger, lender, uw, UA, assetAuthority]) await airdrop(k.publicKey);
   await makeMint(H);
   await makeMint(E);
   await makeMint(D);
@@ -350,7 +357,7 @@ describe.skipIf(!reachable)('safety_pool: setup and insure (must run before the 
 
   it('slash before expiry + grace finds no shortfall', async () => {
     expect(await viewShortfall(connection, payer, SPF, REF.live, loanOf(REF.live))).toBe(0n);
-    await expectCode(tx(stranger, slashIx(SPF, H.publicKey, REF.live, loanOf(REF.live), ataAddress(lender.publicKey, H.publicKey))), SAFETY_ERROR.NoShortfall);
+    await expectCode(tx(stranger, slashBy(SPF, H.publicKey, REF.live, loanOf(REF.live), ataAddress(lender.publicKey, H.publicKey))), SAFETY_ERROR.NoShortfall);
   });
 
   it('unbonding: bounded by shares held; withdraw waits for the cooldown', async () => {
@@ -549,36 +556,89 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
   it('slash: anyone triggers it, the cover lender is paid 1:1 in base units up to the cover, once', async () => {
     const lenderAta = ataAddress(lender.publicKey, H.publicKey);
     // the payout must go to a token account the cover lender owns
-    await expectFail(tx(stranger, slashIx(SPF, H.publicKey, REF.live, loanOf(REF.live), ataAddress(stranger.publicKey, H.publicKey))));
+    await expectFail(tx(stranger, slashBy(SPF, H.publicKey, REF.live, loanOf(REF.live), ataAddress(stranger.publicKey, H.publicKey))));
     // the cover lives in the H pool; E's pool cannot pay it
-    await expectFail(tx(stranger, slashIx(SPF, E.publicKey, REF.live, loanOf(REF.live), ataAddress(lender.publicKey, E.publicKey))));
+    await expectFail(tx(stranger, slashBy(SPF, E.publicKey, REF.live, loanOf(REF.live), ataAddress(lender.publicKey, E.publicKey))));
     // slot accounts of another loan
-    await expectCode(tx(stranger, slashIx(SPF, H.publicKey, REF.live, loanOf(REF.pending), lenderAta)), SAFETY_ERROR.BadLoanAccount);
+    await expectCode(tx(stranger, slashBy(SPF, H.publicKey, REF.live, loanOf(REF.pending), lenderAta)), SAFETY_ERROR.BadLoanAccount);
     const before = await tokenBalance(connection, lenderAta);
     const vault0 = await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey));
     const e0 = (await cfgOf(SPF, H.publicKey)).exposure;
-    await tx(stranger, slashIx(SPF, H.publicKey, REF.live, loanOf(REF.live), lenderAta));
+    await tx(stranger, slashBy(SPF, H.publicKey, REF.live, loanOf(REF.live), lenderAta));
     expect(await tokenBalance(connection, lenderAta)).toBe(before + 4_000_000n); // 4 USDG short -> 4,000,000 base units of H081
     expect(await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey))).toBe(vault0 - 4_000_000n);
     expect((await cfgOf(SPF, H.publicKey)).exposure).toBe(e0 - 5_000_000n); // the whole cover is closed
     const c = decodeCover(await account(coverPda(SPF, REF.live)));
     expect(c.paid).toBe(true);
     expect(c.paidOut).toBe(4_000_000n);
-    await expectCode(tx(stranger, slashIx(SPF, H.publicKey, REF.live, loanOf(REF.live), lenderAta)), SAFETY_ERROR.AlreadyPaid);
+    await expectCode(tx(stranger, slashBy(SPF, H.publicKey, REF.live, loanOf(REF.live), lenderAta)), SAFETY_ERROR.AlreadyPaid);
     // production: still inside the 7-day grace
-    await expectCode(tx(stranger, slashIx(SP, H.publicKey, REF.long, loanOf(REF.long), lenderAta)), SAFETY_ERROR.NoShortfall);
+    await expectCode(tx(stranger, slashBy(SP, H.publicKey, REF.long, loanOf(REF.long), lenderAta)), SAFETY_ERROR.NoShortfall);
     // production: overdue loan but never insured
-    await expectFail(tx(stranger, slashIx(SP, H.publicKey, REF.overdue, loanOf(REF.overdue), lenderAta)));
+    await expectFail(tx(stranger, slashBy(SP, H.publicKey, REF.overdue, loanOf(REF.overdue), lenderAta)));
     // the pending-inbox loan is 2.25M short but covered for 2M: the cover caps the payout
-    await tx(stranger, slashIx(SPF, H.publicKey, REF.pending, loanOf(REF.pending), lenderAta));
+    await tx(stranger, slashBy(SPF, H.publicKey, REF.pending, loanOf(REF.pending), lenderAta));
     expect(decodeCover(await account(coverPda(SPF, REF.pending))).paidOut).toBe(2_000_000n);
     // the escrowed loan pays principal minus repaid minus what the pool holds in escrow for the slot
     const a0 = (await cfgOf(SPF, H.publicKey)).assets;
-    await tx(stranger, slashIx(SPF, H.publicKey, REF.escrowed, loanOf(REF.escrowed), lenderAta));
+    await tx(stranger, slashBy(SPF, H.publicKey, REF.escrowed, loanOf(REF.escrowed), lenderAta));
     expect(decodeCover(await account(coverPda(SPF, REF.escrowed))).paidOut).toBe(1_300_000n);
     expect((await cfgOf(SPF, H.publicKey)).assets).toBe(a0 - 1_300_000n);
     // a released cover cannot be slashed
-    await expectCode(tx(stranger, slashIx(SPF, H.publicKey, REF.repaid, loanOf(REF.repaid), lenderAta)), SAFETY_ERROR.Released);
+    await expectCode(tx(stranger, slashBy(SPF, H.publicKey, REF.repaid, loanOf(REF.repaid), lenderAta)), SAFETY_ERROR.Released);
+  });
+
+  it('subrogation: after a slash the loan\'s receipts repay the pool before the lender, up to what it paid; a second slash still fails', async () => {
+    expect(streamLoanLoaded, 'stream_loan.so must be loaded: slash records the slash there by CPI').toBe(true);
+    const ref = REF.live; // slashed above: the pool paid 4,000,000 of a 5,000,000 cover
+    const slot = streamSlotPda(ref);
+    const recovery = safetyRecoveryAta(SPF, H.publicKey, asset, CLASSIC);
+    // the slash created the pool's recovery account for the loan asset and stream_loan's Subrogation record
+    const sub = decodeSubrogation(await account(streamSubrogationPda(ref)));
+    expect(sub.loanRef).toBe(ref);
+    expect(sub.safetyConfig.equals(safetyConfigPda(SPF, H.publicKey))).toBe(true);
+    expect(sub.to.equals(recovery)).toBe(true);
+    expect(sub.owed).toBe(4_000_000n);
+    expect(sub.paid).toBe(0n);
+    expect(await tokenBalance(connection, recovery)).toBe(0n);
+    // a receipt reaches the slot's inbox (a lender claim or any routed share lands there) and is synced
+    const inbox = ataAddress(slot, asset, CLASSIC);
+    const lenderAsset = ataAddress(lender.publicKey, asset, CLASSIC);
+    await send(connection, payer, [
+      createAtaIdempotentIx(payer.publicKey, slot, asset, CLASSIC), createAtaIdempotentIx(payer.publicKey, lender.publicKey, asset, CLASSIC),
+      mintToIx(asset, inbox, assetAuthority.publicKey, 4_500_000n, CLASSIC),
+    ], { signers: [assetAuthority] });
+    const sync = (to?: PublicKey) => syncIx(stranger.publicKey, ref, asset, lender.publicKey, CLASSIC, SAFETY_STREAM_LOAN_PROGRAM_ID, to);
+    // while the slash is unrecovered the sync must name the pool's recovery account, nothing else
+    await expectCode(tx(stranger, sync(lenderAsset)), LOAN_ERROR.BadRecovery);
+    await tx(stranger, sync(recovery));
+    expect(await tokenBalance(connection, recovery)).toBe(4_000_000n); // the pool first, up to what it paid
+    expect(await tokenBalance(connection, lenderAsset)).toBe(500_000n); // the lender only gets the rest
+    expect(await tokenBalance(connection, inbox)).toBe(0n);
+    expect(decodeSubrogation(await account(streamSubrogationPda(ref))).paid).toBe(4_000_000n);
+    expect(decodeStreamSlot(await account(slot)).repaid).toBe(1_000_000n + 4_500_000n); // repayment is still credited to the loan
+    // recovered in full: later receipts are the lender's again, and `to` no longer matters
+    await send(connection, payer, [mintToIx(asset, inbox, assetAuthority.publicKey, 100n, CLASSIC)], { signers: [assetAuthority] });
+    await tx(stranger, sync());
+    expect(await tokenBalance(connection, lenderAsset)).toBe(500_100n);
+    expect(await tokenBalance(connection, recovery)).toBe(4_000_000n);
+    // the cover is paid: a second slash still fails
+    await expectCode(tx(stranger, slashBy(SPF, H.publicKey, ref, loanOf(ref), ataAddress(lender.publicKey, H.publicKey))), SAFETY_ERROR.AlreadyPaid);
+    // nobody but a safety_pool config PDA can record a slash (here: a plain keypair signs as the "config")
+    await expectCode(txs([stranger, s3], recordSlashIx(stranger.publicKey, REF.overdue, 1n, s3.publicKey, recovery, SAFETY_STREAM_LOAN_PROGRAM_ID)), LOAN_ERROR.NotSafetyPool);
+    expect(await connection.getAccountInfo(streamSubrogationPda(REF.overdue))).toBeNull();
+    // the recovered tokens are in the loan asset, not pool assets: the config authority sweeps them out (to convert and top_up)
+    const a0 = (await cfgOf(SPF, H.publicKey)).assets;
+    const uwAsset = ataAddress(uw.publicKey, asset, CLASSIC);
+    await send(connection, payer, [createAtaIdempotentIx(payer.publicKey, uw.publicKey, asset, CLASSIC)]);
+    await expectCode(tx(stranger, sweepRecoveryIx(SPF, stranger.publicKey, H.publicKey, asset, CLASSIC, uwAsset, 1n)), SAFETY_ERROR.ConfigAuthority);
+    // never the pool's own mint (its vault is a different account anyway)
+    await expectFail(tx(uw, sweepRecoveryIx(SPF, uw.publicKey, H.publicKey, H.publicKey, T22, ataAddress(uw.publicKey, H.publicKey), 1n)));
+    await expectFail(tx(uw, sweepRecoveryIx(SPF, uw.publicKey, H.publicKey, asset, CLASSIC, uwAsset, 4_000_001n)));
+    await tx(uw, sweepRecoveryIx(SPF, uw.publicKey, H.publicKey, asset, CLASSIC, uwAsset, 4_000_000n));
+    expect(await tokenBalance(connection, uwAsset)).toBe(4_000_000n);
+    expect(await tokenBalance(connection, recovery)).toBe(0n);
+    expect((await cfgOf(SPF, H.publicKey)).assets).toBe(a0);
   });
 
   it('withdraw after the cooldown redeems at the price of the day (slashes lowered it)', async () => {
@@ -601,11 +661,11 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
 
   it('slash on an empty pool fails and leaves the cover open; it pays once the pool is funded', async () => {
     const lenderE = ataAddress(lender.publicKey, E.publicKey);
-    await expectCode(tx(stranger, slashIx(SPF, E.publicKey, REF.emptyPool, loanOf(REF.emptyPool), lenderE)), SAFETY_ERROR.PoolEmpty);
+    await expectCode(tx(stranger, slashBy(SPF, E.publicKey, REF.emptyPool, loanOf(REF.emptyPool), lenderE)), SAFETY_ERROR.PoolEmpty);
     expect(decodeCover(await account(coverPda(SPF, REF.emptyPool))).paid).toBe(false);
     const sAta = await fund(s3.publicKey, E.publicKey, 500_000n);
     await tx(s3, safetyDepositIx(SPF, s3.publicKey, E.publicKey, sAta, 500_000n));
-    await tx(stranger, slashIx(SPF, E.publicKey, REF.emptyPool, loanOf(REF.emptyPool), lenderE));
+    await tx(stranger, slashBy(SPF, E.publicKey, REF.emptyPool, loanOf(REF.emptyPool), lenderE));
     expect(await tokenBalance(connection, lenderE)).toBe(500_000n); // min(shortfall 2,000,000, pool 500,000)
     const cE = await cfgOf(SPF, E.publicKey);
     expect(cE.generation).toBe(1n);
@@ -619,7 +679,7 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
     const bal = await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey));
     const assets = (await cfgOf(SPF, H.publicKey)).assets;
     const before = await tokenBalance(connection, lenderAta);
-    await tx(stranger, slashIx(SPF, H.publicKey, REF.huge, loanOf(REF.huge), lenderAta));
+    await tx(stranger, slashBy(SPF, H.publicKey, REF.huge, loanOf(REF.huge), lenderAta));
     expect(await tokenBalance(connection, lenderAta)).toBe(before + assets); // the whole pool, not the unaccounted donation
     expect(await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey))).toBe(bal - assets);
     const c = await cfgOf(SPF, H.publicKey);
@@ -646,7 +706,7 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
     const c0 = await cfgOf(SPF, D.publicKey);
     expect(c0.assets).toBe(2_000_000n * TOK);
     expect(await viewShortfall(connection, payer, SPF, REF.dust, loanOf(REF.dust))).toBe(2_000_000n * TOK - 1n);
-    await tx(stranger, slashIx(SPF, D.publicKey, REF.dust, loanOf(REF.dust), lenderD));
+    await tx(stranger, slashBy(SPF, D.publicKey, REF.dust, loanOf(REF.dust), lenderD));
     expect(await tokenBalance(connection, lenderD)).toBe(2_000_000n * TOK - 1n);
     const c = await cfgOf(SPF, D.publicKey);
     // one base unit left against 2e15 shares: more than 10^9 shares per unit, so the generation is retired

@@ -79,7 +79,9 @@ describe('circuits', () => {
   it('the pinned zkey and vkey hashes are the ceremony\'s (docs/CEREMONY.md)', () => {
     expect(CIRCUIT_HASHES.transact.zkey).toBe('19115cc60b47b8ba71a8bd2ec0eb7d1973801df78d5eee52550c1daca8ca940f');
     expect(CIRCUIT_HASHES.grant.zkey).toBe('8c1df0b58d1bdb69a60097479fa49d344af5ccbd8c21d6b625c60eeca1584200');
-    expect(CIRCUIT_HASHES.stream.zkey).toBe('f2b821af10ccd92e2d97fded94e44037328b036ecf82162497e34746522f30fb');
+    expect(CIRCUIT_HASHES.stream.zkey).toBe('466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb'); // round 2
+    expect(CIRCUIT_HASHES.spend.zkey).toBe('709c59049c6e133ba981ba32a962af42f839d7600ada4e0e51237654d4e02b91'); // round 2
+    expect(CIRCUIT_HASHES.delegate.zkey).toBe('6e47fc61d6023562c6d3a8429e09fc5b3d9b0df5fcd91243f50508e11074e631'); // round 2
     expect(CIRCUIT_HASHES.transact.vkey).toBe('ea4def715d6fe7c4dd834ee973f491d80fac913b7c0a10e2a505faa0091259bb');
     for (const n of ['transact', 'grant', 'stream'] as const) expect(CIRCUIT_HASHES[n].wasm).toMatch(/^[0-9a-f]{64}$/);
   });
