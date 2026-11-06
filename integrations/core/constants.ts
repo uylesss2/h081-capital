@@ -85,8 +85,8 @@ export const CIRCUIT_HASHES: Record<CircuitName, { wasm: string; zkey: string; v
   },
 };
 
-/** Circuits an agent needs: deposit/withdraw (transact); pledge + lender proof (grant, stream). */
-export const AGENT_CIRCUITS: CircuitName[] = ['transact', 'grant', 'stream'];
+/** Circuits an agent needs: deposit/withdraw (transact); pledge + lender proof (grant, stream); paying from an allowance (spend). */
+export const AGENT_CIRCUITS: CircuitName[] = ['transact', 'grant', 'stream', 'spend'];
 export const BANK_CIRCUITS: CircuitName[] = ['transact'];
 
 /** Label the shielded account secret is derived from (an ed25519 signature of it by the agent's Solana key). */
@@ -112,6 +112,12 @@ export interface H081Config {
   decimals: number;
   /** operator ceiling per deposit, below the program cap (base units) */
   maxDeposit?: bigint;
+  /** operator ceiling per payment from an allowance (h081_pay), base units; undefined = no ceiling beyond the allowance's own caps */
+  maxPay?: bigint;
+  /** operator ceiling per allowance granted or delegated (h081_allowance_grant / h081_allowance_delegate), base units; undefined = no ceiling beyond the balance */
+  maxGrant?: bigint;
+  /** operator ceiling per loan this agent funds as a lender (h081_lend fund), base units; undefined = no ceiling beyond the wallet's USDG */
+  maxLend?: bigint;
 }
 
 export const ENV_VARS = {
@@ -131,6 +137,9 @@ export const ENV_VARS = {
   H081_STAKE_MINT: 'staking asset mint (default H081 Egqxx…)',
   H081_LOAN_TREASURY: 'stream_loan fee treasury owner (default EGvxic…)',
   H081_MAX_DEPOSIT: 'optional operator ceiling per deposit in base units, below the program cap',
+  H081_MAX_PAY: 'optional operator ceiling per payment from an allowance (h081_pay) in base units',
+  H081_MAX_GRANT: 'optional operator ceiling per allowance granted or delegated (h081_allowance_grant / h081_allowance_delegate) in base units',
+  H081_MAX_LEND: 'optional operator ceiling per loan the agent funds as a lender (h081_lend fund) in base units',
 } as const;
 
 const key = (env: NodeJS.ProcessEnv, name: string, fallback: string): PublicKey => {
@@ -144,6 +153,12 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
   const relayerUrl = relayerRaw === undefined ? MAINNET.relayer : relayerRaw.trim() || undefined;
   const maxDepositRaw = env.H081_MAX_DEPOSIT?.trim();
   if (maxDepositRaw !== undefined && maxDepositRaw !== '' && !/^\d+$/.test(maxDepositRaw)) throw new Error('H081_MAX_DEPOSIT must be an integer in base units');
+  const maxPayRaw = env.H081_MAX_PAY?.trim();
+  if (maxPayRaw !== undefined && maxPayRaw !== '' && !/^\d+$/.test(maxPayRaw)) throw new Error('H081_MAX_PAY must be an integer in base units');
+  const maxGrantRaw = env.H081_MAX_GRANT?.trim();
+  if (maxGrantRaw !== undefined && maxGrantRaw !== '' && !/^\d+$/.test(maxGrantRaw)) throw new Error('H081_MAX_GRANT must be an integer in base units');
+  const maxLendRaw = env.H081_MAX_LEND?.trim();
+  if (maxLendRaw !== undefined && maxLendRaw !== '' && !/^\d+$/.test(maxLendRaw)) throw new Error('H081_MAX_LEND must be an integer in base units');
   return {
     cluster: env.H081_CLUSTER?.trim() || MAINNET.cluster,
     rpcUrl: env.H081_RPC_URL?.trim() || 'https://api.mainnet-beta.solana.com',
@@ -159,6 +174,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
     loanTreasury: key(env, 'H081_LOAN_TREASURY', MAINNET.loanTreasury),
     decimals: MAINNET.usdg.decimals,
     maxDeposit: maxDepositRaw ? BigInt(maxDepositRaw) : undefined,
+    maxPay: maxPayRaw ? BigInt(maxPayRaw) : undefined,
+    maxGrant: maxGrantRaw ? BigInt(maxGrantRaw) : undefined,
+    maxLend: maxLendRaw ? BigInt(maxLendRaw) : undefined,
   };
 }
 
