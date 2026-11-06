@@ -6,9 +6,9 @@ export const loanBorrowAction = makeAction({
   similes: ['pledge to an h081 loan', 'borrow against my stream', 'make the lender proof', 'accept loan terms', 'open a pledged sub-account'],
   examples: [[
     {
-      input: { termsCode: 'h081-loan-terms:eyJ2IjoxLCJjbHVzdGVy…', budgetUsdg: '100', dailyCapUsdg: '20', maxPerTxUsdg: '10', days: 30, unlockDays: 30 },
+      input: { termsCode: 'h081-loan-terms:4mD9qXw7…', budgetUsdg: '100', dailyCapUsdg: '20', maxPerTxUsdg: '10', days: 30, unlockDays: 30 },
       output: {
-        status: 'success', agentIndex: 0, allowanceId: '8713…', loanRef: '3', pledgeBps: '4000', grantSignature: '5Qr…', proofCode: 'h081-loan-proof:eyJ2IjoxLC…',
+        status: 'success', agentIndex: 0, allowanceId: '8713…', loanRef: '3', pledgeBps: '4000', grantSignature: '5Qr…', proofCode: 'h081-loan-proof:3vQB7B6M…',
         maxPrincipal: '40000000', originationFeeAtMax: '100000', payoutAccount: 'AgentUsdgAta…',
         next: 'hand proofCode to the lender; they fund exactly 40 USDG against it (the program accepts no other amount), and the principal minus the 0.25% origination fee arrives in AgentUsdgAta… when they do',
       },

@@ -106,6 +106,16 @@ export function deriveAgentSk(keypair: Keypair, index: number, derivation: Accou
   return derivation === 'signature' ? deriveAccountSkFromSignature(keypair, label) : deriveAccountSk(keypair, label);
 }
 
+/**
+ * The secret behind the lender viewing key (h081_lend): the key whose public half goes into this agent's
+ * "h081-loan-terms:" codes, so the pledged notes of its borrowers (and every successor) are readable by it. Its own
+ * label, so it is not the shielded account's viewing key: a terms code does not reveal the agent's shielded address.
+ */
+export function deriveLenderSk(keypair: Keypair, derivation: AccountDerivation = 'seed'): bigint {
+  const label = `${DERIVE_LABEL}/lender`;
+  return derivation === 'signature' ? deriveAccountSkFromSignature(keypair, label) : deriveAccountSk(keypair, label);
+}
+
 /** A field element from decimal or 0x-hex text. */
 export function parseFieldElement(text: string, what = 'H081_ACCOUNT_SK'): bigint {
   const t = text.trim();

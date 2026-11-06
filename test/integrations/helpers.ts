@@ -122,7 +122,7 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
     decimals: 6,
     deposit: vi.fn(async (amount: bigint) => ({ signature: 'sigDeposit', amount, amountUsdg: (Number(amount) / 1e6).toString(), shielded: amount, shieldedUsdg: (Number(amount) / 1e6).toString(), computeUnits: 300000 })),
     withdraw: vi.fn(async (amount: bigint, to?: PublicKey, direct?: boolean) => ({ signature: 'sigWithdraw', amount, fee: direct ? 0n : 50000n, received: amount - (direct ? 0n : 50000n), receivedUsdg: '1', to: (to ?? PublicKey.default).toBase58(), via: direct ? 'direct' : 'relayer', shielded: 0n, shieldedUsdg: '0' })),
-    balance: vi.fn(async () => ({ shielded: 25_000_000n, shieldedUsdg: '25', walletUsdg: 100_000_000n, walletUsdgHuman: '100', walletSol: 0.2, signer: 'S', shieldedAddress: { pk: '1', viewPub: '0x00' }, subAccounts: [], agentAllowances: [], caps: { perDeposit: 1_000_000_000n, total: 10_000_000_000n, inVault: 0n, paused: false } })),
+    balance: vi.fn(async () => ({ shielded: 25_000_000n, shieldedUsdg: '25', walletUsdg: 100_000_000n, walletUsdgHuman: '100', walletSol: 0.2, signer: 'S', shieldedAddress: { pk: '1', viewPub: '0x00' }, subAccounts: [], agentAllowances: [], grantedToOthers: [], heldBySubAccounts: [], caps: { perDeposit: 1_000_000_000n, total: 10_000_000_000n, inVault: 0n, paused: false } })),
     loanQuote: vi.fn(async (q: { pledgeBps?: number; minRemaining?: bigint; principal?: bigint; loanRef?: bigint; termsCode?: string }) => ({ pledgeBps: q.pledgeBps ?? 0, minRemaining: q.minRemaining ?? 0n, maxPrincipal: 40_000_000n, principal: q.principal ?? 40_000_000n, originationFee: 100_000n, originationFeeBps: 25, payout: 39_900_000n, loanRef: q.loanRef, slot: null, note: 'n' })),
     borrow: vi.fn(async () => ({ agentIndex: 0, allowanceId: 1n, loanRef: 3n, pledgeBps: 4000n, grantSignature: 'sigGrant', proofCode: 'h081-loan-proof:eyJ2IjoxfQ', maxPrincipal: 40_000_000n, originationFeeAtMax: 100_000n, payoutAccount: 'P', streamRate: 1n, expiry: 1n, next: 'n' })),
     stakeView: vi.fn(async () => ({ signer: 'S', walletH081: 1_000_000_000n, staked: 0n, pending: 0n, readyAt: 0n, now: 1n, desks: 0n, shieldCap: 0n, totalStaked: 0n, caps: { maxPerStake: 1n, maxTotal: 2n, paused: false }, cooldownDays: 30 })),
@@ -130,6 +130,35 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
     requestUnstake: vi.fn(async (amount: bigint) => ({ signature: 'sigRequest', pending: amount })),
     unstake: vi.fn(async () => ({ signature: 'sigUnstake', pending: 0n })),
     protocolInfo: vi.fn(async () => ({ cluster: 'mainnet-beta', programs: { pool: MAINNET.programs.pool }, notice: 'n' })),
+    pay: vi.fn(async (req: { amount: bigint; to: PublicKey | { pk: bigint }; agentIndex?: number; direct?: boolean }) => {
+      const pub = req.to instanceof PublicKey, fee = pub && !req.direct ? 50_000n : 0n;
+      return { signature: 'sigPay', amount: req.amount, amountUsdg: '1', fee, lenderShare: 0n, received: req.amount - fee, receivedUsdg: '1', to: pub ? (req.to as PublicKey).toBase58() : 'shielded', private: !pub, via: fee ? 'relayer' : 'direct', allowanceId: 7n, nextAllowanceId: 8n, ...(req.agentIndex === undefined ? {} : { agentIndex: req.agentIndex }), remaining: 1_000_000n, remainingUsdg: '1' };
+    }),
+    codeContext: { cluster: 'mainnet-beta', program: MAINNET.programs.pool, mint: MAINNET.usdg.mint },
+    allowanceGrant: vi.fn(async (req: { amount: bigint; agentIndex?: number; confirm?: boolean }) => (req.confirm
+      ? { sent: true, signature: 'sigGrant', to: req.agentIndex === undefined ? 'another agent\'s shielded address' : `sub-account ${req.agentIndex}`, ...(req.agentIndex === undefined ? {} : { agentIndex: req.agentIndex }), allowanceId: 11n, rules: { amount: req.amount }, shielded: 0n, shieldedUsdg: '0', next: 'n' }
+      : { sent: false, dryRun: true, plan: { action: 'grant', rules: { amount: req.amount } }, next: 'nothing was sent' })),
+    allowanceDelegate: vi.fn(async (req: { allowanceId: bigint; amount: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, signature: 'sigDelegate', signatures: ['sigDelegate'], parentId: req.allowanceId, to: 'sub-account 2', allowanceId: 12n, rules: { amount: req.amount }, residualId: 13n, residualRemaining: 1n, residualRemainingUsdg: '0.000001', next: 'n' }
+      : { sent: false, dryRun: true, plan: { action: 'delegate', parentId: req.allowanceId, child: { amount: req.amount } }, next: 'nothing was sent' })),
+    allowanceReclaim: vi.fn(async (req: { allowanceId: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, signature: 'sigReclaim', allowanceId: req.allowanceId, reclaimed: 5_000_000n, reclaimedUsdg: '5', lenderShare: 0n, shielded: 5_000_000n, shieldedUsdg: '5' }
+      : { sent: false, dryRun: true, plan: { action: 'reclaim', allowanceId: req.allowanceId }, next: 'nothing was sent' })),
+    lendOpen: vi.fn(async (req: { pledgeBps: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, loanRef: 3n, pledgeBps: req.pledgeBps, slot: 'Slot', termsCode: 'h081-loan-terms:4mD9q', next: 'n' }
+      : { sent: false, dryRun: true, plan: { action: 'open', loanRef: 3n, pledgeBps: req.pledgeBps }, next: 'nothing was sent' })),
+    lendFund: vi.fn(async (req: { proofCode: string; loanRef?: bigint; principal?: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, signature: 'sigFund', loanRef: req.loanRef ?? 3n, principal: 40_000_000n, principalUsdg: '40', originationFee: 100_000n, borrowerReceives: 39_900_000n, borrowerReceivesUsdg: '39.9', next: 'n' }
+      : { sent: false, dryRun: true, plan: { action: 'fund', loanRef: req.loanRef ?? 3n, principal: 40_000_000n }, next: 'nothing was sent' })),
+    lendStatus: vi.fn(async (req: { loanRef?: bigint } = {}) => ({ slots: [{ loanRef: req.loanRef ?? 3n, state: 'funded', principal: 40_000_000n, repaid: 0n, claimable: 1_000_000n }] })),
+    lendCollect: vi.fn(async (req: { loanRef: bigint }) => ({ sent: true, action: 'collect', loanRef: req.loanRef, signatures: ['sigSync'], collected: 2_000_000n, collectedUsdg: '2' })),
+    lendClaim: vi.fn(async (req: { loanRef: bigint; amount?: bigint }) => ({ sent: true, action: 'claim', loanRef: req.loanRef, signatures: ['sigClaim'], collected: req.amount ?? 1_000_000n, collectedUsdg: '1' })),
+    lendSettle: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, action: 'settle', loanRef: req.loanRef, signatures: ['sigSettle'] }
+      : { sent: false, dryRun: true, plan: { action: 'settle', loanRef: req.loanRef }, next: 'nothing was sent' })),
+    lendClose: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
+      ? { sent: true, action: 'close', loanRef: req.loanRef, signatures: ['sigClose'] }
+      : { sent: false, dryRun: true, plan: { action: 'close', loanRef: req.loanRef }, next: 'nothing was sent' })),
     ...over,
   };
   return b as unknown as BankLike & Record<keyof BankLike, ReturnType<typeof vi.fn>>;

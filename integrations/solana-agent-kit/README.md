@@ -1,6 +1,6 @@
 # @h081lll/solana-agent-kit-plugin
 
-[Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) v2 plugin for H081 Capital, the private bank for AI agents on Solana. It gives an agent seven actions: shielded USDG deposits and withdrawals, the balance, loan quotes and loan pledges, H081 staking, and the protocol's facts. The actions work with every Agent Kit adapter (`createVercelAITools`, `createLangchainTools`, `createOpenAITools`) and are also plain methods on the agent.
+[Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) v2 plugin for H081 Capital, the private bank for AI agents on Solana. It gives an agent twelve actions: shielded USDG deposits and withdrawals, the balance, payments from an allowance (to a wallet or privately to another agent's `h081-address:` code), allowances for sub-agents (grant, delegate, reclaim; a plan unless `confirm: true`), loan quotes and loan pledges, lending to other agents (a plan unless `confirm: true`), H081 staking, and the protocol's facts. The actions work with every Agent Kit adapter (`createVercelAITools`, `createLangchainTools`, `createOpenAITools`) and are also plain methods on the agent.
 
 H081 Capital is **live on Solana mainnet**. It is **not audited yet**. **Use at your own risk**, with a dedicated, low-balance agent key.
 
@@ -72,6 +72,13 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_LOAN_BORROW` | `h081_loan_borrow` | `{termsCode, budget|budgetUsdg, dailyCap?|dailyCapUsdg?, maxPerTx?|maxPerTxUsdg?, principal?|principalUsdg?, days, unlockDays, agentIndex?}` |
 | `H081_STAKE` | `h081_stake` | `{action: view|stake|request_unstake|unstake, amount?|h081?}` |
 | `H081_PROTOCOL_INFO` | `h081_protocol_info` | `{}` |
+| `H081_PAY` | `h081_pay` | `{amount|usdg, to: wallet | toAddressCode: "h081-address:…", allowanceId?, agentIndex?, direct?: boolean, allowPledged?: boolean}` (a pledged allowance only with `allowPledged: true`: its loan slot and lender share are public next to the payment) |
+| `H081_ALLOWANCE_GRANT` | `h081_allowance_grant` | `{amount|usdg, agentIndex? | toAddressCode?, windowCap?|windowCapUsdg?, windowLen?, maxPerTx?|maxPerTxUsdg?, days?, unlockDays?, confirm?: boolean}` |
+| `H081_ALLOWANCE_DELEGATE` | `h081_allowance_delegate` | `{allowanceId, agentIndex?, toAgentIndex | toAddressCode, amount|usdg, windowCap?|windowCapUsdg?, maxPerTx?|maxPerTxUsdg?, days?, unlockDays?, confirm?: boolean}` |
+| `H081_ALLOWANCE_RECLAIM` | `h081_allowance_reclaim` | `{allowanceId, confirm?: boolean}` |
+| `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
+
+The three allowance actions send nothing without `confirm: true`: they return the plan of exactly what would be sent. A delegated child can never be looser than its parent; the error names the limit. `h081_allowance_delegate` needs the delegate proving artifacts, which the site does not ship yet.
 
 USDG and H081 have 6 decimals: `"1000000"` = 1 token. Schemas are strict (zod); unknown keys are refused.
 
@@ -104,6 +111,9 @@ stream_loan has no offer book and no matching. A loan starts with a lender who o
 | `H081_RELAYER_URL` | relayer for withdrawals; default `https://api.h081.xyz`; empty = direct sends only. With a relayer set, a withdrawal that cannot go through it is refused, never sent directly instead. |
 | `H081_CIRCUITS_DIR`, `H081_CIRCUITS_URL` | where the proving artifacts live / come from |
 | `H081_MAX_DEPOSIT` | optional operator ceiling per deposit, base units |
+| `H081_MAX_PAY` | optional operator ceiling per payment from an allowance (`H081_PAY`), base units |
+| `H081_MAX_GRANT` | optional operator ceiling per allowance granted or delegated (`H081_ALLOWANCE_GRANT`, `H081_ALLOWANCE_DELEGATE`), base units |
+| `H081_MAX_LEND` | optional operator ceiling per loan the agent funds as a lender (`H081_LEND` fund), base units |
 | `H081_POOL_PROGRAM_ID`, `H081_LOAN_PROGRAM_ID`, `H081_CAPACITY_PROGRAM_ID`, `H081_SAFETY_PROGRAM_ID`, `H081_USDG_MINT`, `H081_STAKE_MINT`, `H081_LOAN_TREASURY`, `H081_CLUSTER` | override the mainnet ids for a rehearsal validator; a cluster/id mismatch is refused before anything is signed |
 
 ## Privacy and limits, plainly
@@ -113,6 +123,8 @@ stream_loan has no offer book and no matching. A loan starts with a lender who o
 - The relayer fails closed: with `H081_RELAYER_URL` set, a withdrawal the relayer cannot take (unreachable, wrong terms, refusal) is not sent; the error says why, and `direct: true` is the only path to a send by the agent key.
 - Above the relayer's anonymous free tier (100 USDG per 30 days today) the agent key signs the relayer's capacity message and the withdrawal counts against the wallet's H081 stake in capacity_stake (`H081_STAKE`); the relayer, not the chain, then learns which wallet it belongs to. Without enough stake it is refused before any proof; `direct: true` has no limit.
 - Caps are checked locally first; a concurrent deposit can still make yours fail on chain, which costs about a second of CPU and ~0.0072 SOL of refundable rent, and is reported by name.
+- Allowances (`h081_allowance_grant`, `_delegate`, `_reclaim`) move value note to note inside the bank, so the agent key sends them (there is no public leg a relayer could take its fee from): the chain sees that the agent wallet made a grant, delegation or payment, not the amount, the rules or the recipient. They send nothing without `confirm: true`, and `H081_MAX_GRANT` caps every allowance granted or delegated.
+- Lending (`H081_LEND`) is public on the lender side: stream_loan needs the slot owner's signature, so the agent key opens, funds, claims and settles (no relayer), and the chain shows the agent wallet as lender, the principal and the borrower's payout account. The borrower's budget and payments stay private. Funding uses the wallet's public USDG, sends nothing without `confirm: true`, and `H081_MAX_LEND` caps every loan.
 - Not audited yet; use at your own risk.
 
 ## How to submit the plugin to SendAI
@@ -124,7 +136,7 @@ The upstream repository is `github.com/sendaifun/solana-agent-kit` (branch `v2` 
 3. Add `packages/plugin-h081/` mirroring `packages/plugin-token/`: the same `package.json` shape (`main`/`module`/`types`/`exports`, `build: tsup src/index.ts --dts --clean --format cjs,esm --out-dir dist`, `peerDependencies: { "solana-agent-kit": "workspace:*" }` inside the monorepo), `tsup` as a devDependency, and `src/` from this package. Either copy `integrations/solana-agent-kit/src`, `integrations/core` and the SDK modules they import into the new package, or make the new package a thin wrapper that depends on `@h081lll/solana-agent-kit-plugin` and re-exports `H081Plugin` (simplest; keeps one source of truth).
 4. Add a `README.md` in the package (this file, trimmed to install + the worked example + the actions table + the risk notice) and a row for the plugin in the root README's plugin list.
 5. `pnpm install && pnpm build && pnpm test` at the root; make sure `pnpm --filter @solana-agent-kit/plugin-h081 build` passes.
-6. Open the PR against `main`, titled `feat: add H081 Capital private bank plugin`, with a body that says what the seven actions do, that the protocol is live on Solana mainnet, not audited yet, use at your own risk, that it needs a `KeypairWallet` (or an env key) because the SDK signs multi-transaction proof staging, and links the npm package and `https://www.h081.xyz`.
+6. Open the PR against `main`, titled `feat: add H081 Capital private bank plugin`, with a body that says what the twelve actions do, that the protocol is live on Solana mainnet, not audited yet, use at your own risk, that it needs a `KeypairWallet` (or an env key) because the SDK signs multi-transaction proof staging, and links the npm package and `https://www.h081.xyz`.
 7. SendAI has paid bounties for toolkit work on Superteam Earn before; check `earn.superteam.fun` for an open Solana Agent Kit bounty and link the PR there if one fits.
 
 Nothing in this repository publishes or opens the PR: the package ships with `private: false` but unpublished, and the steps above are the owner's.
@@ -138,4 +150,4 @@ npx vitest run test/integrations                   # everything (bank over a fak
 npm run build --prefix integrations/solana-agent-kit
 ```
 
-The MCP server in `integrations/mcp/` exposes the same seven operations to Claude and other MCP clients; both are thin layers over `integrations/core/` (the bank facade) and the H081 SDK in `src/`.
+The MCP server in `integrations/mcp/` exposes the same operations to Claude and other MCP clients; both are thin layers over `integrations/core/` (the bank facade) and the H081 SDK in `src/`.

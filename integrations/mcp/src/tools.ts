@@ -1,7 +1,7 @@
-// The seven H081 bank operations as MCP tools. The bank is opened lazily on the first call that needs it, so
+// The H081 bank operations as MCP tools (one per OPS entry). The bank is opened lazily on the first call that needs it, so
 // `tools/list` works (and a missing key is reported as a readable tool error) before any key is loaded.
 import type { McpTool } from '../../../src/mcp-core.js';
-import { type BankLike, runOp } from '../../core/operations.js';
+import { type BankLike, runOp, validateArgs } from '../../core/operations.js';
 import { DESCRIPTIONS, JSON_SCHEMA, OPS, type OpName } from '../../core/schemas.js';
 
 export interface ToolContext {
@@ -14,6 +14,7 @@ export function h081Tools(ctx: ToolContext): McpTool[] {
     name,
     description: DESCRIPTIONS[name],
     inputSchema: JSON_SCHEMA[name],
-    handler: async (args) => runOp(await ctx.bank(), name, args),
+    // validated before the bank opens (and again in runOp): MCP refuses exactly what the Agent Kit refuses
+    handler: async (args) => { validateArgs(name, args); return runOp(await ctx.bank(), name, args); },
   }));
 }

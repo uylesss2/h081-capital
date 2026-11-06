@@ -17,6 +17,8 @@ import {
 } from '../../src/solana/lender.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { TOKEN22_PROGRAM_ID } from '../../src/solana/token.js';
+import { H081Bank } from '../../integrations/core/bank.js';
+import { decodeLoanProof, decodeLoanTerms, encodeLoanProof, encodeLoanTerms } from '../../integrations/core/codes.js';
 
 // The H081 launch wallets hold the token's trading creator fees (the team's); the loan fee never goes there.
 const LAUNCH_WALLETS = ['2wjxKzH7fVGpjcA9KpjDBDHjSAhz7u8ZgMLnVPVGSkDP', 'FZEMfMN7hhQcKPHRt2kb9ig5XArMvK5LqfSTXpQ1j4DZ', '5XJNtM7a9ocRL8f8vsyNVmQoekutCFJkGNXNQbkJP4bw'];
@@ -409,7 +411,25 @@ suite('stream-backed lending through stream_loan', () => {
     const before = await bal(payout);
     const lenderBefore = await bal(lenderAta);
     const treasuryBefore = await bal(treasury);
-    const tx = await lender.fund(ref, stream, mint, principal, payout);
+    // two agents hand the loan over as framed codes (integrations/core, what h081_lend and h081_loan_borrow use): the
+    // lender's terms code gives the borrower exactly the pledge terms; the borrower's proof code, decoded on the lender's
+    // side, rebuilds a proof that verifies off chain (snarkjs, the circuit's public signal order) and is what funds
+    const codeCtx = { cluster: 'localnet', program: LOAN.toBase58(), mint: mint.toBase58() };
+    const termsCode = encodeLoanTerms(codeCtx, { loanRef: ref, pledgeBps: BPS, lenderViewPub: lender.view.pub });
+    const t = decodeLoanTerms(codeCtx, termsCode);
+    const want = lender.terms(ref, BPS);
+    expect(t.loanRef).toBe(want.loanRef);
+    expect(t.pledgeBps).toBe(want.pledgeBps);
+    expect(Buffer.from(t.lenderViewPub).equals(Buffer.from(want.lenderViewPub))).toBe(true);
+    const proofCode = encodeLoanProof(codeCtx, { ref, payout, proof: stream.proof.proof, args: stream.args });
+    expect(proofCode).toMatch(/^h081-loan-proof:[1-9A-HJ-NP-Za-km-z]+$/);
+    const handed = decodeLoanProof(codeCtx, proofCode);
+    const rebuilt = H081Bank.streamProofResult(handed.proof, handed.args);
+    expect(rebuilt.publicSignals).toEqual(stream.proof.publicSignals);
+    expect(await pool.prover.verify('stream', rebuilt)).toBe(true);
+    expect(await pool.prover.verify('stream', H081Bank.streamProofResult(handed.proof, { ...handed.args, minRemaining: handed.args.minRemaining + 1n }))).toBe(false);
+    expect(() => decodeLoanProof({ ...codeCtx, cluster: 'devnet' }, proofCode)).toThrow(/another network/);
+    const tx = await lender.fund(ref, { proof: rebuilt, args: handed.args }, mint, principal, handed.payout);
     // the borrower gets principal - fee, the treasury the fee; the lender pays the principal
     expect(await bal(payout)).toBe(before + principal - fee);
     expect(await bal(treasury)).toBe(treasuryBefore + fee);

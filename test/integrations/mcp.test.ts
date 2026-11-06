@@ -1,4 +1,4 @@
-// The MCP server: initialize, tools/list (7 tools with schemas), tools/call success and isError paths,
+// The MCP server: initialize, tools/list (one tool per operation, with schemas), tools/call success and isError paths,
 // unknown tool / method, parse error, batch, stdio framing, lazy bank open, and the cap refusal happening
 // before the wallet proves anything (a real H081Bank over a fake connection).
 import { PassThrough } from 'node:stream';
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Connection, Keypair } from '@solana/web3.js';
 import { Prover } from '../../src/prover.js';
 import { H081Bank } from '../../integrations/core/bank.js';
+import { encodeAddressCode } from '../../integrations/core/codes.js';
 import { deriveAccountSk } from '../../integrations/core/keys.js';
 import { KEY_HELP } from '../../integrations/core/keys.js';
 import { OPS } from '../../integrations/core/schemas.js';
@@ -22,9 +23,9 @@ describe('h081 MCP server', () => {
     return r!.result as CallResult;
   };
 
-  it('initializes (version negotiation, instructions) and lists the seven tools with input schemas', async () => {
+  it('initializes (version negotiation, instructions) and lists one tool per operation with input schemas', async () => {
     const init = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
-    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.1.0' }, instructions: INSTRUCTIONS });
+    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.2.0' }, instructions: INSTRUCTIONS });
     expect(INSTRUCTIONS).toMatch(/not audited yet/);
     const newer = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2099-01-01' } });
     expect(newer!.result).toMatchObject({ protocolVersion: '2025-11-25' });
@@ -59,6 +60,86 @@ describe('h081 MCP server', () => {
     expect((await call('h081_stake', { action: 'stake', amount: '100000000' })).structuredContent).toMatchObject({ signature: 'sigStake', staked: '100000000' });
     expect((await call('h081_stake', { action: 'view' })).structuredContent).toMatchObject({ cooldownDays: 30 });
     expect((await call('h081_protocol_info')).structuredContent).toMatchObject({ cluster: 'mainnet-beta' });
+    expect((await call('h081_pay', { usdg: '1', to })).structuredContent).toMatchObject({ signature: 'sigPay', fee: '50000', to, private: false, via: 'relayer', allowanceId: '7', nextAllowanceId: '8', remaining: '1000000' });
+    const code = encodeAddressCode(bank.codeContext, { pk: 99n, viewPub: new Uint8Array(32).fill(7) });
+    expect((await call('h081_pay', { amount: '1000000', toAddressCode: code })).structuredContent).toMatchObject({ private: true, to: 'shielded', fee: '0' });
+    expect(bank.pay).toHaveBeenLastCalledWith({ amount: 1_000_000n, to: { pk: 99n, viewPub: new Uint8Array(32).fill(7) }, allowanceId: undefined, agentIndex: undefined, direct: false, allowPledged: false });
+
+    // allowances: a plan without confirm, the send with it; ids as decimal strings
+    expect((await call('h081_allowance_grant', { usdg: '50', agentIndex: 1, windowCapUsdg: '10', days: 30 })).structuredContent).toMatchObject({ sent: false, dryRun: true, plan: { rules: { amount: '50000000' } } });
+    expect(bank.allowanceGrant).toHaveBeenLastCalledWith({ amount: 50_000_000n, to: undefined, agentIndex: 1, windowCap: 10_000_000n, windowLen: undefined, maxPerTx: undefined, days: 30, unlockDays: undefined, confirm: false });
+    expect((await call('h081_allowance_grant', { usdg: '5', toAddressCode: code, confirm: true })).structuredContent).toMatchObject({ sent: true, signature: 'sigGrant', allowanceId: '11' });
+    expect(bank.allowanceGrant.mock.lastCall![0]).toMatchObject({ to: { pk: 99n }, agentIndex: undefined, confirm: true });
+    expect((await call('h081_allowance_delegate', { allowanceId: '7', agentIndex: 1, toAgentIndex: 2, usdg: '1', maxPerTxUsdg: '0.5', confirm: true })).structuredContent).toMatchObject({ sent: true, parentId: '7', allowanceId: '12', residualId: '13' });
+    expect(bank.allowanceDelegate).toHaveBeenLastCalledWith({ allowanceId: 7n, agentIndex: 1, toAgentIndex: 2, to: undefined, amount: 1_000_000n, windowCap: undefined, maxPerTx: 500_000n, days: undefined, unlockDays: undefined, confirm: true });
+    expect((await call('h081_allowance_reclaim', { allowanceId: '11' })).structuredContent).toMatchObject({ sent: false, dryRun: true, plan: { allowanceId: '11' } });
+    expect((await call('h081_allowance_reclaim', { allowanceId: '11', confirm: true })).structuredContent).toMatchObject({ sent: true, reclaimed: '5000000' });
+  });
+
+  it('allowance tools refuse bad arguments as readable tool errors, and their descriptions say nothing is sent without confirm', async () => {
+    expect((await call('h081_allowance_delegate', { allowanceId: '7', usdg: '1' })).content[0].text).toMatch(/exactly one recipient for the child/);
+    expect((await call('h081_allowance_delegate', { allowanceId: '0x7', toAgentIndex: 1, usdg: '1' })).content[0].text).toMatch(/decimal id/);
+    expect((await call('h081_allowance_grant', { usdg: '1', toAddressCode: 'h081-loan-terms:eyJ2IjoxfQ' })).content[0].text).toMatch(/not a shielded address code/);
+    expect((await call('h081_allowance_grant', { usdg: '1', agentIndex: 16 })).content[0].text).toMatch(/agentIndex must be 0\.\.15/);
+    expect((await call('h081_allowance_reclaim', {})).content[0].text).toMatch(/allowanceId is required/);
+    bank.allowanceDelegate.mockRejectedValueOnce(new Error('the parent has 5 USDG left; a child can never get more than its parent has. Nothing was sent.'));
+    const looser = await call('h081_allowance_delegate', { allowanceId: '7', toAgentIndex: 1, usdg: '6', confirm: true });
+    expect(looser).toMatchObject({ isError: true });
+    expect(looser.content[0].text).toMatch(/never get more than its parent.*Nothing was sent/);
+    const list = (await mcp.handle({ jsonrpc: '2.0', id: 5, method: 'tools/list' }))!.result as { tools: Array<{ name: string; description: string }> };
+    for (const name of ['h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim']) {
+      const d = list.tools.find((t) => t.name === name)!.description;
+      expect(d).toMatch(/WITHOUT `confirm: true` NOTHING IS SENT/);
+      expect(d).toMatch(/not audited yet/);
+    }
+    expect(list.tools.find((t) => t.name === 'h081_allowance_grant')!.description).toMatch(/H081_MAX_GRANT/);
+    expect(list.tools.find((t) => t.name === 'h081_allowance_delegate')!.description).toMatch(/never be looser than its parent/);
+  });
+
+  it('h081_lend: open and fund return a plan unless confirm; status, claim, collect, settle reach the bank; bad arguments are tool errors', async () => {
+    expect((await call('h081_lend', { action: 'open', pledgeBps: 4000 })).structuredContent).toMatchObject({ sent: false, dryRun: true, plan: { loanRef: '3', pledgeBps: '4000' } });
+    expect(bank.lendOpen).toHaveBeenLastCalledWith({ pledgeBps: 4000n, confirm: false });
+    expect((await call('h081_lend', { action: 'open', pledgeBps: 4000, confirm: true })).structuredContent).toMatchObject({ sent: true, loanRef: '3', termsCode: 'h081-loan-terms:4mD9q' });
+    expect((await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', principalUsdg: '40' })).structuredContent).toMatchObject({ sent: false, plan: { principal: '40000000' } });
+    expect(bank.lendFund).toHaveBeenLastCalledWith({ proofCode: 'h081-loan-proof:abc', loanRef: undefined, principal: 40_000_000n, pledgeBps: undefined, confirm: false });
+    expect((await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', loanRef: '3', pledgeBps: 4000, confirm: true })).structuredContent).toMatchObject({ sent: true, signature: 'sigFund' });
+    expect(bank.lendFund).toHaveBeenLastCalledWith({ proofCode: 'h081-loan-proof:abc', loanRef: 3n, principal: undefined, pledgeBps: 4000n, confirm: true });
+    expect((await call('h081_lend', { action: 'status' })).structuredContent).toMatchObject({ slots: [{ loanRef: '3', claimable: '1000000' }] });
+    expect(bank.lendStatus).toHaveBeenLastCalledWith({ loanRef: undefined, pledgeBps: undefined });
+    expect((await call('h081_lend', { action: 'claim', loanRef: '3', usdg: '0.5' })).structuredContent).toMatchObject({ sent: true, collected: '500000' });
+    expect((await call('h081_lend', { action: 'collect', loanRef: '3' })).structuredContent).toMatchObject({ signatures: ['sigSync'] });
+    expect((await call('h081_lend', { action: 'settle', loanRef: '3' })).structuredContent).toMatchObject({ sent: false, dryRun: true });
+    expect((await call('h081_lend', { action: 'close', loanRef: '3', confirm: true })).structuredContent).toMatchObject({ sent: true, action: 'close' });
+    expect((await call('h081_lend', { action: 'fund' })).content[0].text).toMatch(/proofCode .* is required/);
+    expect((await call('h081_lend', { action: 'open', pledgeBps: 9500 })).content[0].text).toMatch(/100\.\.9000/);
+    expect((await call('h081_lend', { action: 'settle' })).content[0].text).toMatch(/loanRef is required/);
+    bank.lendFund.mockRejectedValueOnce(new Error('over the operator ceiling H081_MAX_LEND (30 USDG per loan; this proof asks for 40 USDG). Nothing was sent.'));
+    const capped = await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', confirm: true });
+    expect(capped).toMatchObject({ isError: true });
+    expect(capped.content[0].text).toMatch(/H081_MAX_LEND.*Nothing was sent/);
+    const d = ((await mcp.handle({ jsonrpc: '2.0', id: 6, method: 'tools/list' }))!.result as { tools: Array<{ name: string; description: string }> }).tools.find((t) => t.name === 'h081_lend')!.description;
+    expect(d).toMatch(/WITHOUT `confirm: true` open, fund, settle and close send NOTHING/);
+    expect(d).toMatch(/H081_MAX_LEND/);
+    expect(d).toMatch(/agent wallet is public as the lender/);
+    expect(d).toMatch(/not audited yet/);
+    expect(INSTRUCTIONS).toMatch(/h081_lend/);
+  });
+
+  it('MCP validates arguments with the same schema as the Agent Kit: stray or misplaced fields are refused before the bank is called', async () => {
+    const calls = () => bank.lendFund.mock.calls.length + bank.lendClaim.mock.calls.length + bank.pay.mock.calls.length;
+    const before = calls();
+    // a stated loan amount as usdg/amount on fund is not silently dropped
+    const fund = await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', usdg: '10', confirm: true });
+    expect(fund.isError).toBe(true);
+    expect(fund.content[0].text).toMatch(/each action takes only its own fields.*Nothing was sent/);
+    // claim has no plan step: confirm is refused, not ignored
+    expect((await call('h081_lend', { action: 'claim', loanRef: '3', confirm: false })).content[0].text).toMatch(/each action takes only its own fields/);
+    // pay has no plan step: confirm: false does not quietly pay
+    const pay = await call('h081_pay', { usdg: '50', to: Keypair.generate().publicKey.toBase58(), confirm: false });
+    expect(pay.isError).toBe(true);
+    expect(pay.content[0].text).toMatch(/Unrecognized key.*confirm.*Nothing was sent/);
+    expect((await call('h081_bank_deposit', { usdg: '1', extra: 1 })).content[0].text).toMatch(/Unrecognized key/);
+    expect(calls()).toBe(before);
   });
 
   it('a bad argument or a bank refusal is a tool result with isError, not a protocol error', async () => {
@@ -68,6 +149,13 @@ describe('h081 MCP server', () => {
     expect((await call('h081_bank_withdraw', { usdg: '1', to: 'nope' })).content[0].text).toMatch(/base58/);
     expect((await call('h081_stake', { action: 'melt' })).content[0].text).toMatch(/action must be one of/);
     expect((await call('h081_loan_borrow', { budget: '1', days: 1, unlockDays: 1 })).content[0].text).toMatch(/termsCode/);
+    expect((await call('h081_pay', { usdg: '1', toAddressCode: 'h081-address:3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy' })).content[0].text).toMatch(/does not pass its built-in check|too short/);
+    expect((await call('h081_pay', { usdg: '1', toAddressCode: 'h081-loan-terms:eyJ2IjoxfQ' })).content[0].text).toMatch(/not a shielded address code/);
+    expect((await call('h081_pay', { usdg: '1' })).content[0].text).toMatch(/exactly one recipient/);
+    bank.pay.mockRejectedValueOnce(new Error('no allowance can pay 1 USDG now. Nothing was sent. allowance 7: over its per-payment cap (maxPerTx 0.5 USDG)'));
+    const capped = await call('h081_pay', { usdg: '1', to: Keypair.generate().publicKey.toBase58() });
+    expect(capped).toMatchObject({ isError: true });
+    expect(capped.content[0].text).toMatch(/Nothing was sent.*maxPerTx/);
     bank.withdraw.mockRejectedValueOnce(new Error('the relayer refused it (402 fee_too_low): fee 1 is below 50000'));
     const refused = await call('h081_bank_withdraw', { usdg: '1' });
     expect(refused).toMatchObject({ isError: true });
@@ -78,7 +166,7 @@ describe('h081 MCP server', () => {
     let opened = 0;
     const lazy = createServer({ bank: async () => { opened++; throw new Error(`no agent key: ${KEY_HELP}`); } });
     const list = (await lazy.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))!.result as { tools: unknown[] };
-    expect(list.tools).toHaveLength(7);
+    expect(list.tools).toHaveLength(OPS.length);
     expect(opened).toBe(0);
     const r = (await lazy.handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'h081_bank_balance', arguments: {} } }))!.result as CallResult;
     expect(r.isError).toBe(true);
@@ -126,7 +214,7 @@ describe('h081 MCP server', () => {
     expect(spy).not.toHaveBeenCalled();
     expect(conn.simulateTransaction).not.toHaveBeenCalled();
     expect(conn.sendRawTransaction).not.toHaveBeenCalled();
-    // the tools of a real bank are the same seven
+    // the tools of a real bank are the same ones
     expect(h081Tools({ bank: async () => real }).map((t) => t.name)).toEqual([...OPS]);
   });
 });

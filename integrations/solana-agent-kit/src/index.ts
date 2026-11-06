@@ -15,9 +15,15 @@ import { loanQuoteAction } from './actions/loanQuote.js';
 import { loanBorrowAction } from './actions/loanBorrow.js';
 import { stakeAction } from './actions/stake.js';
 import { protocolInfoAction } from './actions/protocolInfo.js';
+import { payAction } from './actions/pay.js';
+import { allowanceDelegateAction, allowanceGrantAction, allowanceReclaimAction } from './actions/allowance.js';
+import { lendAction } from './actions/lend.js';
 import { METHODS } from './tools/index.js';
 
-export const H081_ACTIONS = [bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction];
+export const H081_ACTIONS = [
+  bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction,
+  allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction,
+];
 
 const H081Plugin = {
   name: 'h081',
@@ -31,8 +37,10 @@ const H081Plugin = {
 
 export default H081Plugin;
 export { H081Plugin };
-export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction };
-export { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo } from './tools/index.js';
+export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction, allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction };
+export {
+  h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend,
+} from './tools/index.js';
 export { signerFromAgent, keypairOfWallet, UNSUPPORTED_WALLET } from './signer.js';
 export { bankFor, setBankProvider, resetBank, type BankProvider, type AgentLike } from './bank.js';
 export { H081Bank, type BankOptions } from '../../core/bank.js';
@@ -41,3 +49,6 @@ export { configFromEnv, MAINNET, NOTICE, ENV_VARS, type H081Config } from '../..
 export { explainProgramError, H081Error } from '../../core/errors.js';
 export { OPS, DESCRIPTIONS, ZOD, JSON_SCHEMA, type OpName } from '../../core/schemas.js';
 export { runOp, plain, type BankLike } from '../../core/operations.js';
+export {
+  ADDRESS_PREFIX, PROOF_PREFIX, TERMS_PREFIX, CodeError, decodeAddressCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms, type CodeContext,
+} from '../../core/codes.js';
