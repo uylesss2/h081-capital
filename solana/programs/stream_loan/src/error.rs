@@ -58,4 +58,29 @@ pub enum LoanError {
     BadRecovery,
     #[msg("slash amount is zero")]
     BadSlashAmount,
+    #[msg("the loan is funded and not settled: settle it before closing the slot")]
+    NotSettled,
+    #[msg("the slot's inbox still holds tokens: sync (and collect) them before closing the slot")]
+    InboxNotEmpty,
+    #[msg("safety_pool holds an open cover for this loan: release_cover it (anyone may) before closing the slot")]
+    CoverOpen,
+    #[msg("cover is not the safety_pool cover PDA of this loan ref")]
+    BadCover,
+    #[msg("account is not the closed-slot receipt PDA of this loan ref")]
+    BadReceipt,
+    #[msg("a recorded slash of this loan is not yet recovered by the safety pool: the slot stays open until it is")]
+    SubrogationOpen,
+    // ---- overpay cap (docs/LOAN-OVERPAY-CAP.md). Appended at the end: the codes above never shift.
+    #[msg("the loan is repaid: nothing more is owed to the lender (the excess goes back to the borrower through return_excess)")]
+    LoanRepaid,
+    #[msg("the claim is larger than what the loan still owes (principal - repaid - unsynced inbox - escrow)")]
+    ClaimTooLarge,
+    #[msg("nothing in this inbox belongs to the borrower")]
+    NoExcess,
+    #[msg("the destination cannot receive the excess (missing, frozen or another mint): the payout owner may redirect it, or retry once it can")]
+    PayoutCannotReceive,
+    #[msg("this closed-loan receipt predates the overpay cap and records no payout account")]
+    LegacyReceiptNoPayout,
+    #[msg("the closed-loan receipt must be writable: the lender is still owed on this loan")]
+    ReceiptNotWritable,
 }

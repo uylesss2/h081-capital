@@ -7,7 +7,10 @@ import { describe, expect, it } from 'vitest';
 import { Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { BUFFER_HEADER, LOCALNET_POOL_PROGRAM_ID, LOCALNET_PROBE_PROGRAM_ID, POOL_ERROR, POOL_INIT_LEN, POOL_SIZE, ROOT_HISTORY, escrowPda, fieldOf, initializePoolIxs } from '../../src/solana/index.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
-import { GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, decodeLedger, decodeSlot, ledgerPda, slotEscrow, slotInbox, slotPda, subrogationPda } from '../../src/solana/lender.js';
+import {
+  CLOSED_SLOT_ACCOUNT_SIZE, CLOSED_SLOT_V2_SIZE, GRACE, LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, MAINNET_LOAN_PROGRAM_ID, MAINNET_SAFETY_POOL_PROGRAM_ID, SLOT_ACCOUNT_SIZE, decodeLedger, decodeSlot,
+  ledgerPda, safetyPoolFor, slotEscrow, slotInbox, slotPda, subrogationPda,
+} from '../../src/solana/lender.js';
 import {
   CAPACITY_ERROR, CLASSIC_TOKEN_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_FAST_PROGRAM_ID, LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_FAST_PROGRAM_ID,
   LOCALNET_SAFETY_POOL_PROGRAM_ID, SAFETY_ERROR, SAFETY_POOL_ESCROW_PROGRAM_ID, SAFETY_STREAM_LOAN_PROGRAM_ID, SAFETY_VIRTUAL_ASSETS, SAFETY_VIRTUAL_SHARES, SAFETY_MAX_SHARES_PER_ASSET, CAPACITY_COOLDOWN,
@@ -131,6 +134,30 @@ describe('PDAs and seeds', () => {
 });
 
 describe('mirrored layouts', () => {
+  it('close_slot: the ClosedSlot receipt layout, the account sizes and the safety_pool Cover it reads match the programs', () => {
+    expect(fields('stream_loan/src/state.rs', 'ClosedSlot')).toEqual([
+      'loan_ref: u64', 'lender: Pubkey', 'asset: Pubkey', 'principal: u64', 'repaid: u64', 'slot_bump: u8', 'bump: u8',
+    ]);
+    // lender at offset 16 in both, so one memcmp finds a lender's slots and receipts
+    expect(fields('stream_loan/src/state.rs', 'Slot').slice(0, 2)).toEqual(['loan_ref: u64', 'lender: Pubkey']);
+    expect(CLOSED_SLOT_ACCOUNT_SIZE).toBe(8 + 8 + 32 + 32 + 8 + 8 + 1 + 1);
+    // overpay cap: a v2 receipt is the same struct plus the borrower's payout account (32 trailing bytes)
+    expect(CLOSED_SLOT_V2_SIZE).toBe(CLOSED_SLOT_ACCOUNT_SIZE + 32);
+    expect(src('stream_loan/src/lib.rs')).toContain('pub fn return_excess');
+    expect(SLOT_ACCOUNT_SIZE).toBe(8 + 8 + 32 + 1 + 1 + 1 + 32 + 32 + 8 + 8 + 16 + 16 + 2 + 8 + 32 + 8 + 32 + 8);
+    expect(src('stream_loan/src/state.rs')).toContain('pub const CLOSED_SEED: &[u8] = b"closed";');
+    // stream_loan reads safety_pool's Cover (paid, released) at fixed offsets
+    expect(fields('safety_pool/src/lib.rs', 'Cover')).toEqual([
+      'loan_ref: u64', 'mint: Pubkey', 'lender: Pubkey', 'premium: u64', 'bound_at: i64', 'paid: bool', 'paid_out: u64', 'bump: u8', 'limit: u64', 'released: bool',
+    ]);
+    expect(src('safety_pool/src/lib.rs')).toContain('pub const COVER_SEED: &[u8] = b"cover";');
+    expect(src('stream_loan/src/safety.rs')).toContain('pub const COVER_SEED: &[u8] = b"cover";');
+    expect(constPubkey('stream_loan/src/safety.rs', 'LOCALNET_SAFETY_PROGRAM_ID')).toBe(LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58());
+    expect(constPubkey('stream_loan/src/safety.rs', 'MAINNET_SAFETY_PROGRAM_ID')).toBe(MAINNET_SAFETY_POOL_PROGRAM_ID.toBase58());
+    expect(safetyPoolFor(LOCALNET_LOAN_PROGRAM_ID)!.equals(LOCALNET_SAFETY_POOL_PROGRAM_ID)).toBe(true);
+    expect(safetyPoolFor(MAINNET_LOAN_PROGRAM_ID)!.equals(MAINNET_SAFETY_POOL_PROGRAM_ID)).toBe(true);
+  });
+
   it('safety_pool mirrors stream_loan Slot and Ledger field for field', () => {
     expect(fields('safety_pool/src/stream_loan_view.rs', 'StreamSlot')).toEqual(fields('stream_loan/src/state.rs', 'Slot'));
     expect(fields('safety_pool/src/stream_loan_view.rs', 'StreamLedger')).toEqual(fields('stream_loan/src/state.rs', 'Ledger'));

@@ -129,10 +129,12 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'amount), leaves the agent wallet\'s public USDG (not the shielded balance), and the borrower receives it minus the ' +
     '0.25% origination fee to the protocol treasury; "status" lists the agent\'s slots (or `loanRef`): funded, repaid, ' +
     'outstanding, claimable, collectable, shortfall, and with `pledgeBps` an open slot\'s terms code again; "claim" ' +
-    'pulls the vested lender share of the borrower\'s stream (spend circuit); "collect" takes shares already routed to ' +
-    'the slot; "settle" closes the books (no shortfall can be reported after); "close" returns a settled slot\'s rent ' +
-    'where the SDK supports it (this build refuses it, nothing sent). WITHOUT `confirm: true` open, fund, settle and ' +
-    'close send NOTHING and return the plan. The operator ceiling H081_MAX_LEND caps every loan funded. Risk: repayment is ' +
+    'pulls the vested lender share of the borrower\'s stream (spend circuit), sized to what the loan still owes; ' +
+    '"collect" takes shares already routed to the slot; "settle" closes the books (no shortfall can be reported after); ' +
+    '"close" returns a settled slot\'s rent (repayments still in it are collected first); "sweep" takes what reached a ' +
+    'closed loan since, up to what it still owes. The lender is never paid more than the principal: anything routed ' +
+    'beyond it is the borrower\'s and is sent back to the borrower\'s payout account. WITHOUT `confirm: true` open, ' +
+    'fund, settle and close send NOTHING and return the plan. The operator ceiling H081_MAX_LEND caps every loan funded. Risk: repayment is ' +
     'only the pledged share of what the borrower\'s allowance pays, until the principal is repaid; there is no collateral ' +
     'beyond it. Privacy: stream_loan needs the slot owner\'s signature, so the agent key sends every lender action (no ' +
     'relayer): the agent wallet is public as the lender, and the principal and payout account are public; the ' +
@@ -250,7 +252,7 @@ export const AllowanceDelegateZ = z.object({
 
 export const AllowanceReclaimZ = z.object({ allowanceId: idZ, confirm: z.boolean().optional() }).strict();
 
-export const LEND_ACTIONS = ['open', 'fund', 'status', 'claim', 'collect', 'settle', 'close'] as const;
+export const LEND_ACTIONS = ['open', 'fund', 'status', 'claim', 'collect', 'settle', 'close', 'sweep'] as const;
 export const LEND_FIELDS: Record<(typeof LEND_ACTIONS)[number], string[]> = {
   open: ['pledgeBps', 'confirm'],
   fund: ['proofCode', 'loanRef', 'principal', 'principalUsdg', 'pledgeBps', 'confirm'],
@@ -259,6 +261,7 @@ export const LEND_FIELDS: Record<(typeof LEND_ACTIONS)[number], string[]> = {
   collect: ['loanRef'],
   settle: ['loanRef', 'confirm'],
   close: ['loanRef', 'confirm'],
+  sweep: ['loanRef'],
 };
 export const LendZ = z.object({
   action: z.enum(LEND_ACTIONS, { errorMap: () => ({ message: `action must be one of ${LEND_ACTIONS.join(', ')}` }) }),
@@ -274,7 +277,7 @@ export const LendZ = z.object({
   })
   .refine((o) => o.action !== 'open' || o.pledgeBps !== undefined, { message: 'pledgeBps is required: open needs pledgeBps (100..9000)' })
   .refine((o) => o.action !== 'fund' || o.proofCode !== undefined, { message: 'proofCode (the borrower\'s "h081-loan-proof:" code) is required: fund needs proofCode' })
-  .refine((o) => !['claim', 'collect', 'settle', 'close'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: claim, collect, settle and close need loanRef (the loan slot number)' })
+  .refine((o) => !['claim', 'collect', 'settle', 'close', 'sweep'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: claim, collect, settle, close and sweep need loanRef (the loan slot number)' })
   .refine(atMostOne('principal', 'principalUsdg'), bothMsg('principal', 'principalUsdg'))
   .refine(atMostOne('amount', 'usdg'), bothMsg('amount', 'usdg'));
 
@@ -413,13 +416,13 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   h081_lend: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: [...LEND_ACTIONS], description: 'open a slot, fund it against a borrower proof, status, claim the vested share, collect routed shares, settle, close' },
+      action: { type: 'string', enum: [...LEND_ACTIONS], description: 'open a slot, fund it against a borrower proof, status, claim the vested share (up to what is owed), collect routed shares, settle, close, sweep a closed loan' },
       pledgeBps: { type: 'integer', minimum: 100, maximum: 9000, description: 'open: the share of every borrower payment routed to the slot (basis points). fund: the least share the proof must pledge. status: show an open slot terms code with this share' },
       proofCode: { type: 'string', description: 'fund: the borrower proof code, "h081-loan-proof:..." (from h081_loan_borrow)' },
       loanRef: { type: 'string', pattern: BASE.source, description: 'the loan slot number; status without it lists every slot of this agent; fund defaults to the slot in the proof code' },
       principal: { ...amountJ, description: 'fund: the amount you expect to lend (base units); refused unless it is exactly what the proof backs. Default: what the proof backs' },
       principalUsdg: decimalJ('USDG'),
-      amount: { ...amountJ, description: 'claim: at most this much (base units); default: everything claimable now' },
+      amount: { ...amountJ, description: 'claim: at most this much (base units); default: everything claimable now, capped at what the loan still owes' },
       usdg: decimalJ('USDG'),
       confirm: { type: 'boolean', description: 'open, fund, settle, close: true sends it. Default false: nothing is sent, the result is the plan' },
     },
@@ -463,5 +466,6 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'claim', loanRef: '3' },
     { action: 'collect', loanRef: '3' },
     { action: 'settle', loanRef: '3', confirm: true },
+    { action: 'sweep', loanRef: '3' },
   ],
 };

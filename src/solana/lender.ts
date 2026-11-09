@@ -12,11 +12,24 @@ import { concatBytes, encodeProof, fieldOf, fromBe, u32le, u64le } from './field
 import { DEFAULT_PUBKEY, type SpendAccounts, type SpendArgs, encodeSpendArgs, encodeSpendExt, extDataHash, pullLenderShareIx, spendIx } from './ops.js';
 import { escrowPda, poolPda } from './pda.js';
 import { LOCALNET_POOL_PROGRAM_ID, type StreamArgs, bufferCloseIx, encodeStreamArgs, programDataAddress } from './program.js';
-import { createAtaIdempotentIx } from './token.js';
+import { LOCALNET_SAFETY_POOL_PROGRAM_ID, coverPda, createAtaIdempotentIx, decodeCover, loanAccounts, releaseCoverIx } from './token.js';
 import { OP_CU_LIMIT, type SolPledgeTerms, type SolanaPool, openSolLenderMemo, solAllowanceMemo, solSealForLender } from './wallet.js';
 
 /** Localnet stream_loan program id (solana/keys/stream_loan-keypair.json, declared in programs/stream_loan). */
 export const LOCALNET_LOAN_PROGRAM_ID = new PublicKey('FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc');
+/** stream_loan and safety_pool on mainnet-beta (docs/MAINNET-RUNBOOK.md, Phase 2). */
+export const MAINNET_LOAN_PROGRAM_ID = new PublicKey('8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4');
+export const MAINNET_SAFETY_POOL_PROGRAM_ID = new PublicKey('HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt');
+
+/**
+ * The safety_pool whose Cover PDA a stream_loan build checks in close_slot (stream_loan safety::SAFETY_POOL_ID):
+ * the localnet pair or the mainnet pair; undefined for any other stream_loan (pass it explicitly).
+ */
+export function safetyPoolFor(loanProgram: PublicKey): PublicKey | undefined {
+  if (loanProgram.equals(LOCALNET_LOAN_PROGRAM_ID)) return LOCALNET_SAFETY_POOL_PROGRAM_ID;
+  if (loanProgram.equals(MAINNET_LOAN_PROGRAM_ID)) return MAINNET_SAFETY_POOL_PROGRAM_ID;
+  return undefined;
+}
 
 export const SPL_TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 export const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
@@ -31,8 +44,20 @@ export const LOAN_ERROR = {
   NothingOwed: 6007, NotAClaim: 6008, WrongPoolProgram: 6009, BadBuffer: 6010, BadPayload: 6011, BadTokenProgram: 6012, BadMint: 6013,
   BadInbox: 6014, BadLenderAccount: 6015, Overflow: 6016, BadEscrow: 6017, EscrowNotEmpty: 6018, BadTreasury: 6019,
   UpgradeAuthority: 6020, PayoutNotProven: 6021, PrincipalTooLarge: 6022, PrincipalMismatch: 6023, NotSafetyPool: 6024,
-  BadSubrogation: 6025, BadRecovery: 6026, BadSlashAmount: 6027,
+  BadSubrogation: 6025, BadRecovery: 6026, BadSlashAmount: 6027, NotSettled: 6028, InboxNotEmpty: 6029, CoverOpen: 6030,
+  BadCover: 6031, BadReceipt: 6032, SubrogationOpen: 6033,
+  // overpay cap (docs/LOAN-OVERPAY-CAP.md)
+  LoanRepaid: 6034, ClaimTooLarge: 6035, NoExcess: 6036, PayoutCannotReceive: 6037, LegacyReceiptNoPayout: 6038, ReceiptNotWritable: 6039,
 } as const;
+
+/**
+ * Account sizes (Anchor discriminator included): Slot 8 + 245, ClosedSlot receipt 8 + 90. A receipt made after the
+ * overpay cap (v2) is CLOSED_SLOT_V2_SIZE: the same struct, then the borrower's payout account in 32 trailing bytes.
+ * CLOSED_SLOT_ACCOUNT_SIZE is the minimum size of a receipt.
+ */
+export const SLOT_ACCOUNT_SIZE = 253;
+export const CLOSED_SLOT_ACCOUNT_SIZE = 98;
+export const CLOSED_SLOT_V2_SIZE = CLOSED_SLOT_ACCOUNT_SIZE + 32;
 
 /**
  * The stream proof audience `fund` requires: fieldOf(payoutTo). The borrower proves for the token account the
@@ -110,6 +135,11 @@ export function slotInbox(loanRef: bigint, mint: PublicKey, tokenProgram = SPL_T
  */
 export function slotEscrow(loanRef: bigint, mint: PublicKey, poolProgram = LOCALNET_POOL_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID): PublicKey {
   return escrowPda(poolProgram, mint, fieldOf(slotPda(loanRef, programId)), loanRef);
+}
+
+/** Receipt of a closed funded slot: ["closed", loan_ref u64 LE] (close_slot creates it; never closed). */
+export function closedSlotPda(loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): PublicKey {
+  return PublicKey.findProgramAddressSync([enc('closed'), u64le(loanRef)], programId)[0];
 }
 
 /** What a borrower pledges to for `loanRef`: the slot PDA as the lender account, and its field value. */
@@ -217,6 +247,65 @@ export function settleIx(lender: PublicKey, loanRef: bigint, programId = LOCALNE
 }
 
 /**
+ * The lender closes a finished slot and takes its rent back (stream_loan close_slot). `loan` is the funded loan's
+ * asset and token program (omit for a slot that was never funded: those accounts are not read). A funded loan
+ * must be settled, its inbox empty (sync/collect first), its safety_pool cover, if any, released, and a recorded
+ * slash, if any, fully recovered by the safety pool (Subrogation paid >= owed, else SubrogationOpen); the inbox,
+ * the asset's Ledger and the Slot are closed to the lender and a ClosedSlot receipt is left.
+ * `safetyProgram` must be the safety_pool the stream_loan build checks (safetyPoolFor(programId)).
+ */
+export function closeSlotIx(
+  lender: PublicKey, loanRef: bigint, loan?: { asset: PublicKey; tokenProgram: PublicKey }, programId = LOCALNET_LOAN_PROGRAM_ID,
+  safetyProgram = safetyPoolFor(programId),
+): TransactionInstruction {
+  if (!safetyProgram) throw new Error('closeSlotIx: pass the safety_pool program id this stream_loan checks');
+  const closed = closedSlotPda(loanRef, programId);
+  // an unfunded slot reads none of the loan accounts: the receipt address stands in for them
+  const ledger = loan ? ledgerPda(loanRef, loan.asset, programId) : closed;
+  const mint = loan?.asset ?? closed;
+  const inbox = loan ? slotInbox(loanRef, loan.asset, loan.tokenProgram, programId) : closed;
+  return ix(programId, 'close_slot', [
+    w(slotPda(loanRef, programId)), w(lender, true), w(ledger), w(mint), w(inbox), r(loan?.tokenProgram ?? SPL_TOKEN_PROGRAM_ID),
+    r(coverPda(safetyProgram, loanRef)), w(closed), r(SystemProgram.programId), r(subrogationPda(loanRef, programId)),
+  ], u64le(loanRef));
+}
+
+/**
+ * The lender of a closed slot takes what reached the slot's inbox in `mint` after the close (stream_loan
+ * sweep_closed) to `destination`, up to what the loan still owes (principal - receipt.repaid, loan asset only; the
+ * receipt records it, so it is passed writable); an emptied inbox is closed to the lender. The rest is the
+ * borrower's (returnExcessIx). Pull the pool escrow of the slot into the inbox first (pullLenderShareIx is
+ * permissionless) when shares were escrowed. The mint's Ledger PDA follows (writable): what it still holds for the
+ * lender (another mint's shares held before the overpay cap) is paid first and the Ledger is closed to the lender;
+ * a missing Ledger is ignored.
+ */
+export function sweepClosedIx(
+  lender: PublicKey, loanRef: bigint, mint: PublicKey, destination: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID,
+): TransactionInstruction {
+  return ix(programId, 'sweep_closed', [
+    w(closedSlotPda(loanRef, programId)), w(lender, true), r(slotPda(loanRef, programId)), w(mint), w(slotInbox(loanRef, mint, tokenProgram, programId)),
+    w(destination), r(tokenProgram), w(ledgerPda(loanRef, mint, programId)),
+  ], u64le(loanRef));
+}
+
+/**
+ * Permissionless (stream_loan return_excess): sends the borrower's excess in the slot's inbox for `mint` (what is
+ * above `held` and above what the loan may still credit) to the borrower, for an open funded slot or a closed one
+ * with a v2 receipt. `payoutTo` is the loan's recorded payout account; `destination` is payoutTo itself for the loan
+ * asset, the associated token account of payoutTo's owner for another mint, or, when `ownerSigner` (payoutTo's
+ * owner) signs, any token account of `mint`.
+ */
+export function returnExcessIx(
+  loanRef: bigint, mint: PublicKey, payoutTo: PublicKey, destination: PublicKey, tokenProgram = SPL_TOKEN_PROGRAM_ID, programId = LOCALNET_LOAN_PROGRAM_ID,
+  ownerSigner?: PublicKey,
+): TransactionInstruction {
+  return ix(programId, 'return_excess', [
+    r(slotPda(loanRef, programId)), r(closedSlotPda(loanRef, programId)), r(ledgerPda(loanRef, mint, programId)), r(mint),
+    w(slotInbox(loanRef, mint, tokenProgram, programId)), r(payoutTo), w(destination), r(tokenProgram), ...(ownerSigner ? [r(ownerSigner, true)] : []),
+  ], u64le(loanRef));
+}
+
+/**
  * View (simulate it): return data is the shortfall as u64 LE. `asset`/`tokenProgram` are the loan's. The
  * unsynced inbox balance and the pool escrow of the slot count as paid.
  */
@@ -300,6 +389,202 @@ export function loanFundedEvents(logs: string[]): LoanFundedEvent[] {
   return out;
 }
 
+/**
+ * The ClosedSlot receipt (Anchor borsh, after the discriminator). `lender` is at offset 16, as in Slot. `payoutTo`:
+ * the borrower's payout account, recorded only in receipts made after the overpay cap (v2, 130 bytes).
+ */
+export interface ClosedSlotAccount {
+  loanRef: bigint; lender: PublicKey; asset: PublicKey; principal: bigint; repaid: bigint; slotBump: number; bump: number; payoutTo?: PublicKey;
+}
+const CLOSED_SLOT_DISC = sha256(enc('account:ClosedSlot')).subarray(0, 8);
+const SLOT_DISC = sha256(enc('account:Slot')).subarray(0, 8);
+const hasDisc = (data: Uint8Array, disc: Uint8Array) => data.length >= 8 && disc.every((b, i) => data[i] === b);
+export const isSlotAccount = (data: Uint8Array) => hasDisc(data, SLOT_DISC);
+export const isClosedSlotAccount = (data: Uint8Array) => hasDisc(data, CLOSED_SLOT_DISC);
+export function decodeClosedSlot(data: Uint8Array): ClosedSlotAccount {
+  if (!isClosedSlotAccount(data) || data.length < CLOSED_SLOT_ACCOUNT_SIZE) throw new Error('not a ClosedSlot account');
+  const x = new Reader(data);
+  const c: ClosedSlotAccount = { loanRef: x.u64(), lender: x.key(), asset: x.key(), principal: x.u64(), repaid: x.u64(), slotBump: x.u8(), bump: x.u8() };
+  if (data.length >= CLOSED_SLOT_V2_SIZE) c.payoutTo = x.key();
+  return c;
+}
+
+/** The SlotClosed event: `lamportsRefunded` is net of the receipt's rent; the final figures of the loan. */
+export interface SlotClosedEvent {
+  loanRef: bigint; lender: PublicKey; lamportsRefunded: bigint; funded: boolean; asset: PublicKey; principal: bigint; repaid: bigint; agentPk: bigint; expiry: bigint;
+}
+const SLOT_CLOSED_DISC = sha256(enc('event:SlotClosed')).subarray(0, 8);
+export function slotClosedEvents(logs: string[]): SlotClosedEvent[] {
+  const out: SlotClosedEvent[] = [];
+  for (const line of logs) {
+    if (!line.startsWith('Program data: ')) continue;
+    const d = new Uint8Array(Buffer.from(line.slice('Program data: '.length), 'base64'));
+    if (d.length < 8 + 8 + 32 + 8 + 1 + 32 + 8 + 8 + 32 + 8 || !hasDisc(d, SLOT_CLOSED_DISC)) continue;
+    const x = new Reader(d);
+    out.push({
+      loanRef: x.u64(), lender: x.key(), lamportsRefunded: x.u64(), funded: x.bool(), asset: x.key(), principal: x.u64(), repaid: x.u64(), agentPk: x.be32(),
+      expiry: x.u64(),
+    });
+  }
+  return out;
+}
+
+/**
+ * Where a loan ref stands on chain. `open`: the Slot exists. `closed`: the lender closed it (close_slot); `receipt`
+ * holds the final figures of a funded loan (absent for a slot that never lent). `none`: the ref was never opened.
+ * A closed slot is a finished loan, never an error.
+ */
+export type LoanStatus =
+  | { state: 'open'; slot: SlotAccount }
+  | { state: 'closed'; receipt?: ClosedSlotAccount }
+  | { state: 'none' };
+type AccountsReader = Pick<Connection, 'getMultipleAccountsInfo'>;
+export async function loanStatus(connection: AccountsReader, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<LoanStatus> {
+  const [slot, receipt, registry] = await connection.getMultipleAccountsInfo(
+    [slotPda(loanRef, programId), closedSlotPda(loanRef, programId), registryPda(programId)], 'confirmed',
+  );
+  if (slot && slot.owner.equals(programId) && isSlotAccount(slot.data)) return { state: 'open', slot: decodeSlot(slot.data) };
+  if (receipt && receipt.owner.equals(programId) && isClosedSlotAccount(receipt.data)) return { state: 'closed', receipt: decodeClosedSlot(receipt.data) };
+  // no slot and no receipt: a closed unfunded slot when the ref was handed out, else never opened
+  if (registry && loanRef > 0n && loanRef < decodeRegistry(registry.data).nextLoanRef) return { state: 'closed' };
+  return { state: 'none' };
+}
+
+type ProgramAccountsReader = Pick<Connection, 'getProgramAccounts'>;
+const byLender = (lender: PublicKey, size: number) => ({ commitment: 'confirmed' as const, filters: [{ dataSize: size }, { memcmp: { offset: 16, bytes: lender.toBase58() } }] });
+/** Every ClosedSlot receipt of `lender`, whatever its size (98-byte receipts and 130-byte v2 ones): discriminator + lender. */
+const receiptsOf = (lender: PublicKey) => ({
+  commitment: 'confirmed' as const,
+  filters: [{ memcmp: { offset: 0, bytes: Buffer.from(CLOSED_SLOT_DISC).toString('base64'), encoding: 'base64' as const } }, { memcmp: { offset: 16, bytes: lender.toBase58() } }],
+});
+
+/**
+ * A lender's slots whose rent close_slot can reclaim now or after a step the SDK takes for it: settled loans
+ * (`reason: 'settled'`) and, with `includeUnfunded`, slots that never lent (`'unfunded'`; a slot waiting for its
+ * borrower is one of those, so they are left out by default). `lamports`: the slot's own rent (the inbox and
+ * Ledger of a settled loan add theirs; the receipt takes some back). One getProgramAccounts call.
+ */
+export async function reclaimableSlots(
+  connection: ProgramAccountsReader, lender: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID, opts: { includeUnfunded?: boolean } = {},
+): Promise<Array<{ loanRef: bigint; reason: 'settled' | 'unfunded'; lamports: number; slot: SlotAccount }>> {
+  const found = await connection.getProgramAccounts(programId, byLender(lender, SLOT_ACCOUNT_SIZE));
+  const out: Array<{ loanRef: bigint; reason: 'settled' | 'unfunded'; lamports: number; slot: SlotAccount }> = [];
+  for (const f of found) {
+    if (!isSlotAccount(f.account.data)) continue;
+    const s = decodeSlot(f.account.data);
+    if (!s.lender.equals(lender)) continue;
+    if (s.funded && s.settled) out.push({ loanRef: s.loanRef, reason: 'settled', lamports: f.account.lamports, slot: s });
+    else if (!s.funded && opts.includeUnfunded) out.push({ loanRef: s.loanRef, reason: 'unfunded', lamports: f.account.lamports, slot: s });
+  }
+  return out.sort((a, b) => (a.loanRef < b.loanRef ? -1 : 1));
+}
+
+/** A lender's ClosedSlot receipts (its closed funded loans, both receipt sizes), oldest first. One getProgramAccounts call. */
+export async function closedSlots(connection: ProgramAccountsReader, lender: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<ClosedSlotAccount[]> {
+  const found = await connection.getProgramAccounts(programId, receiptsOf(lender));
+  return found.filter((f) => isClosedSlotAccount(f.account.data)).map((f) => decodeClosedSlot(f.account.data))
+    .filter((c) => c.lender.equals(lender)).sort((a, b) => (a.loanRef < b.loanRef ? -1 : 1));
+}
+
+const tokenAmount = (info: { data: Uint8Array } | null | undefined): bigint =>
+  info && info.data.length >= 72 ? Buffer.from(info.data.buffer, info.data.byteOffset, info.data.byteLength).readBigUInt64LE(64) : 0n;
+const tokenOwner = (info: { data: Uint8Array; owner: PublicKey } | null | undefined): PublicKey | undefined =>
+  info && info.data.length >= 165 && (info.owner.equals(SPL_TOKEN_PROGRAM_ID) || info.owner.equals(TOKEN_2022_PROGRAM_ID)) ? new PublicKey(info.data.subarray(32, 64)) : undefined;
+
+/** What the lender may still claim on an open loan (the program's claim check): principal - repaid - unsynced inbox - escrow. */
+export function claimRoom(s: Pick<SlotAccount, 'principal' | 'repaid'>, pendingInbox: bigint, escrowed: bigint): bigint {
+  const room = s.principal - s.repaid - pendingInbox - escrowed;
+  return room > 0n ? room : 0n;
+}
+
+/** sweep_closed's split of a closed slot's inbox (state::sweep_split): the held part first, then up to the room. */
+export function sweepSplit(inbox: bigint, held: bigint, room: bigint): { fromHeld: bigint; fromRoom: bigint } {
+  const fromHeld = held < inbox ? held : inbox;
+  const rest = inbox - fromHeld;
+  return { fromHeld, fromRoom: rest < room ? rest : room };
+}
+
+/**
+ * The amount a lender claim asks for (prepareClaim): `amount` when given, else everything vested, capped at `owed`
+ * (claimRoom) when the cap applies (`owed` undefined: another mint, or the cap is skipped). Throws, as the program
+ * would refuse, once nothing is owed (`repaid`: the loan itself is repaid; otherwise value already routed covers it)
+ * or when `amount` is above `owed`.
+ */
+export function claimAmount(vested: bigint, owed: bigint | undefined, amount: bigint | undefined, loanRef: bigint, repaid = false): bigint {
+  if (owed !== undefined) {
+    if (owed === 0n) {
+      throw new Error(repaid ? `loan ${loanRef} is repaid: nothing more to claim` : `loan ${loanRef}: what is still owed is already on its way (sync it)`);
+    }
+    if (amount !== undefined && amount > owed) throw new Error(`claim of ${amount} is more than loan ${loanRef} still owes (${owed})`);
+  }
+  const want = amount ?? (owed !== undefined && owed < vested ? owed : vested);
+  if (want <= 0n) throw new Error('nothing claimable yet');
+  return want;
+}
+
+/** The borrower's excess waiting in a loan's inbox (overpay cap), with what return_excess needs to send it. */
+export interface LoanExcess {
+  loanRef: bigint; mint: PublicKey; tokenProgram: PublicKey; amount: bigint; asset?: PublicKey;
+  /** the recorded payout account; undefined for a closed loan with an older (98-byte) receipt */
+  payoutTo?: PublicKey;
+  /** the loan is open (Slot) or closed (receipt) */
+  closed: boolean;
+}
+
+/**
+ * The borrower's excess in the slot's inbox for `mint` (default: the loan asset): everything above `held` and above
+ * what the loan may still credit (principal - repaid in the loan asset, 0 in any other mint), as return_excess
+ * computes it. 0 for a slot that never lent or a ref with no receipt.
+ */
+export async function loanExcess(connection: Connection, loanRef: bigint, mint?: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<LoanExcess> {
+  const st = await loanStatus(connection, loanRef, programId);
+  let principal = 0n, repaid = 0n, asset: PublicKey | undefined, payoutTo: PublicKey | undefined;
+  if (st.state === 'open' && st.slot.funded) ({ principal, repaid, asset, payoutTo } = st.slot);
+  else if (st.state === 'closed' && st.receipt) ({ principal, repaid, asset, payoutTo } = st.receipt);
+  const m = mint ?? asset;
+  if (!m) return { loanRef, mint: PublicKey.default, tokenProgram: SPL_TOKEN_PROGRAM_ID, amount: 0n, closed: st.state === 'closed' };
+  const mintInfo = await connection.getAccountInfo(m, 'confirmed');
+  const tokenProgram = mintInfo?.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : SPL_TOKEN_PROGRAM_ID;
+  const [inbox, ledger] = await connection.getMultipleAccountsInfo([slotInbox(loanRef, m, tokenProgram, programId), ledgerPda(loanRef, m, programId)], 'confirmed');
+  const held = ledger && ledger.owner.equals(programId) ? decodeLedger(ledger.data).held : 0n;
+  const room = asset && m.equals(asset) && principal > repaid ? principal - repaid : 0n;
+  const above = tokenAmount(inbox) - held - room;
+  return { loanRef, mint: m, tokenProgram, amount: asset && above > 0n ? above : 0n, asset, payoutTo, closed: st.state === 'closed' };
+}
+
+/**
+ * Sends the borrower's excess back (stream_loan return_excess; anyone may, `payer` pays the fee and, for another
+ * mint, the rent of the payout owner's token account if it is missing). With `owner` (the payout account's owner,
+ * signing) it goes to `destination` (default: the owner's associated token account, created if needed). Throws when
+ * nothing is waiting, or when a closed loan's older receipt records no payout account.
+ */
+export async function returnExcess(
+  connection: Connection, payer: Keypair, loanRef: bigint, opts: { mint?: PublicKey; programId?: PublicKey; owner?: Keypair; destination?: PublicKey } = {},
+): Promise<SentTx & { amount: bigint }> {
+  const programId = opts.programId ?? LOCALNET_LOAN_PROGRAM_ID;
+  const ex = await loanExcess(connection, loanRef, opts.mint, programId);
+  if (ex.amount <= 0n) throw new Error(`no borrower excess waiting for loan ${loanRef}`);
+  if (!ex.payoutTo) throw new Error(`loan ${loanRef} was closed before the overpay cap: its receipt records no payout account`);
+  const tp = ex.tokenProgram;
+  const pre: TransactionInstruction[] = [];
+  let destination: PublicKey;
+  if (opts.owner) {
+    destination = opts.destination ?? associatedTokenAddress(opts.owner.publicKey, ex.mint, tp);
+    if (!opts.destination) pre.push(createAtaIdempotentIx(payer.publicKey, opts.owner.publicKey, ex.mint, tp));
+  } else if (ex.asset && ex.mint.equals(ex.asset)) {
+    destination = ex.payoutTo;
+  } else {
+    const owner = tokenOwner(await connection.getAccountInfo(ex.payoutTo, 'confirmed'));
+    if (!owner) throw new Error(`payout account ${ex.payoutTo.toBase58()} cannot be read: its owner must sign to redirect the excess`);
+    destination = associatedTokenAddress(owner, ex.mint, tp);
+    pre.push(createAtaIdempotentIx(payer.publicKey, owner, ex.mint, tp));
+  }
+  const tx = await send(connection, payer, [...pre, returnExcessIx(loanRef, ex.mint, ex.payoutTo, destination, tp, programId, opts.owner?.publicKey)], {
+    signers: opts.owner && !opts.owner.publicKey.equals(payer.publicKey) ? [opts.owner] : [],
+  });
+  return { ...tx, amount: ex.amount };
+}
+
 /** Same rule as the program: unpaid principal once expiry + GRACE has passed (`pending`: unsynced inbox value plus the pool escrow, which count as paid). */
 export function shortfallOf(s: SlotAccount, now: bigint, pending = 0n): bigint {
   if (!s.funded || s.settled || s.expiry === 0n) return 0n;
@@ -357,6 +642,8 @@ export class SolanaLoanLenderWallet {
     readonly programId: PublicKey = LOCALNET_LOAN_PROGRAM_ID,
     /** owner of the fee treasury accounts: stream_loan fee::TREASURY of the build this wallet talks to */
     readonly treasuryOwner: PublicKey = LOAN_TREASURY,
+    /** the safety_pool whose covers close_slot checks (stream_loan safety::SAFETY_POOL_ID); known for localnet and mainnet */
+    readonly safetyProgram: PublicKey | undefined = safetyPoolFor(programId),
   ) {
     // localnet defaults against any other stipend_pool are a wrong-cluster setup (the program would refuse
     // the treasury, or the ids would not be the deployed ones): demand explicit ids instead
@@ -491,8 +778,133 @@ export class SolanaLoanLenderWallet {
 
   async loan(loanRef: bigint): Promise<SlotAccount> {
     const info = await this.connection.getAccountInfo(slotPda(loanRef, this.programId), 'confirmed');
-    if (!info) throw new Error(`no slot ${loanRef}`);
+    if (!info) {
+      const st = await loanStatus(this.connection, loanRef, this.programId);
+      throw new Error(st.state === 'closed' ? `slot ${loanRef} is closed (the loan is finished; see status())` : `no slot ${loanRef}`);
+    }
     return decodeSlot(info.data);
+  }
+
+  /** Where `loanRef` stands: open (the Slot), closed (the lender reclaimed its rent; the receipt's final figures), or none. */
+  status(loanRef: bigint): Promise<LoanStatus> {
+    return loanStatus(this.connection, loanRef, this.programId);
+  }
+
+  /** This lender's slots whose rent `close` reclaims: settled loans (and, with includeUnfunded, slots that never lent). */
+  reclaimable(opts: { includeUnfunded?: boolean } = {}) {
+    return reclaimableSlots(this.connection, this.signer.publicKey, this.programId, opts);
+  }
+
+  /** This lender's closed loans (ClosedSlot receipts). */
+  closed(): Promise<ClosedSlotAccount[]> {
+    return closedSlots(this.connection, this.signer.publicKey, this.programId);
+  }
+
+  /**
+   * Closes the slot of a finished loan and takes its rent back (close_slot). A settled loan: routed shares still in
+   * the inbox are synced to this lender first (creating its token account if needed) and what is held is collected;
+   * an open safety_pool cover of the loan is released in the same transaction (release_cover is permissionless and
+   * succeeds on a settled loan). A slot that never lent closes as it is. Returns the close transaction and the
+   * lamports it refunded net of the receipt (the SlotClosed event). A repaid loan may close with borrower excess still
+   * in its inbox; `returnExcess: true` sends it back right after (best effort, a separate return_excess transaction;
+   * anyone may do it later). Off by default: a caller that allowlists the instructions it sends must list
+   * stream_loan `return_excess` before turning it on.
+   */
+  async close(loanRef: bigint, opts: { returnExcess?: boolean } = {}): Promise<SentTx & { refunded: bigint }> {
+    const s = await this.loan(loanRef);
+    if (!s.lender.equals(this.signer.publicKey)) throw new Error(`slot ${loanRef} belongs to another lender`);
+    const pre: TransactionInstruction[] = [];
+    let loan: { asset: PublicKey; tokenProgram: PublicKey } | undefined;
+    if (s.funded) {
+      if (!s.settled) throw new Error(`loan ${loanRef} is not settled: settle it first`);
+      const sub = await this.subrogation(loanRef);
+      if (sub && sub.paid < sub.owed && s.repaid < s.principal) {
+        throw new Error(`loan ${loanRef} was slashed and the safety pool has recovered ${sub.paid} of ${sub.owed}: the slot stays open until it has`);
+      }
+      loan = { asset: s.asset, tokenProgram: s.tokenProgram };
+      const inbox = slotInbox(loanRef, s.asset, s.tokenProgram, this.programId);
+      if ((await this.pool.tokenBalance(inbox)) > 0n) {
+        await this.pool.ensureAta(this.signer, s.asset, this.signer.publicKey);
+        await send(this.connection, this.signer, [syncIx(this.signer.publicKey, loanRef, s.asset, s.lender, s.tokenProgram, this.programId, (await this.subrogation(loanRef))?.to)]);
+        if (((await this.ledger(loanRef, s.asset))?.held ?? 0n) > 0n) await this.collect(loanRef, s.asset);
+      }
+      if (!this.safetyProgram) throw new Error('pass the safety_pool program id of this cluster to SolanaLoanLenderWallet');
+      const cover = await this.connection.getAccountInfo(coverPda(this.safetyProgram, loanRef), 'confirmed');
+      if (cover && cover.owner.equals(this.safetyProgram)) {
+        const c = decodeCover(cover.data);
+        if (!c.paid && !c.released) {
+          pre.push(releaseCoverIx(this.safetyProgram, c.mint, loanRef, loanAccounts(loanRef, s.asset, s.tokenProgram, this.programId, this.pool.programId)));
+        }
+      }
+    }
+    const tx = await send(this.connection, this.signer, [...pre, closeSlotIx(this.signer.publicKey, loanRef, loan, this.programId, this.safetyProgram)]);
+    const ev = slotClosedEvents(tx.logs ?? []).find((e) => e.loanRef === loanRef);
+    // a repaid loan may close with borrower excess still in the inbox: send it back when asked (best effort; anyone may later)
+    if (s.funded && opts.returnExcess) await this.returnExcess(loanRef).catch(() => undefined);
+    return { ...tx, refunded: ev?.lamportsRefunded ?? 0n };
+  }
+
+  /** The borrower's excess waiting in the loan's inbox for `mint` (default: the loan asset); see loanExcess. */
+  excess(loanRef: bigint, mint?: PublicKey): Promise<LoanExcess> {
+    return loanExcess(this.connection, loanRef, mint, this.programId);
+  }
+
+  /** Permissionless: sends the borrower's excess to its payout account (stream_loan return_excess); this wallet pays the fee. */
+  returnExcess(loanRef: bigint, mint?: PublicKey): Promise<SentTx & { amount: bigint }> {
+    return returnExcess(this.connection, this.signer, loanRef, { mint, programId: this.programId });
+  }
+
+  /**
+   * After a close: hands this lender what a pledge routed to the closed loan in `mint` (default: the loan asset), up
+   * to what the loan still owes (principal - receipt.repaid; nothing in another mint), pulling the pool escrow of the
+   * slot into a re-created inbox first. What the mint's Ledger still holds for this lender (shares in another mint held
+   * before the overpay cap) is paid first, and the Ledger closed. The rest is the borrower's: with `returnExcess: true`
+   * and a v2 receipt it is sent back to the payout account in the same transaction (return_excess; off by default, see
+   * close). An emptied inbox is closed again (its rent comes back). Throws when nothing reached the loan, or when
+   * nothing is owed to this lender and the excess is not (or cannot be) sent back.
+   */
+  async sweepClosed(loanRef: bigint, mint?: PublicKey, destination?: PublicKey, opts: { returnExcess?: boolean } = {}): Promise<SentTx> {
+    const st = await this.status(loanRef);
+    if (st.state !== 'closed' || !st.receipt) throw new Error(`slot ${loanRef} has no closed-loan receipt`);
+    const rc = st.receipt;
+    if (!rc.lender.equals(this.signer.publicKey)) throw new Error(`loan ${loanRef} belongs to another lender`);
+    const m = mint ?? rc.asset;
+    const tp = await this.pool.tokenProgramOf(m);
+    const slot = slotPda(loanRef, this.programId);
+    const inbox = slotInbox(loanRef, m, tp, this.programId);
+    const escrowed = await this.pool.tokenBalance(slotEscrow(loanRef, m, this.pool.programId, this.programId));
+    const ixs = escrowed > 0n
+      ? [createAtaIdempotentIx(this.signer.publicKey, slot, m, tp), pullLenderShareIx(this.pool.programId, m, tp, fieldOf(slot), loanRef, inbox)]
+      : [];
+    const inboxInfo = await this.connection.getAccountInfo(inbox, 'confirmed');
+    if (!ixs.length && !inboxInfo) throw new Error(`nothing reached closed loan ${loanRef} in ${m.toBase58()}`);
+    const ledger = await this.ledger(loanRef, m);
+    const room = m.equals(rc.asset) && rc.principal > rc.repaid ? rc.principal - rc.repaid : 0n;
+    const { fromHeld, fromRoom } = sweepSplit(tokenAmount(inboxInfo) + escrowed, ledger?.held ?? 0n, room);
+    const pay = fromHeld + fromRoom;
+    const rest = tokenAmount(inboxInfo) + escrowed - pay;
+    const sweep = async () => sweepClosedIx(this.signer.publicKey, loanRef, m, destination ?? (await this.pool.ensureAta(this.signer, m, this.signer.publicKey)), tp, this.programId);
+    if (pay > 0n) ixs.push(await sweep());
+    if (rest > 0n && !opts.returnExcess) {
+      if (pay === 0n) throw new Error(`nothing is owed to the lender on closed loan ${loanRef}; the ${rest} waiting is the borrower's (send it back with returnExcess)`);
+    } else if (rest > 0n) {
+      if (!rc.payoutTo) {
+        if (pay === 0n) throw new Error(`nothing is owed to the lender on closed loan ${loanRef}; the rest is the borrower's and its older receipt records no payout account`);
+      } else {
+        const toBorrower = m.equals(rc.asset) ? rc.payoutTo : tokenOwner(await this.connection.getAccountInfo(rc.payoutTo, 'confirmed'));
+        if (toBorrower) {
+          const dest = m.equals(rc.asset) ? rc.payoutTo : associatedTokenAddress(toBorrower, m, tp);
+          if (!m.equals(rc.asset)) ixs.push(createAtaIdempotentIx(this.signer.publicKey, toBorrower, m, tp));
+          ixs.push(returnExcessIx(loanRef, m, rc.payoutTo, dest, tp, this.programId));
+          ixs.push(await sweep()); // closes the emptied inbox (a Ledger was closed by the first sweep)
+        } else if (pay === 0n) {
+          throw new Error(`nothing is owed to the lender on closed loan ${loanRef}; the borrower's payout account cannot be read`);
+        }
+      }
+    } else if (pay === 0n) {
+      ixs.push(await sweep()); // nothing waiting: just close the inbox
+    }
+    return send(this.connection, this.signer, ixs);
   }
 
   async ledger(loanRef: bigint, mint: PublicKey): Promise<LedgerAccount | undefined> {
@@ -590,11 +1002,12 @@ export class SolanaLoanLenderWallet {
   }
 
   /**
-   * Builds the claim on the loan's live note with the most to claim (`amount` defaults to all of it): the
+   * Builds the claim on the loan's live note with the most to claim (`amount` defaults to all of it, capped at what
+   * the loan still owes: principal - repaid - unsynced inbox - escrow; throws once the loan is repaid): the
    * lender-claim spend payload and the stipend_pool `spend` accounts (lender leg to the slot's inbox, the slot
    * PDA as lender signer). Not sent; see `claim`.
    */
-  async prepareClaim(loanRef: bigint, amount?: bigint, opts: { now?: bigint } = {}): Promise<PreparedLoanClaim> {
+  async prepareClaim(loanRef: bigint, amount?: bigint, opts: { now?: bigint; /** tests only: skip the owed check (the program still refuses) */ uncapped?: boolean } = {}): Promise<PreparedLoanClaim> {
     await this.sync();
     const now = opts.now ?? (await this.pool.now());
     const notes = this.current(loanRef);
@@ -603,11 +1016,23 @@ export class SolanaLoanLenderWallet {
       throw new Error('no live note for this loan');
     }
     const note = notes.reduce((best, n) => (lenderClaimable(n.allowance, now) > lenderClaimable(best.allowance, now) ? n : best));
-    const want = amount ?? lenderClaimable(note.allowance, now);
-    if (want <= 0n) throw new Error('nothing claimable yet');
     const slot = await this.loan(loanRef);
     const mint = note.mint ?? (slot.funded ? slot.asset : undefined);
     if (!mint) throw new Error('mint of the pledged note is unknown');
+    // overpay cap: the program refuses a claim above what the loan still owes (principal - repaid - value already
+    // routed: the unsynced inbox and the slot's pool escrow), and any claim once it is repaid. Valid against the
+    // program before the cap too (it only ever asks for less).
+    let owed: bigint | undefined;
+    if (slot.funded && mint.equals(slot.asset) && !opts.uncapped) {
+      const tp = await this.pool.tokenProgramOf(mint);
+      const [inboxBal, ledger, escrowed] = await Promise.all([
+        this.pool.tokenBalance(slotInbox(loanRef, mint, tp, this.programId)), this.ledger(loanRef, mint),
+        this.pool.tokenBalance(slotEscrow(loanRef, mint, this.pool.programId, this.programId)),
+      ]);
+      const pending = inboxBal > (ledger?.held ?? 0n) ? inboxBal - (ledger?.held ?? 0n) : 0n;
+      owed = claimRoom(slot, pending, escrowed);
+    }
+    const want = claimAmount(lenderClaimable(note.allowance, now), owed, amount, loanRef, slot.repaid >= slot.principal);
     const base = {
       root: this.tree.root, allowance: note.allowance, path: this.tree.path(note.index), amount: want, now, claim: true,
       lender: { lenderAddr: note.lender.lenderAddr, loanRef },

@@ -3,7 +3,7 @@ import { makeAction } from './factory.js';
 export const lendAction = makeAction({
   op: 'h081_lend',
   name: 'H081_LEND',
-  similes: ['lend to an agent', 'open an h081 loan slot', 'make loan terms', 'fund a loan against a proof code', 'claim loan repayments', 'settle a loan', 'check my loans'],
+  similes: ['lend to an agent', 'open an h081 loan slot', 'make loan terms', 'fund a loan against a proof code', 'claim loan repayments', 'settle a loan', 'close a loan slot', 'sweep a closed loan', 'check my loans'],
   examples: [[
     {
       input: { action: 'open', pledgeBps: 4000, confirm: true },
@@ -26,6 +26,11 @@ export const lendAction = makeAction({
       input: { action: 'status', loanRef: '3' },
       output: { status: 'success', slots: [{ loanRef: '3', state: 'funded', principalUsdg: '40', repaidUsdg: '12', outstandingUsdg: '28', claimableUsdg: '1.5', collectableUsdg: '0', shortfall: '0' }] },
       explanation: 'How much of loan #3 is repaid, outstanding and claimable now.',
+    },
+    {
+      input: { action: 'sweep', loanRef: '3' },
+      output: { status: 'success', sent: true, action: 'sweep', loanRef: '3', signatures: ['5Kx…'], collectedUsdg: '4', returnedToBorrowerUsdg: '3' },
+      explanation: 'Loan #3 is closed and 7 USDG reached it since: the 4 it still owed go to the lender, the 3 beyond the principal go back to the borrower.',
     },
   ]],
 });

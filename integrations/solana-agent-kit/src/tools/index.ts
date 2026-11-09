@@ -25,7 +25,7 @@ export const h081AllowanceDelegate = (agent: AgentLike, input: { allowanceId: st
 export const h081AllowanceReclaim = (agent: AgentLike, input: { allowanceId: string; confirm?: boolean }) => run(agent, 'h081_allowance_reclaim', input);
 
 export const h081Lend = (agent: AgentLike, input: {
-  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close'; pledgeBps?: number; proofCode?: string; loanRef?: string;
+  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close' | 'sweep'; pledgeBps?: number; proofCode?: string; loanRef?: string;
   principal?: string; principalUsdg?: string; amount?: string; usdg?: string; confirm?: boolean;
 }) => run(agent, 'h081_lend', input);
 
