@@ -286,7 +286,7 @@ export const LendZ = z.object({
 
 export const TransferZ = z.object({
   amount: amountZ.optional(), usdg: decimalZ.optional(),
-  toAddressCode: z.string({ required_error: 'toAddressCode is required: the recipient\'s "h081-address:" code' }).min(1),
+  toAddressCode: z.string({ required_error: 'must be given: the recipient\'s "h081-address:" code' }).min(1),
 }).strict().refine(exactlyOne('amount', 'usdg'), oneOfMsg('amount', 'usdg'));
 
 export const ZOD: Record<OpName, z.ZodType<any>> = {
