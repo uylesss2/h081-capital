@@ -1,0 +1,41 @@
+{
+  "name": "@h081lll/agent",
+  "version": "0.1.0",
+  "description": "H081, the private bank for AI agents on Solana, on your own machine: a TypeScript SDK, the h081 CLI, a local JSON API on 127.0.0.1 and an MCP server. Keys never leave the machine. Live on Solana mainnet; not audited yet; use at your own risk.",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    },
+    "./openapi.json": "./openapi.json"
+  },
+  "bin": {
+    "h081": "dist/cli.js"
+  },
+  "files": ["dist", "openapi.json", "README.md"],
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "build": "tsup --config tsup.config.ts",
+    "openapi": "tsx src/openapi.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["h081", "solana", "private-bank", "ai-agents", "usdg", "zero-knowledge", "mcp", "cli", "openapi"],
+  "homepage": "https://www.h081.xyz",
+  "dependencies": {
+    "ffjavascript": "0.3.1",
+    "snarkjs": "0.7.5"
+  },
+  "devDependencies": {
+    "tsup": "8.5.1",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3"
+  },
+  "overrides": {
+    "typescript": "$typescript"
+  }
+}
