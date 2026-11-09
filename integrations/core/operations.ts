@@ -11,7 +11,12 @@ import { parseAmount } from './units.js';
 
 /** What an operation needs from the bank (H081Bank satisfies it; tests pass a mock). */
 export type BankLike = Pick<H081Bank, 'deposit' | 'withdraw' | 'balance' | 'loanQuote' | 'borrow' | 'stakeView' | 'stake' | 'requestUnstake' | 'unstake' | 'protocolInfo' | 'pay' | 'codeContext'
-  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose'> & { decimals: number };
+  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'transfer'> & { decimals: number };
+
+/** Input an operation refuses (a schema or argument check); nothing was sent. */
+export class InputError extends Error {
+  constructor(message: string) { super(message); this.name = 'InputError'; }
+}
 
 export type Args = Record<string, unknown>;
 
@@ -218,6 +223,13 @@ export async function opStake(bank: BankLike, args: Args) {
   }
 }
 
+export async function opTransfer(bank: BankLike, args: Args) {
+  const amount = parseAmount(args, 'usdg', bank.decimals);
+  const code = String(args.toAddressCode ?? '').trim();
+  if (!code) throw new InputError('toAddressCode is required: the recipient\'s "h081-address:" code');
+  return bank.transfer(amount, code);
+}
+
 export async function opProtocolInfo(bank: BankLike, _args: Args) {
   return bank.protocolInfo();
 }
@@ -235,17 +247,18 @@ export const OPERATIONS: Record<OpName, (bank: BankLike, args: Args) => Promise<
   h081_lend: opLend,
   h081_stake: opStake,
   h081_protocol_info: opProtocolInfo,
+  h081_transfer: opTransfer,
 };
 
 /** Checks `args` against the operation's zod schema (strict: unknown or misplaced fields are refused). Both front ends
  *  (MCP tools and Agent Kit methods) go through runOp, so they accept and refuse exactly the same inputs. */
 export function validateArgs(name: OpName, args: Args | undefined): Args {
   const schema = ZOD[name];
-  if (!schema) throw new Error(`unknown operation ${name}`);
+  if (!schema) throw new InputError(`unknown operation ${name}`);
   const parsed = schema.safeParse(args ?? {});
   if (!parsed.success) {
     const where = (i: { path: (string | number)[] }) => i.path.join('.') || 'input';
-    throw new Error(parsed.error.issues.map((i) => (/^must /.test(i.message) ? `${where(i)} ${i.message}` : `${where(i)}: ${i.message}`)).join('; ') + '. Nothing was sent.');
+    throw new InputError(parsed.error.issues.map((i) => (/^must /.test(i.message) ? `${where(i)} ${i.message}` : `${where(i)}: ${i.message}`)).join('; ') + '. Nothing was sent.');
   }
   return parsed.data as Args;
 }

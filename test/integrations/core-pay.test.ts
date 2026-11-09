@@ -186,7 +186,7 @@ describe('H081Bank.pay', () => {
     // above the 100 USDG free tier: no stake refuses before proving, a stake names the agent wallet as operator
     const big = await open({ payees: [payee] });
     const payB = holding(big.bank.owner, [allowance(big.bank, big.bank.owner, { lifetimeCap: USD(500) })]);
-    await expect(big.bank.pay({ amount: USD(150), to: payee })).rejects.toThrow(/above the relayer's anonymous free tier \(100 USDG per 30 days\).*Nothing was sent\. Stake more H081 \(h081_stake\), pay at most 100 USDG per 30 days through the relayer, or pass direct: true/);
+    await expect(big.bank.pay({ amount: USD(150), to: payee })).rejects.toThrow(/is more than the relayer takes with nothing staked \(up to 100 USDG per withdrawal; above that, H081 staked in capacity_stake sets a 30-day limit.*Nothing was sent\. Stake more H081 \(h081_stake\), pay at most 100 USDG at a time, or pass direct: true/);
     expect(payB).not.toHaveBeenCalled();
     const staked = await open({ payees: [payee], stake: { staked: 500_000_000n, pending: 0n, readyAt: 0n } });
     const payS = holding(staked.bank.owner, [allowance(staked.bank, staked.bank.owner, { lifetimeCap: USD(500) })]);

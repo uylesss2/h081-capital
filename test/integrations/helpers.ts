@@ -159,6 +159,7 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
     lendClose: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
       ? { sent: true, action: 'close', loanRef: req.loanRef, signatures: ['sigClose'] }
       : { sent: false, dryRun: true, plan: { action: 'close', loanRef: req.loanRef }, next: 'nothing was sent' })),
+    transfer: vi.fn(async (amount: bigint, _code: string) => ({ signature: 'sigTransfer', amount, amountUsdg: (Number(amount) / 1e6).toString(), to: 'shielded', via: 'direct', shielded: 1n, shieldedUsdg: '0.000001' })),
     ...over,
   };
   return b as unknown as BankLike & Record<keyof BankLike, ReturnType<typeof vi.fn>>;

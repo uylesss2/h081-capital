@@ -117,6 +117,11 @@ describe('h081 MCP server', () => {
     const capped = await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', confirm: true });
     expect(capped).toMatchObject({ isError: true });
     expect(capped.content[0].text).toMatch(/H081_MAX_LEND.*Nothing was sent/);
+    // the same stable code and retry flag as the local API
+    expect(capped.structuredContent).toMatchObject({ error: { code: 'over_operator_ceiling', retryable: false } });
+    expect((await call('h081_lend', { action: 'fund' })).structuredContent).toMatchObject({ error: { code: 'bad_request', retryable: false } });
+    expect((await call('h081_transfer', { usdg: '1', toAddressCode: 'h081-address:abc' })).structuredContent).toMatchObject({ amount: '1000000', to: 'shielded' });
+    expect(bank.transfer).toHaveBeenLastCalledWith(1_000_000n, 'h081-address:abc');
     const d = ((await mcp.handle({ jsonrpc: '2.0', id: 6, method: 'tools/list' }))!.result as { tools: Array<{ name: string; description: string }> }).tools.find((t) => t.name === 'h081_lend')!.description;
     expect(d).toMatch(/WITHOUT `confirm: true` open, fund, settle and close send NOTHING/);
     expect(d).toMatch(/H081_MAX_LEND/);

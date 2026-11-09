@@ -45,9 +45,9 @@ import {
 import { createAtaIdempotentIx, readCapacity, requestUnstakeIx, stakeIx, unstakeIx } from '../../src/solana/token.js';
 import type { PoolEventLogSnapshot } from '../../src/solana/events.js';
 import { FlatDirProver } from './circuits.js';
-import { type CodeContext, PLEDGE_BPS_MAX, PLEDGE_BPS_MIN, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms } from './codes.js';
+import { type CodeContext, PLEDGE_BPS_MAX, PLEDGE_BPS_MIN, decodeAddressCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms } from './codes.js';
 import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, checkCluster, isMainnetConfig, rpcHost } from './constants.js';
-import { type ProgramKind, explained } from './errors.js';
+import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from './errors.js';
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
 
@@ -87,6 +87,15 @@ export interface WithdrawResult {
   signature: string; amount: bigint; fee: bigint; received: bigint; receivedUsdg: string; to: string; via: 'relayer' | 'direct'; shielded: bigint; shieldedUsdg: string;
   /** the agent wallet, when it was named to the relayer as capacity operator (public amount above the free tier) */
   operator?: string;
+}
+
+export interface TransferResult {
+  signature: string; amount: bigint; amountUsdg: string;
+  /** always "shielded": the recipient is hidden on chain */
+  to: 'shielded';
+  /** the agent key sends it */
+  via: 'direct';
+  shielded: bigint; shieldedUsdg: string;
 }
 
 export interface PayRequest {
@@ -338,15 +347,24 @@ export class H081Bank {
     } catch (e) { this.log(`could not save the sub-account list: ${(e as Error).message}`); }
   }
 
-  /** Opens the bank: crypto init, cluster check, event-log cache. No transaction is sent. */
+  /**
+   * Opens the bank: crypto init, cluster check, event-log cache. No transaction is sent. An RPC that cannot be reached
+   * at all is reported as RpcUnreachableError ("cannot reach the Solana RPC at <host>: <cause>"), naming only the host.
+   */
   static async open(opts: BankOptions): Promise<H081Bank> {
     await initCrypto();
     const connection = opts.connection ?? new Connection(opts.config.rpcUrl, 'confirmed');
-    if (!opts.skipClusterCheck) checkCluster(opts.config, await connection.getGenesisHash());
-    const prover = opts.prover ?? new FlatDirProver(opts.config.circuitsDir);
-    let bank = new H081Bank(opts, connection, prover);
-    if (!(await bank.loadCache())) bank = new H081Bank(opts, connection, prover); // the cache did not match the chain
-    return bank;
+    try {
+      if (!opts.skipClusterCheck) checkCluster(opts.config, await connection.getGenesisHash());
+      const prover = opts.prover ?? new FlatDirProver(opts.config.circuitsDir);
+      let bank = new H081Bank(opts, connection, prover);
+      if (!(await bank.loadCache())) bank = new H081Bank(opts, connection, prover); // the cache did not match the chain
+      return bank;
+    } catch (e) {
+      const why = networkFailure(e);
+      if (why) throw new RpcUnreachableError(rpcHost(opts.config.rpcUrl), why, { cause: e });
+      throw e;
+    }
   }
 
   get programIds(): Partial<Record<ProgramKind, string>> {
@@ -602,13 +620,16 @@ export class H081Bank {
     const tier = fromUnits(terms.freeTier, d);
     if (cap && pub > terms.freeTier + cap.shieldCap) {
       throw new Error(
-        `${fromUnits(pub, d)} ${sym} is above the relayer's anonymous free tier (${tier} ${sym} per 30 days) plus the agent wallet's staked capacity ` +
-        `(${fromUnits(cap.shieldCap, d)} ${sym} from ${fromUnits(cap.staked, MAINNET.h081.decimals)} ${MAINNET.h081.symbol} in capacity_stake). Nothing was sent. ` +
-        `Stake more ${MAINNET.h081.symbol} (h081_stake), ${verb} at most ${fromUnits(terms.freeTier + cap.shieldCap, d)} ${sym} per 30 days through the relayer, or ${directHint}.`,
+        `${fromUnits(pub, d)} ${sym} is more than the relayer takes with nothing staked (up to ${tier} ${sym} per withdrawal; above that, ` +
+        `${MAINNET.h081.symbol} staked in capacity_stake sets a 30-day limit: ` +
+        (cap.staked === 0n
+          ? `the agent wallet has none staked). Nothing was sent. `
+          : `the agent wallet's ${fromUnits(cap.staked, MAINNET.h081.decimals)} ${MAINNET.h081.symbol} staked allows ${fromUnits(terms.freeTier + cap.shieldCap, d)} ${sym} per 30 days). Nothing was sent. `) +
+        `Stake more ${MAINNET.h081.symbol} (h081_stake), ${verb} at most ${tier} ${sym} at a time, or ${directHint}.`,
       );
     }
     const seed = this.signer.secretKey.subarray(0, 32);
-    this.log(`${fromUnits(pub, d)} ${sym} is above the free tier of ${tier}: the agent wallet is named to the relayer as capacity operator`);
+    this.log(`${fromUnits(pub, d)} ${sym} is above ${tier} ${sym}: the agent wallet is named to the relayer as capacity operator (its H081 stake sets a 30-day limit)`);
     return { operator: this.signer.publicKey, sign: (m) => ed25519.sign(m, seed) };
   }
 
@@ -629,7 +650,7 @@ export class H081Bank {
       } else {
         // fail closed: a configured relayer that cannot be used never turns into a direct send
         try { terms = await this.relayTerms(); } catch (e) {
-          throw new Error(`${(e as Error).message}. The withdrawal was not sent: retry later, or ${directHint}.`);
+          throw new Error(`${(e as Error).message}. The withdrawal was not sent: retry later, or ${directHint}.`, { cause: e });
         }
       }
     }
@@ -789,7 +810,7 @@ export class H081Bank {
       else {
         // fail closed: a configured relayer that cannot be used never turns into a direct send
         try { terms = await this.relayTerms(); } catch (e) {
-          throw new Error(`${(e as Error).message}. The payment was not sent: retry later, or ${directHint}.`);
+          throw new Error(`${(e as Error).message}. The payment was not sent: retry later, or ${directHint}.`, { cause: e });
         }
       }
     }
@@ -830,6 +851,35 @@ export class H081Bank {
           privacy: `paid from an allowance pledged to loan slot ${pick.owned.lender?.loanRef}: the slot and the lender share ${u(share)} are public in this transaction, which links it to the borrower wallet (the slot's payout account) and reveals the gross amount ${u(amount)}`,
         } : {}),
       };
+    } catch (e) {
+      this.saveCache();
+      throw explained(e, { program: 'pool', ids: this.programIds });
+    }
+  }
+
+  // ---- transfer from the main shielded balance
+
+  /**
+   * Pays `amount` USDG from this account's main shielded balance to another account's shielded address, given as its
+   * "h081-address:" code (checksum, kind and network checked before anything else). Note to note: the amount and the
+   * recipient stay hidden; the agent key sends it (there is no public leg a relayer could take its fee from), so the
+   * chain shows that the agent wallet used the bank. Needs about 0.02 SOL and the transact circuit.
+   */
+  async transfer(amount: bigint, toAddressCode: string): Promise<TransferResult> {
+    const d = this.decimals, sym = MAINNET.usdg.symbol;
+    if (amount <= 0n) throw new Error('the amount must be positive');
+    const to = decodeAddressCode(this.codeContext, toAddressCode);
+    if (to.pk === this.account.keys.pk) throw new Error('that is this account\'s own shielded address; a transfer to itself does nothing. Nothing was sent.');
+    await this.sync();
+    const shielded = this.owner.balance(this.usdg);
+    if (amount > shielded) throw new Error(`the shielded balance is ${fromUnits(shielded, d)} ${sym}, less than ${fromUnits(amount, d)}. Nothing was sent.`);
+    await this.needSol(DEPOSIT_SOL_MIN, 'a transfer the agent key sends');
+    await this.requireArtifacts('transact');
+    try {
+      const r = await this.owner.transfer(this.usdg, amount, to);
+      this.saveCache();
+      const left = this.owner.balance(this.usdg);
+      return { signature: r.tx.signature, amount, amountUsdg: fromUnits(amount, d), to: 'shielded', via: 'direct', shielded: left, shieldedUsdg: fromUnits(left, d) };
     } catch (e) {
       this.saveCache();
       throw explained(e, { program: 'pool', ids: this.programIds });

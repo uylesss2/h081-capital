@@ -210,7 +210,7 @@ describe('H081Bank', () => {
 
     // over the free tier plus the staked capacity: refused before any proof, naming the stake, the limit and direct: true
     await expect(staked.bank.withdraw(60_000_000_000n)).rejects.toThrow(
-      /above the relayer's anonymous free tier \(100 USDG per 30 days\) plus the agent wallet's staked capacity \(50000 USDG from 500 H081 in capacity_stake\)\. Nothing was sent\. Stake more H081 \(h081_stake\), withdraw at most 50100 USDG per 30 days through the relayer, or pass direct: true/,
+      "is more than the relayer takes with nothing staked (up to 100 USDG per withdrawal; above that, H081 staked in capacity_stake sets a 30-day limit: the agent wallet's 500 H081 staked allows 50100 USDG per 30 days). Nothing was sent. Stake more H081 (h081_stake), withdraw at most 100 USDG at a time, or pass direct: true",
     );
     expect(wd).toHaveBeenCalledTimes(2);
 
@@ -219,7 +219,7 @@ describe('H081Bank', () => {
     vi.spyOn(none.bank.owner, 'sync').mockResolvedValue(undefined);
     vi.spyOn(none.bank.owner, 'balance').mockReturnValue(200_000_000n);
     const wd2 = vi.spyOn(none.bank.owner, 'withdraw').mockResolvedValue({ tx: { signature: 'sigW', computeUnits: 1, logs: [] }, proof: {} as never });
-    await expect(none.bank.withdraw(150_000_000n)).rejects.toThrow(/staked capacity \(0 USDG from 0 H081 in capacity_stake\)[\s\S]*direct: true/);
+    await expect(none.bank.withdraw(150_000_000n)).rejects.toThrow(/sets a 30-day limit: the agent wallet has none staked\)\. Nothing was sent\.[\s\S]*direct: true/);
     expect(wd2).not.toHaveBeenCalled();
     expect(await none.bank.withdraw(150_000_000n, undefined, true)).toMatchObject({ via: 'direct', fee: 0n });
   });

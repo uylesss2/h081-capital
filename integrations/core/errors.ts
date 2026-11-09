@@ -134,3 +134,154 @@ export function explained(e: unknown, opts: ExplainOptions = {}): H081Error {
   if (e instanceof H081Error) return e;
   return new H081Error(explainProgramError(e, opts), e);
 }
+
+// ------------------------------------------------------------------ stable error codes (the local API, the CLI, MCP)
+
+/** A stable code, its HTTP status, and whether the same call may simply be tried again later. */
+export interface ErrorCodeInfo { status: number; retryable: boolean; description: string }
+
+export const ERROR_CODES = {
+  unauthorized: { status: 401, retryable: false, description: 'missing or wrong bearer token' },
+  forbidden_origin: { status: 403, retryable: false, description: 'the Host or Origin header is not allowed (the gateway answers 127.0.0.1 and localhost only)' },
+  not_found: { status: 404, retryable: false, description: 'no such route' },
+  bad_request: { status: 400, retryable: false, description: 'the request body or query is invalid; the message says which field' },
+  unsupported_media_type: { status: 415, retryable: false, description: 'a POST body must be Content-Type: application/json' },
+  idempotency_key_required: { status: 400, retryable: false, description: 'a confirmed write needs an Idempotency-Key header (1-128 of A-Z a-z 0-9 _ . : -)' },
+  idempotency_key_reused: { status: 422, retryable: false, description: 'this Idempotency-Key was used for a different request' },
+  in_progress: { status: 409, retryable: true, description: 'a request with this Idempotency-Key is still running' },
+  outcome_unknown: { status: 409, retryable: false, description: 'the gateway stopped while this request was running; check /v1/balance before retrying with a new key' },
+  invalid_code: { status: 400, retryable: false, description: 'an h081-* code failed its checksum, kind or network check' },
+  insufficient_shielded: { status: 409, retryable: false, description: 'the shielded balance is too low' },
+  insufficient_wallet_usdg: { status: 409, retryable: false, description: 'the agent wallet holds too little USDG' },
+  needs_sol: { status: 409, retryable: false, description: 'the agent wallet needs more SOL (details.needSol)' },
+  cap_per_deposit: { status: 409, retryable: false, description: 'over the per-deposit cap' },
+  cap_total: { status: 409, retryable: false, description: 'the bank is at its total deposit cap' },
+  deposits_paused: { status: 409, retryable: false, description: 'deposits are paused; withdrawals still work' },
+  over_operator_ceiling: { status: 409, retryable: false, description: 'over an H081_MAX_* ceiling set on this machine' },
+  needs_stake: { status: 409, retryable: false, description: 'above what the relayer relays with nothing staked; stake H081 or split the amount' },
+  allowance_blocked: { status: 409, retryable: false, description: 'no allowance can pay this amount now (the message names the cap)' },
+  relayer_unavailable: { status: 503, retryable: true, description: 'the relayer is unreachable or refused; nothing was sent (reason in details)' },
+  relayer_busy: { status: 503, retryable: true, description: 'the relayer is busy; nothing was sent' },
+  rate_limited: { status: 429, retryable: true, description: 'too many requests (relayer 429, or the local send limit); see Retry-After' },
+  busy: { status: 503, retryable: true, description: 'the local queue is full; see Retry-After' },
+  stale_root: { status: 409, retryable: true, description: 'the proof used a Merkle root or timestamp that is no longer current; try again' },
+  in_flight: { status: 409, retryable: true, description: 'a note in this operation is already being spent; try again shortly' },
+  already_spent: { status: 409, retryable: false, description: 'a note in this operation was already spent' },
+  simulation_failed: { status: 422, retryable: false, description: 'the transaction failed in simulation; nothing was sent' },
+  program_error: { status: 422, retryable: false, description: 'an on-chain program refused it (Anchor name in details)' },
+  rpc_unreachable: { status: 502, retryable: true, description: 'the Solana RPC cannot be reached; set H081_RPC_URL' },
+  circuits_missing: { status: 503, retryable: false, description: 'the proving files are missing; run h081 fetch-circuits' },
+  circuit_hash_mismatch: { status: 503, retryable: false, description: 'a proving file does not match its pinned sha256' },
+  not_available: { status: 501, retryable: false, description: 'not available in this version' },
+  no_key: { status: 500, retryable: false, description: 'no agent key; run h081 init' },
+  internal: { status: 500, retryable: false, description: 'an unexpected error' },
+} as const satisfies Record<string, ErrorCodeInfo>;
+
+export type ErrorCode = keyof typeof ERROR_CODES;
+
+/** An error with a stable code (the gateway and the CLI throw these; `classify` keeps them as they are). */
+export class CodedError extends Error {
+  constructor(readonly code: ErrorCode, message: string, readonly details?: Record<string, unknown>, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'CodedError';
+  }
+}
+
+/** The RPC could not be reached at all (fetch failed, refused, DNS). Only the host is ever named. */
+export class RpcUnreachableError extends CodedError {
+  constructor(host: string, cause: string, options?: { cause?: unknown }) {
+    super('rpc_unreachable', `cannot reach the Solana RPC at ${host}: ${cause}. Set H081_RPC_URL.`, { host }, options);
+    this.name = 'RpcUnreachableError';
+  }
+}
+
+const NETWORK_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
+
+/** Why a request failed at the network level (undefined: it reached a server). */
+export function networkFailure(e: unknown): string | undefined {
+  for (let x: unknown = e, i = 0; x && i < 6; x = (x as { cause?: unknown }).cause, i++) {
+    const o = x as { code?: unknown; message?: unknown; errors?: unknown[] };
+    if (typeof o.code === 'string' && NETWORK_CODES.has(o.code)) return o.code;
+    if (Array.isArray(o.errors)) for (const sub of o.errors) { const c = (sub as { code?: unknown })?.code; if (typeof c === 'string' && NETWORK_CODES.has(c)) return c; }
+    const m = typeof o.message === 'string' ? o.message : '';
+    const known = /\b(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH)\b/.exec(m);
+    if (known) return known[1];
+    if (/fetch failed|failed to fetch|getaddrinfo|socket hang up/i.test(m) && !(x as { cause?: unknown }).cause) return 'fetch failed';
+  }
+  return undefined;
+}
+
+export interface Classified {
+  code: ErrorCode; status: number; retryable: boolean; message: string; details?: Record<string, unknown>;
+}
+
+const ANCHOR_CODE: Partial<Record<string, ErrorCode>> = {
+  DepositsPaused: 'deposits_paused', DepositTooLarge: 'cap_per_deposit', DepositCapExceeded: 'cap_total', DepositShortfall: 'insufficient_wallet_usdg',
+  AlreadySpent: 'already_spent', UnknownRoot: 'stale_root', StaleTimestamp: 'stale_root',
+};
+
+function relayerCode(e: RelayerError): { code: ErrorCode; details: Record<string, unknown> } {
+  const details: Record<string, unknown> = { relayerStatus: e.status, reason: e.code };
+  if (e.status === 503 && e.code === 'busy') return { code: 'relayer_busy', details };
+  if (e.status === 429) return { code: 'rate_limited', details };
+  if (e.status === 409) {
+    if (e.code === 'in_flight') return { code: 'in_flight', details };
+    if (e.code === 'already_spent') return { code: 'already_spent', details };
+    return { code: 'stale_root', details }; // unknown_root, stale_timestamp
+  }
+  if (e.status === 422) return { code: 'simulation_failed', details };
+  if (e.status === 403 && /capacity/.test(e.code)) return { code: 'needs_stake', details };
+  return { code: 'relayer_unavailable', details };
+}
+
+const make = (code: ErrorCode, message: string, details?: Record<string, unknown>): Classified => ({
+  code, status: ERROR_CODES[code].status, retryable: ERROR_CODES[code].retryable, message, ...(details ? { details } : {}),
+});
+
+const INPUT = /^(give |`?\w+`? must be|enter an amount|at most \d+ decimals|the amount must be positive|"\w+" must be|\w+ is required|\w+ \(the [a-z' ]+ "h081-[a-z-]+:" code\) is required|action must be one of|action "\w+" does not take|days and unlockDays|unlockDays must not|days must be|pledgeBps must|agentIndex must|allowanceId must|loanRef must|direct applies|windowLen must|H081_[A-Z_]+ must)/;
+
+/**
+ * The stable code of any error the bank, the relayer client, the RPC or the gateway throws: its HTTP status,
+ * whether the same call may be retried, and a plain message. Walks `cause` chains (a refused relayer inside a
+ * readable bank error keeps its code). Unknown errors are `internal`.
+ */
+export function classify(e: unknown): Classified {
+  const top = e instanceof Error ? e.message : String(e);
+  // typed errors anywhere in the cause chain first
+  for (let x: unknown = e, i = 0; x && i < 6; x = (x as { cause?: unknown }).cause, i++) {
+    if (x instanceof CodedError) return make(x.code, x === e ? x.message : top, x.details);
+    if (x instanceof RelayerError) { const r = relayerCode(x); return make(r.code, top, r.details); }
+    const o = x as { name?: unknown; reason?: unknown };
+    if (o.name === 'RelayerUnavailableError') return make('relayer_unavailable', top, { reason: o.reason });
+    if (o.name === 'CodeError') return make('invalid_code', top);
+    if (o.name === 'InputError' || o.name === 'ZodError') return make('bad_request', top);
+  }
+  const net = networkFailure(e);
+  if (net && !/relayer/i.test(top)) return make('rpc_unreachable', /cannot reach the Solana RPC/.test(top) ? top : `cannot reach the Solana RPC: ${net}. Set H081_RPC_URL.`);
+  // an on-chain program error, as explainProgramError words it, or an Anchor code in the cause's logs
+  const anchor = /^([A-Z][A-Za-z]+) \((\d+), (stipend_pool|stream_loan|capacity_stake|safety_pool)\)/.exec(top);
+  if (anchor) return make(ANCHOR_CODE[anchor[1]] ?? 'program_error', top, { anchor: anchor[1], errorCode: Number(anchor[2]), program: anchor[3] });
+  for (let x: unknown = e, i = 0; x && i < 6; x = (x as { cause?: unknown }).cause, i++) {
+    const n = programErrorCode(x);
+    if (n !== undefined) return make('program_error', top, { errorCode: n });
+    if (x instanceof SimulationError) return make('simulation_failed', top);
+  }
+  // the bank's own refusals (made before anything is proven or sent)
+  const m = top;
+  if (/^DepositsPaused\b|deposits are paused/.test(m)) return make('deposits_paused', m);
+  if (/^DepositTooLarge\b/.test(m)) return make('cap_per_deposit', m);
+  if (/^DepositCapExceeded\b/.test(m)) return make('cap_total', m);
+  if (/operator ceiling H081_MAX_/.test(m)) return make('over_operator_ceiling', m);
+  const sol = /holds ([\d.]+) SOL; .*?needs about ([\d.]+) SOL/.exec(m);
+  if (sol) return make('needs_sol', m, { haveSol: sol[1], needSol: sol[2] });
+  if (/the shielded balance is .* less than/.test(m)) return make('insufficient_shielded', m);
+  if (/the agent wallet \S+ holds .* less than/.test(m)) return make('insufficient_wallet_usdg', m);
+  if (/[Ss]take more/.test(m) && /staked|free tier/.test(m)) return make('needs_stake', m);
+  if (/proving artifacts are not in/.test(m)) return make('circuits_missing', m);
+  if (/does not match the pinned|hash mismatch/.test(m)) return make('circuit_hash_mismatch', m);
+  if (/^no allowance can pay|holds no \w+ allowance|no open allowance with id/.test(m)) return make('allowance_blocked', m);
+  if (/^no agent key/.test(m)) return make('no_key', m);
+  if (/^the relayer \S+ (is unreachable|does not|names|asks|serves)/.test(m)) return make('relayer_unavailable', m);
+  if (INPUT.test(m)) return make('bad_request', m);
+  return make('internal', m);
+}

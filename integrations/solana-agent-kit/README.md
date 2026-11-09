@@ -1,6 +1,6 @@
 # @h081lll/solana-agent-kit-plugin
 
-[Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) v2 plugin for H081 Capital, the private bank for AI agents on Solana. It gives an agent twelve actions: shielded USDG deposits and withdrawals, the balance, payments from an allowance (to a wallet or privately to another agent's `h081-address:` code), allowances for sub-agents (grant, delegate, reclaim; a plan unless `confirm: true`), loan quotes and loan pledges, lending to other agents (a plan unless `confirm: true`), H081 staking, and the protocol's facts. The actions work with every Agent Kit adapter (`createVercelAITools`, `createLangchainTools`, `createOpenAITools`) and are also plain methods on the agent.
+[Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) v2 plugin for H081 Capital, the private bank for AI agents on Solana. It gives an agent thirteen actions: shielded USDG deposits and withdrawals, the balance, private transfers to another account's `h081-address:` code, payments from an allowance (to a wallet or privately to another agent's `h081-address:` code), allowances for sub-agents (grant, delegate, reclaim; a plan unless `confirm: true`), loan quotes and loan pledges, lending to other agents (a plan unless `confirm: true`), H081 staking, and the protocol's facts. The actions work with every Agent Kit adapter (`createVercelAITools`, `createLangchainTools`, `createOpenAITools`) and are also plain methods on the agent.
 
 H081 Capital is **live on Solana mainnet**. It is **not audited yet**. **Use at your own risk**, with a dedicated, low-balance agent key.
 
@@ -10,7 +10,7 @@ H081 Capital is **live on Solana mainnet**. It is **not audited yet**. **Use at 
 npm install @h081lll/solana-agent-kit-plugin solana-agent-kit @solana/web3.js
 ```
 
-Node 20.11 or newer. The proving artifacts (~75 MB) are not in the package: they are downloaded from `https://www.h081.xyz/circuits/` into `H081_CIRCUITS_DIR` (default `~/.h081/circuits`) the first time a circuit is needed, and every file's sha256 is checked against the hashes pinned in the package (the zkey/vkey hashes are the ceremony's, `docs/CEREMONY.md`) before it is written. A deposit or withdrawal needs `transact` (15 MB); a loan pledge also needs `grant` (44 MB) and `stream`.
+Node 20.11 or newer. The proving artifacts (about 98 MB) are not in the package: they are downloaded from `https://www.h081.xyz/circuits/` into `H081_CIRCUITS_DIR` (default `~/.h081/circuits`) the first time a circuit is needed, and every file's sha256 is checked against the hashes pinned in the package (the zkey/vkey hashes are the ceremony's, `docs/CEREMONY.md`) before it is written. A deposit or withdrawal needs `transact` (15 MB); a loan pledge also needs `grant` (44 MB) and `stream`.
 
 From this repository instead of npm: `npm ci && npm run build --prefix integrations/solana-agent-kit` builds `dist/` (cjs + esm + types, the same layout as the upstream `@solana-agent-kit/plugin-*` packages).
 
@@ -35,7 +35,7 @@ const { text } = await generateText({
   model: openai('gpt-4o'),
   tools,
   maxSteps: 6,
-  prompt: 'Check the H081 protocol info, deposit 25 USDG into my private bank account, then show my balance and withdraw 10 USDG back to my wallet.',
+  prompt: 'Check the H081 protocol info, deposit 25 USDG into my private bank account, then show my balance and withdraw 10 USDG to my fresh wallet 9xQe… (one that never touched the agent).',
 });
 console.log(text);
 ```
@@ -45,7 +45,7 @@ What the model does, action by action:
 1. `H081_PROTOCOL_INFO {}`: the programs, the live caps and pause flag, the relayer's terms (0.05 USDG minimum, 0.20 %, paid to the protocol treasury), the agent's wallet and shielded address.
 2. `H081_BANK_DEPOSIT {"usdg": "25"}`: the plugin reads the caps and the wallet balances and refuses at once if the deposit is over 1,000 USDG, would push the bank over 10,000 USDG, deposits are paused, or the wallet lacks the USDG or ~0.02 SOL (buffer rent, refunded, plus fees); otherwise it makes the `transact` proof, stages it in a program buffer and sends the deposit. `{"status": "success", "signature": "...", "amount": "25000000", "amountUsdg": "25", "shielded": "25000000", "shieldedUsdg": "25"}`.
 3. `H081_BANK_BALANCE {}`: `{"status": "success", "shieldedUsdg": "25", "walletUsdgHuman": "75", "walletSol": 0.19, "caps": {...}}`.
-4. `H081_BANK_WITHDRAW {"usdg": "10"}`: sent by the relayer (the agent wallet is not the sender on chain) for the smallest fee it accepts: `{"amount": "10000000", "fee": "50000", "received": "9950000", "receivedUsdg": "9.95", "via": "relayer"}`. `"direct": true` has the agent key send it instead, with no relay fee. When the relayer is unreachable or refuses, the action returns `{"status": "error", "message": "the relayer ... The withdrawal was not sent: retry later, or pass direct: true ..."}` and nothing moves; it never falls back to a direct send by itself. Above the relayer's free tier (100 USDG per 30 days) the agent wallet is named as capacity operator and needs H081 staked (`H081_STAKE`); otherwise the withdrawal is refused before any proof, naming the free tier, the stake and `direct: true`.
+4. `H081_BANK_WITHDRAW {"usdg": "10", "to": "9xQe…"}`: sent by the relayer (the agent wallet is not the sender on chain) for the smallest fee it accepts: `{"amount": "10000000", "fee": "50000", "received": "9950000", "receivedUsdg": "9.95", "via": "relayer"}`. `"direct": true` has the agent key send it instead, with no relay fee. When the relayer is unreachable or refuses, the action returns `{"status": "error", "message": "the relayer ... The withdrawal was not sent: retry later, or pass direct: true ..."}` and nothing moves; it never falls back to a direct send by itself. Up to 100 USDG per withdrawal with nothing staked; above that, H081 staked in capacity_stake sets a 30-day limit (the agent wallet is named as capacity operator, `H081_STAKE`); without enough stake the withdrawal is refused before any proof, naming the limit, the stake and `direct: true`.
 
 A refused action returns `{"status": "error", "message": "DepositCapExceeded (6037, stipend_pool): the bank holds at most 10,000 USDG in total..."}`; handlers never throw.
 
@@ -55,7 +55,7 @@ The same without a model, as plain methods (the upstream convention: the agent i
 await agent.methods.h081ProtocolInfo(agent);
 await agent.methods.h081BankDeposit(agent, { usdg: '25' });
 await agent.methods.h081BankBalance(agent);
-await agent.methods.h081BankWithdraw(agent, { usdg: '10' });
+await agent.methods.h081BankWithdraw(agent, { usdg: '10', to: '9xQe…' });
 await agent.methods.h081Stake(agent, { action: 'view' });
 ```
 
@@ -77,6 +77,7 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_ALLOWANCE_DELEGATE` | `h081_allowance_delegate` | `{allowanceId, agentIndex?, toAgentIndex | toAddressCode, amount|usdg, windowCap?|windowCapUsdg?, maxPerTx?|maxPerTxUsdg?, days?, unlockDays?, confirm?: boolean}` |
 | `H081_ALLOWANCE_RECLAIM` | `h081_allowance_reclaim` | `{allowanceId, confirm?: boolean}` |
 | `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
+| `H081_TRANSFER` | `h081_transfer` | `{amount|usdg, toAddressCode: "h081-address:…"}` (from the main shielded balance, sent by the agent key) |
 
 The three allowance actions send nothing without `confirm: true`: they return the plan of exactly what would be sent. A delegated child can never be looser than its parent; the error names the limit. `h081_allowance_delegate` needs the delegate proving artifacts, which the site does not ship yet.
 
@@ -121,7 +122,7 @@ stream_loan has no offer book and no matching. A loan starts with a lender who o
 - Deposits are public (depositor and amount); what happens inside the bank is private to the account's keys. Deposits are never relayed.
 - A relayed withdrawal is sent by the relayer, so the chain does not link the agent wallet to it; a direct one is sent by the agent key. Relay fees and the loan origination fee go only to the protocol treasury `EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq` (USDG account `DxpmCZYAoDKpHmA5vWuopUrf3UVuGnPvditVrN9xDwDo`); on mainnet the plugin checks the relayer's advertised fee account against that address before a proof binds it and refuses any other relayer.
 - The relayer fails closed: with `H081_RELAYER_URL` set, a withdrawal the relayer cannot take (unreachable, wrong terms, refusal) is not sent; the error says why, and `direct: true` is the only path to a send by the agent key.
-- Above the relayer's anonymous free tier (100 USDG per 30 days today) the agent key signs the relayer's capacity message and the withdrawal counts against the wallet's H081 stake in capacity_stake (`H081_STAKE`); the relayer, not the chain, then learns which wallet it belongs to. Without enough stake it is refused before any proof; `direct: true` has no limit.
+- Up to 100 USDG per withdrawal with nothing staked; above that, H081 staked in capacity_stake sets a 30-day limit: the agent key signs the relayer's capacity message and the withdrawal counts against the wallet's H081 stake in capacity_stake (`H081_STAKE`); the relayer, not the chain, then learns which wallet it belongs to. Without enough stake it is refused before any proof; `direct: true` has no limit.
 - Caps are checked locally first; a concurrent deposit can still make yours fail on chain, which costs about a second of CPU and ~0.0072 SOL of refundable rent, and is reported by name.
 - Allowances (`h081_allowance_grant`, `_delegate`, `_reclaim`) move value note to note inside the bank, so the agent key sends them (there is no public leg a relayer could take its fee from): the chain sees that the agent wallet made a grant, delegation or payment, not the amount, the rules or the recipient. They send nothing without `confirm: true`, and `H081_MAX_GRANT` caps every allowance granted or delegated.
 - Lending (`H081_LEND`) is public on the lender side: stream_loan needs the slot owner's signature, so the agent key opens, funds, claims and settles (no relayer), and the chain shows the agent wallet as lender, the principal and the borrower's payout account. The borrower's budget and payments stay private. Funding uses the wallet's public USDG, sends nothing without `confirm: true`, and `H081_MAX_LEND` caps every loan.
@@ -136,7 +137,7 @@ The upstream repository is `github.com/sendaifun/solana-agent-kit` (branch `v2` 
 3. Add `packages/plugin-h081/` mirroring `packages/plugin-token/`: the same `package.json` shape (`main`/`module`/`types`/`exports`, `build: tsup src/index.ts --dts --clean --format cjs,esm --out-dir dist`, `peerDependencies: { "solana-agent-kit": "workspace:*" }` inside the monorepo), `tsup` as a devDependency, and `src/` from this package. Either copy `integrations/solana-agent-kit/src`, `integrations/core` and the SDK modules they import into the new package, or make the new package a thin wrapper that depends on `@h081lll/solana-agent-kit-plugin` and re-exports `H081Plugin` (simplest; keeps one source of truth).
 4. Add a `README.md` in the package (this file, trimmed to install + the worked example + the actions table + the risk notice) and a row for the plugin in the root README's plugin list.
 5. `pnpm install && pnpm build && pnpm test` at the root; make sure `pnpm --filter @solana-agent-kit/plugin-h081 build` passes.
-6. Open the PR against `main`, titled `feat: add H081 Capital private bank plugin`, with a body that says what the twelve actions do, that the protocol is live on Solana mainnet, not audited yet, use at your own risk, that it needs a `KeypairWallet` (or an env key) because the SDK signs multi-transaction proof staging, and links the npm package and `https://www.h081.xyz`.
+6. Open the PR against `main`, titled `feat: add H081 Capital private bank plugin`, with a body that says what the thirteen actions do, that the protocol is live on Solana mainnet, not audited yet, use at your own risk, that it needs a `KeypairWallet` (or an env key) because the SDK signs multi-transaction proof staging, and links the npm package and `https://www.h081.xyz`.
 7. SendAI has paid bounties for toolkit work on Superteam Earn before; check `earn.superteam.fun` for an open Solana Agent Kit bounty and link the PR there if one fits.
 
 Nothing in this repository publishes or opens the PR: the package ships with `private: false` but unpublished, and the steps above are the owner's.

@@ -34,16 +34,20 @@ export interface McpServerInfo {
   version: string;
   /** text the client shows its model after initialize */
   instructions?: string;
+  /** structured content for a failed tool call (e.g. a stable error code); default none */
+  errorContent?: (e: unknown) => Record<string, unknown> | undefined;
 }
 
 export class McpServer {
   private readonly byName: Map<string, McpTool>;
   readonly info: { name: string; version: string };
   readonly instructions: string;
+  private readonly errorContent?: (e: unknown) => Record<string, unknown> | undefined;
 
   constructor(readonly tools: McpTool[], info: McpServerInfo = { name: 'stipend', version: '0.1.0' }) {
     this.byName = new Map(tools.map((t) => [t.name, t]));
     this.info = { name: info.name, version: info.version };
+    this.errorContent = info.errorContent;
     this.instructions = info.instructions ?? 'Stipend wallet tools. ' + POLICY_NOTE;
   }
 
@@ -81,7 +85,9 @@ export class McpServer {
           return reply({ content: [{ type: 'text', text }], structuredContent: JSON.parse(text), isError: false });
         } catch (e) {
           // a tool failure (a refused proof, a bad argument) is a result the model can read, not a protocol error
-          return reply({ content: [{ type: 'text', text: (e as Error).message }], isError: true });
+          let structured: Record<string, unknown> | undefined;
+          try { structured = this.errorContent?.(e); } catch { structured = undefined; }
+          return reply({ content: [{ type: 'text', text: (e as Error).message }], ...(structured ? { structuredContent: structured } : {}), isError: true });
         }
       }
       default:

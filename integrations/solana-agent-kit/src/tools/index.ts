@@ -1,5 +1,5 @@
 // The plugin's `methods`: plain async functions an agent program can call directly
-// (`agent.methods.h081BankDeposit({ usdg: '25' })`). Each returns plain JSON (bigints as decimal strings).
+// (`agent.methods.h081BankDeposit(agent, { usdg: '25' })`). Each returns plain JSON (bigints as decimal strings).
 import type { AgentLike } from '../bank.js';
 import { bankFor } from '../bank.js';
 import { plain, runOp, validateArgs } from '../../../core/operations.js';
@@ -29,10 +29,12 @@ export const h081Lend = (agent: AgentLike, input: {
   principal?: string; principalUsdg?: string; amount?: string; usdg?: string; confirm?: boolean;
 }) => run(agent, 'h081_lend', input);
 
-export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend };
+export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: string; toAddressCode: string }) => run(agent, 'h081_transfer', input);
+
+export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer };
 export const METHOD_OF: Record<OpName, keyof typeof METHODS> = {
   h081_bank_deposit: 'h081BankDeposit', h081_bank_withdraw: 'h081BankWithdraw', h081_bank_balance: 'h081BankBalance', h081_loan_quote: 'h081LoanQuote',
   h081_loan_borrow: 'h081LoanBorrow', h081_stake: 'h081Stake', h081_protocol_info: 'h081ProtocolInfo', h081_pay: 'h081Pay',
   h081_allowance_grant: 'h081AllowanceGrant', h081_allowance_delegate: 'h081AllowanceDelegate', h081_allowance_reclaim: 'h081AllowanceReclaim',
-  h081_lend: 'h081Lend',
+  h081_lend: 'h081Lend', h081_transfer: 'h081Transfer',
 };

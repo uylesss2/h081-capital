@@ -91,4 +91,33 @@ describe('operation schemas', () => {
     expect(DESCRIPTIONS.h081_allowance_delegate).toMatch(/does not ship yet/);
     expect(DESCRIPTIONS.h081_bank_balance).toMatch(/grantedToOthers/);
   });
+
+  it('the free-tier wording matches the relayer (100 USDG per operation with nothing staked; stake sets a 30-day limit)', async () => {
+    const { DEFAULT_FREE_TIER } = await import('../../relayer/config.js');
+    const tier = (Number(DEFAULT_FREE_TIER) / 1e6).toString();
+    expect(tier).toBe('100');
+    const wording = new RegExp(`up to ${tier} USDG per withdrawal with nothing staked; above that, H081 staked in capacity_stake sets a 30-day limit`, 'i');
+    expect(DESCRIPTIONS.h081_bank_withdraw).toMatch(wording);
+    expect(DESCRIPTIONS.h081_pay).toMatch(wording);
+    for (const op of OPS) expect(DESCRIPTIONS[op]).not.toMatch(/per 30 days today/);
+    const { readFileSync } = await import('node:fs');
+    for (const readme of ['integrations/mcp/README.md', 'integrations/solana-agent-kit/README.md']) {
+      const text = readFileSync(readme, 'utf8');
+      expect(text, readme).toMatch(wording);
+      expect(text, readme).not.toMatch(/free tier \(100 USDG per 30 days/);
+    }
+  });
+
+  it('h081_transfer pays from the main balance to an address code (no plan step, strict input)', () => {
+    expect(OPS).toContain('h081_transfer');
+    expect(DESCRIPTIONS.h081_transfer).toMatch(/h081-address:/);
+    expect(DESCRIPTIONS.h081_transfer).toMatch(/agent key sends it/);
+    expect(JSON_SCHEMA.h081_transfer.required).toEqual(['toAddressCode']);
+    const T = ZOD.h081_transfer;
+    expect(T.safeParse({ usdg: '1', toAddressCode: 'h081-address:x' }).success).toBe(true);
+    expect(T.safeParse({ usdg: '1' }).success).toBe(false);
+    expect(T.safeParse({ usdg: '1', amount: '1', toAddressCode: 'h081-address:x' }).success).toBe(false);
+    expect(T.safeParse({ usdg: '1', toAddressCode: 'h081-address:x', confirm: true }).success).toBe(false);
+    expect(T.safeParse({ usdg: '1', to: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv' }).success).toBe(false);
+  });
 });

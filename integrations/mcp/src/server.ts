@@ -1,6 +1,7 @@
 // An McpServer (src/mcp-core.ts framing) serving the H081 bank tools.
 import { McpServer } from '../../../src/mcp-core.js';
 import { NOTICE } from '../../core/constants.js';
+import { classify } from '../../core/errors.js';
 import type { BankLike } from '../../core/operations.js';
 import { h081Tools } from './tools.js';
 
@@ -20,7 +21,8 @@ export const INSTRUCTIONS =
   'shows this agent\'s own code); it pays when called (no plan step) and uses a pledged loan allowance only with ' +
   'allowPledged: true, since that puts the loan slot and lender share on chain next to the payment. h081_allowance_grant gives a sub-account or another agent a capped budget from the ' +
   'shielded balance, h081_allowance_delegate carves a child (never looser than its parent) out of an allowance this agent ' +
-  'holds, and h081_allowance_reclaim takes back what is left; without confirm: true these three, and h081_lend open, ' +
+  'holds, and h081_allowance_reclaim takes back what is left; h081_transfer pays from the main shielded balance to an "h081-address:" ' +
+  'code (sent by the agent key when called); without confirm: true the three allowance tools, and h081_lend open, ' +
   'fund, settle and close, only return the plan and send nothing. ' + NOTICE;
 
 export interface ServerOptions {
@@ -29,5 +31,9 @@ export interface ServerOptions {
 }
 
 export function createServer(opts: ServerOptions): McpServer {
-  return new McpServer(h081Tools({ bank: opts.bank }), { name: SERVER_NAME, version: opts.version ?? SERVER_VERSION, instructions: INSTRUCTIONS });
+  return new McpServer(h081Tools({ bank: opts.bank }), {
+    name: SERVER_NAME, version: opts.version ?? SERVER_VERSION, instructions: INSTRUCTIONS,
+    // the same stable code and retry flag the local API (@h081lll/agent) returns
+    errorContent: (e) => { const c = classify(e); return { error: { code: c.code, retryable: c.retryable, message: c.message } }; },
+  });
 }
