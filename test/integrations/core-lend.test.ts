@@ -3,6 +3,7 @@
 // "h081-loan-proof:" code, A funds against it, then claims, collects and settles. The codes are real (v2 frame, the
 // loan program's network tag); the SDK calls that would prove or send (grant, proveStream, openSlot, fund, claim,
 // syncLoan, collect, settle) and the lender's event scan are mocked: nothing is proven or sent.
+import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { type Allowance, allowanceCommitment } from '../../src/crypto.js';
 import { minRemainingFor } from '../../src/inputs.js';
 import { fieldOf } from '../../src/solana/field.js';
-import { type SolLenderNote, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda } from '../../src/solana/lender.js';
+import { type SolLenderNote, closedSlotPda, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda } from '../../src/solana/lender.js';
 import type { StreamArgs } from '../../src/solana/program.js';
 import type { SolOwnedAllowance } from '../../src/solana/wallet.js';
 import { H081Bank } from '../../integrations/core/bank.js';
@@ -127,7 +128,7 @@ describe('h081_lend: open', () => {
     const open = vi.spyOn(bank.lender(), 'openSlot');
     await expect(runOp(bank, 'h081_lend', { action: 'open', pledgeBps: 50 })).rejects.toThrow(/100\.\.9000/);
     await expect(runOp(bank, 'h081_lend', { action: 'open' })).rejects.toThrow(/pledgeBps is required/);
-    await expect(runOp(bank, 'h081_lend', { action: 'lend' })).rejects.toThrow(/action must be one of open, fund, status, claim, collect, settle, close/);
+    await expect(runOp(bank, 'h081_lend', { action: 'lend' })).rejects.toThrow(/action must be one of open, fund, status, claim, collect, settle, close, sweep/);
     const poor = await openAgent({ lamports: 1_000 });
     await expect(poor.bank.lendOpen({ pledgeBps: 4000n, confirm: true })).rejects.toThrow(/SOL; opening a loan slot needs about 0\.01 SOL.*Nothing was sent/);
     conn.accounts.delete(registryPda(LOAN).toBase58());
@@ -242,6 +243,94 @@ describe('h081_lend: fund', () => {
   });
 });
 
+/** A stream_loan ClosedSlot receipt: 98 bytes before the overpay cap, 130 (payout account appended) after. */
+function receiptData(r: { loanRef: bigint; lender: PublicKey; principal: bigint; repaid: bigint; payoutTo?: PublicKey }): Buffer {
+  return Buffer.concat([
+    createHash('sha256').update('account:ClosedSlot').digest().subarray(0, 8), u64(r.loanRef), r.lender.toBuffer(), USDG.toBuffer(), u64(r.principal), u64(r.repaid),
+    Buffer.from([255, 254]), ...(r.payoutTo ? [r.payoutTo.toBuffer()] : []),
+  ]);
+}
+
+describe('h081_lend: the overpay cap (the lender is never paid more than the principal)', () => {
+  async function slot(principal: bigint, repaid: bigint, inbox = 0n) {
+    const ctx = await openAgent({ circuits: circuitsDir(['spend']) });
+    putSlot([ctx.conn], slotData({ loanRef: 3n, lender: ctx.signer.publicKey, funded: true, principal, repaid, pledgeBps: 4000, expiry: NOW + 30n * DAY, payoutTo: Keypair.generate().publicKey }));
+    putToken([ctx.conn], slotInbox(3n, USDG, TOKEN_2022_PROGRAM_ID, LOAN), slotPda(3n, LOAN), inbox);
+    vi.spyOn(ctx.bank.lender(), 'opaque').mockReturnValue(false);
+    return ctx;
+  }
+
+  it('claim is sized to what is still owed, refused once the loan is repaid or the rest is already routed; status shows the same', async () => {
+    // 2 left to repay, 5 vested: status and claim say 2, an explicit 3 is refused, the default goes to the SDK (which clamps)
+    const a = await slot(USD(40), USD(38));
+    vi.spyOn(a.bank.lender(), 'claimable').mockReturnValue(USD(5));
+    const claim = vi.spyOn(a.bank.lender(), 'claim').mockResolvedValue({ tx: tx('sigClaim'), proof: {} as never, next: {} as never, amount: USD(2) });
+    expect((await a.bank.lendStatus({ loanRef: 3n })).slots[0]).toMatchObject({ state: 'funded', claimableUsdg: '2', borrowerExcess: 0n });
+    await expect(a.bank.lendClaim({ loanRef: 3n, amount: USD(3) })).rejects.toThrow(/at most 2 USDG is claimable now/);
+    expect(await runOp(a.bank, 'h081_lend', { action: 'claim', loanRef: '3' })).toMatchObject({ sent: true, collected: USD(2) });
+    expect(claim).toHaveBeenCalledWith(3n, undefined);
+
+    // repaid: nothing to claim; what the stream still routes is the borrower's (collect refuses it too)
+    const b = await slot(USD(40), USD(40), USD(5));
+    vi.spyOn(b.bank.lender(), 'claimable').mockReturnValue(USD(5));
+    const claimB = vi.spyOn(b.bank.lender(), 'claim');
+    const syncB = vi.spyOn(b.bank.lender(), 'syncLoan');
+    await expect(b.bank.lendClaim({ loanRef: 3n })).rejects.toThrow(/loan #3 is repaid: the lender is owed nothing more.*Nothing was sent/);
+    await expect(b.bank.lendCollect({ loanRef: 3n })).rejects.toThrow(/the 5 USDG in its slot is the borrower's excess.*Nothing was sent/);
+    expect(claimB).not.toHaveBeenCalled();
+    expect(syncB).not.toHaveBeenCalled();
+    expect((await b.bank.lendStatus({ loanRef: 3n })).slots[0]).toMatchObject({ state: 'repaid', claimable: 0n, collectable: 0n, borrowerExcess: USD(5), borrowerExcessUsdg: '5' });
+
+    // not repaid, but the 5 still owed is already in the slot's inbox (unsynced): collect it instead
+    const c = await slot(USD(40), USD(35), USD(5));
+    vi.spyOn(c.bank.lender(), 'claimable').mockReturnValue(USD(5));
+    await expect(c.bank.lendClaim({ loanRef: 3n })).rejects.toThrow(/still owes is already on its way to the slot.*collect/);
+  });
+
+  it('collect takes at most what is owed; the rest is reported as the borrower excess', async () => {
+    const { bank } = await slot(USD(40), USD(35), USD(8));
+    const sync = vi.spyOn(bank.lender(), 'syncLoan').mockResolvedValue(tx('sigSync'));
+    vi.spyOn(bank.lender(), 'collect').mockResolvedValue(tx('sigCollect'));
+    vi.spyOn(bank.lender(), 'ledger').mockResolvedValue(undefined);
+    expect((await bank.lendStatus({ loanRef: 3n })).slots[0]).toMatchObject({ collectableUsdg: '5', borrowerExcessUsdg: '3' });
+    expect(await bank.lendCollect({ loanRef: 3n })).toMatchObject({ sent: true, signatures: ['sigSync'], collected: USD(5), collectedUsdg: '5' });
+    expect(sync).toHaveBeenCalledWith(3n);
+  });
+
+  it('status reads a closed loan from its receipt (98 or 130 bytes); sweep takes the lender part and sends the borrower excess back', async () => {
+    const { bank, conn, signer } = await openAgent();
+    const payoutTo = Keypair.generate().publicKey;
+    const putReceipt = (data: Buffer) => conn.accounts.set(closedSlotPda(3n, LOAN).toBase58(), { owner: LOAN, data, executable: false, lamports: 1 });
+    putReceipt(receiptData({ loanRef: 3n, lender: signer.publicKey, principal: USD(40), repaid: USD(36), payoutTo }));
+    putToken([conn], slotInbox(3n, USDG, TOKEN_2022_PROGRAM_ID, LOAN), slotPda(3n, LOAN), USD(7));
+    expect((await bank.lendStatus({ loanRef: 3n })).slots[0]).toMatchObject({
+      loanRef: 3n, mine: true, state: 'closed', principalUsdg: '40', repaidUsdg: '36', outstandingUsdg: '4', claimable: 0n, collectableUsdg: '4',
+      borrowerExcessUsdg: '3', payoutTo: payoutTo.toBase58(),
+    });
+    const sweep = vi.spyOn(bank.lender(), 'sweepClosed').mockResolvedValue(tx('sigSweep'));
+    expect(await runOp(bank, 'h081_lend', { action: 'sweep', loanRef: '3' })).toMatchObject({
+      sent: true, action: 'sweep', signatures: ['sigSweep'], collected: USD(4), returnedToBorrower: USD(3), returnedToBorrowerUsdg: '3',
+    });
+    expect(sweep).toHaveBeenCalledWith(3n, undefined, undefined, { returnExcess: true });
+
+    // a receipt from before the cap records no payout account: only the lender part leaves
+    putReceipt(receiptData({ loanRef: 3n, lender: signer.publicKey, principal: USD(40), repaid: USD(36) }));
+    expect((await bank.lendStatus({ loanRef: 3n })).slots[0]).toMatchObject({ state: 'closed', payoutTo: null, collectableUsdg: '4' });
+    expect(await bank.lendSweep({ loanRef: 3n })).toMatchObject({ collected: USD(4), returnedToBorrower: 0n });
+
+    // only the owner sweeps; an open slot is collected, not swept
+    putReceipt(receiptData({ loanRef: 3n, lender: Keypair.generate().publicKey, principal: USD(40), repaid: USD(36), payoutTo }));
+    await expect(bank.lendSweep({ loanRef: 3n })).rejects.toThrow(/belongs to another lender.*Nothing was sent/);
+    conn.accounts.delete(closedSlotPda(3n, LOAN).toBase58());
+    const open = slotData({ loanRef: 3n, lender: signer.publicKey, funded: true, principal: USD(40), pledgeBps: 4000 });
+    createHash('sha256').update('account:Slot').digest().copy(open, 0, 0, 8); // the real Anchor discriminator
+    putSlot([conn], open);
+    await expect(bank.lendSweep({ loanRef: 3n })).rejects.toThrow(/still open: sweep is for a closed loan/);
+    await expect(runOp(bank, 'h081_lend', { action: 'sweep' })).rejects.toThrow(/loanRef is required/);
+    expect(sweep).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('h081_lend: status, claim, collect, settle, close', () => {
   async function funded(over: Partial<Parameters<typeof slotData>[0]> = {}) {
     const ctx = await openAgent({ circuits: circuitsDir(['spend']) });
@@ -313,7 +402,7 @@ describe('h081_lend: status, claim, collect, settle, close', () => {
     expect(col).toMatchObject({ sent: true, action: 'collect', signatures: ['sigSync', 'sigCollect'], collected: USD(2), collectedUsdg: '2' });
   });
 
-  it('settle plans (naming what is unpaid) unless confirm; close needs a settled slot and an SDK with close_slot; only the owner may act', async () => {
+  it('settle plans (naming what is unpaid) unless confirm; close needs a settled slot and sends the borrower excess back; only the owner may act', async () => {
     const { bank, conn, signer } = await funded();
     const settle = vi.spyOn(bank.lender(), 'settle').mockResolvedValue(tx('sigSettle'));
     const plan = await runOp(bank, 'h081_lend', { action: 'settle', loanRef: '3' }) as { plan: { warning: string } };
@@ -326,14 +415,14 @@ describe('h081_lend: status, claim, collect, settle, close', () => {
 
     putSlot([conn], slotData({ loanRef: 3n, lender: signer.publicKey, funded: true, settled: true, principal: USD(40), repaid: USD(40), pledgeBps: 4000 }));
     await expect(bank.lendSettle({ loanRef: 3n, confirm: true })).rejects.toThrow(/already settled/);
-    // this build's SDK has no close_slot: refused, nothing sent
-    await expect(bank.lendClose({ loanRef: 3n, confirm: true })).rejects.toThrow(/close_slot\) is not in this build's SDK yet.*Nothing was sent/);
-    // an SDK that has it: plan, then close
-    const close = vi.fn(async () => ({ ...tx('sigClose'), refunded: 4_000_000n }));
-    (bank.lender() as unknown as { close: typeof close }).close = close;
-    expect(await bank.lendClose({ loanRef: 3n })).toMatchObject({ sent: false, dryRun: true });
+    // plan, then close (stream_loan close_slot); the borrower's excess, if any, goes back to its payout account
+    const close = vi.spyOn(bank.lender(), 'close').mockResolvedValue({ ...tx('sigClose'), refunded: 4_000_000n });
+    const plan2 = await bank.lendClose({ loanRef: 3n }) as unknown as { plan: { note: string } };
+    expect(plan2).toMatchObject({ sent: false, dryRun: true });
+    expect(plan2.plan.note).toMatch(/up to the principal.*borrower excess is sent back/);
     expect(close).not.toHaveBeenCalled();
     expect(await bank.lendClose({ loanRef: 3n, confirm: true })).toMatchObject({ sent: true, action: 'close', refundedLamports: 4_000_000n });
+    expect(close).toHaveBeenCalledWith(3n, { returnExcess: true });
 
     putSlot([conn], slotData({ loanRef: 3n, lender: Keypair.generate().publicKey, funded: true, principal: USD(40), pledgeBps: 4000 }));
     for (const action of ['claim', 'collect', 'settle', 'close']) {

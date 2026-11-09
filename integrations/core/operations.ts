@@ -11,7 +11,7 @@ import { parseAmount } from './units.js';
 
 /** What an operation needs from the bank (H081Bank satisfies it; tests pass a mock). */
 export type BankLike = Pick<H081Bank, 'deposit' | 'withdraw' | 'balance' | 'loanQuote' | 'borrow' | 'stakeView' | 'stake' | 'requestUnstake' | 'unstake' | 'protocolInfo' | 'pay' | 'codeContext'
-  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose'> & { decimals: number };
+  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep'> & { decimals: number };
 
 export type Args = Record<string, unknown>;
 
@@ -203,6 +203,7 @@ export async function opLend(bank: BankLike, args: Args) {
     case 'collect': return bank.lendCollect({ loanRef: loanRefOf(args, true)! });
     case 'claim': return bank.lendClaim({ loanRef: loanRefOf(args, true)!, amount: present(args, 'amount') || present(args, 'usdg') ? parseAmount(args, 'usdg', USDG_DECIMALS) : undefined });
     case 'settle': return bank.lendSettle({ loanRef: loanRefOf(args, true)!, confirm });
+    case 'sweep': return bank.lendSweep({ loanRef: loanRefOf(args, true)! });
     default: return bank.lendClose({ loanRef: loanRefOf(args, true)!, confirm });
   }
 }

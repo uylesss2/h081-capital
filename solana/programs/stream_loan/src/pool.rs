@@ -138,12 +138,13 @@ pub fn field_of(key: &Pubkey) -> [u8; 32] {
 }
 
 /// Requires the staged spend (Proof, SpendArgs, ..) to be a lender claim for (fieldOf(slot PDA), loan_ref).
-pub fn check_lender_claim(payload: &[u8], slot: &Pubkey, loan_ref: u64) -> Result<()> {
+/// Returns its `lender_amount`: what the pool will move to the lender leg.
+pub fn check_lender_claim(payload: &[u8], slot: &Pubkey, loan_ref: u64) -> Result<u128> {
     let mut s: &[u8] = payload;
     let _proof = Proof::deserialize(&mut s).map_err(|_| error!(LoanError::BadPayload))?;
     let a = SpendArgs::deserialize(&mut s).map_err(|_| error!(LoanError::BadPayload))?;
     require!(a.is_lender_claim && a.lender_addr == field_of(slot) && a.loan_ref == loan_ref, LoanError::NotAClaim);
-    Ok(())
+    Ok(a.lender_amount)
 }
 
 /// stipend_pool escrow seed: ["owed", mint, lender_field_be32, loan_ref_le8] under the pool program.

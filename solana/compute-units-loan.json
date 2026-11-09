@@ -1,0 +1,20 @@
+{
+  "measured": "2026-11-09T21:38:32.656Z",
+  "rpc": "http://127.0.0.1:9099",
+  "budget": {
+    "claim_capped": 400000,
+    "sync_excess": 60000,
+    "return_excess_open": 60000,
+    "return_excess_closed": 60000,
+    "sweep_closed_held": 60000,
+    "collect_legacy": 40000
+  },
+  "computeUnits": {
+    "claim_capped": 259696,
+    "sync_excess": 26493,
+    "return_excess_open": 20545,
+    "return_excess_closed": 27278,
+    "collect_legacy": 23578,
+    "sweep_closed_held": 18897
+  }
+}

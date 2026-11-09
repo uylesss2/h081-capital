@@ -26,6 +26,7 @@ import {
 } from '../../src/solana/token.js';
 import { LOAN_ERROR, decodeSubrogation, recordSlashIx, syncIx } from '../../src/solana/lender.js';
 import { REF, readStakingMeta, type StakingMeta } from './staking-fixtures.js';
+import { closeSlotIx, closedSlotPda, decodeClosedSlot, returnExcessIx, settleIx, slotClosedEvents } from '../../src/solana/lender.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 
 const RPC = process.env.STAKING_RPC ?? 'http://127.0.0.1:9199';
@@ -613,15 +614,25 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
     await expectCode(tx(stranger, sync(lenderAsset)), LOAN_ERROR.BadRecovery);
     await tx(stranger, sync(recovery));
     expect(await tokenBalance(connection, recovery)).toBe(4_000_000n); // the pool first, up to what it paid
-    expect(await tokenBalance(connection, lenderAsset)).toBe(500_000n); // the lender only gets the rest
-    expect(await tokenBalance(connection, inbox)).toBe(0n);
+    // overpay cap: the loan owed 5,000,000 - 1,000,000 = 4,000,000 and the pool's recovery took all of it, inside the cap;
+    // the lender (already paid by the cover) gets nothing more, and the 500,000 above the principal stay for the borrower
+    expect(await tokenBalance(connection, lenderAsset)).toBe(0n);
+    expect(await tokenBalance(connection, inbox)).toBe(500_000n);
     expect(decodeSubrogation(await account(streamSubrogationPda(ref))).paid).toBe(4_000_000n);
-    expect(decodeStreamSlot(await account(slot)).repaid).toBe(1_000_000n + 4_500_000n); // repayment is still credited to the loan
-    // recovered in full: later receipts are the lender's again, and `to` no longer matters
+    expect(decodeStreamSlot(await account(slot)).repaid).toBe(5_000_000n); // credited up to the principal, never past it
+    // repaid: later receipts are the borrower's excess, never the lender's or the pool's
     await send(connection, payer, [mintToIx(asset, inbox, assetAuthority.publicKey, 100n, CLASSIC)], { signers: [assetAuthority] });
     await tx(stranger, sync());
-    expect(await tokenBalance(connection, lenderAsset)).toBe(500_100n);
+    expect(await tokenBalance(connection, lenderAsset)).toBe(0n);
     expect(await tokenBalance(connection, recovery)).toBe(4_000_000n);
+    expect(await tokenBalance(connection, inbox)).toBe(500_100n);
+    expect(decodeStreamSlot(await account(slot)).repaid).toBe(5_000_000n);
+    // the fixture's payout account does not exist: the excess cannot be delivered and keeps waiting in the inbox
+    const payoutTo = decodeStreamSlot(await account(slot)).payoutTo;
+    await expectCode(tx(stranger, returnExcessIx(ref, asset, payoutTo, payoutTo, CLASSIC, SAFETY_STREAM_LOAN_PROGRAM_ID)), LOAN_ERROR.PayoutCannotReceive);
+    // nor may it go anywhere else without the payout owner's signature
+    await expectCode(tx(stranger, returnExcessIx(ref, asset, payoutTo, lenderAsset, CLASSIC, SAFETY_STREAM_LOAN_PROGRAM_ID)), LOAN_ERROR.BadPayout);
+    expect(await tokenBalance(connection, inbox)).toBe(500_100n);
     // the cover is paid: a second slash still fails
     await expectCode(tx(stranger, slashBy(SPF, H.publicKey, ref, loanOf(ref), ataAddress(lender.publicKey, H.publicKey))), SAFETY_ERROR.AlreadyPaid);
     // nobody but a safety_pool config PDA can record a slash (here: a plain keypair signs as the "config")
@@ -856,5 +867,73 @@ describe.skipIf(!reachable)('safety_pool: top_up', () => {
     const p3 = await readSafetyPosition(connection, SPF, E.publicKey, s3.publicKey);
     expect(p3.shares).toBe(0n);
     expect(p3.value).toBe(0n);
+  });
+});
+
+// Runs last: it closes the REF.long slot, which the views above still read.
+describe.skipIf(!reachable)('stream_loan close_slot against a real safety_pool cover', () => {
+  it('a settled loan with an open cover cannot be closed until the cover is released; then the slot closes', async () => {
+    expect(streamLoanLoaded, 'stream_loan.so is not loaded on the staking validator (build it: npm run solana:build)').toBe(true);
+    const LOAN = SAFETY_STREAM_LOAN_PROGRAM_ID;
+    const ref = REF.long;
+    const c0 = decodeCover(await account(coverPda(SP, ref)));
+    expect([c0.paid, c0.released]).toEqual([false, false]); // insured above under the production build
+    const closeIx = () => closeSlotIx(lender.publicKey, ref, { asset, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }, LOAN, SP);
+    await expectCode(tx(lender, closeIx()), LOAN_ERROR.NotSettled);
+    await tx(lender, settleIx(lender.publicKey, ref, LOAN));
+    // the cover is still open: closing the slot now would leave it unreleasable (release_cover reads the slot)
+    await expectCode(tx(lender, closeIx()), LOAN_ERROR.CoverOpen);
+    const exposure = (await cfgOf(SP, H.publicKey)).exposure;
+    await tx(stranger, releaseCoverIx(SP, H.publicKey, ref, loanOf(ref))); // anyone, on a settled loan
+    expect((await cfgOf(SP, H.publicKey)).exposure).toBe(exposure - c0.limit);
+    const before = await connection.getBalance(lender.publicKey, 'confirmed');
+    const sent = await tx(lender, closeIx());
+    expect(await connection.getAccountInfo(streamSlotPda(ref), 'confirmed')).toBeNull();
+    const receipt = decodeClosedSlot(await account(closedSlotPda(ref, LOAN)));
+    expect(receipt.lender.equals(lender.publicKey)).toBe(true);
+    expect(receipt.principal).toBe(BigInt(meta.loans.long.principal));
+    expect((await connection.getBalance(lender.publicKey, 'confirmed')) - before).toBeGreaterThan(0);
+    expect(slotClosedEvents(sent.logs)[0].loanRef).toBe(ref);
+    // the released cover stays released; nothing can slash or re-release it
+    await expectCode(tx(stranger, releaseCoverIx(SP, H.publicKey, ref, loanOf(ref))), SAFETY_ERROR.Released);
+  });
+
+  it('a slashed loan stays open until the safety pool has recovered what it paid (sweep_closed pays the lender only)', async () => {
+    const LOAN = SAFETY_STREAM_LOAN_PROGRAM_ID;
+    const closeIx = (ref: bigint) => closeSlotIx(lender.publicKey, ref, { asset, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }, LOAN, SP);
+    // REF.pending: slashed above (the pool paid 2,000,000), nothing recovered yet
+    const open = decodeSubrogation(await account(streamSubrogationPda(REF.pending)));
+    expect(open.paid < open.owed).toBe(true);
+    await tx(lender, settleIx(lender.publicKey, REF.pending, LOAN));
+    await expectCode(tx(lender, closeIx(REF.pending)), LOAN_ERROR.SubrogationOpen);
+    expect(await connection.getAccountInfo(streamSlotPda(REF.pending), 'confirmed')).not.toBeNull();
+    expect(await connection.getAccountInfo(closedSlotPda(REF.pending, LOAN), 'confirmed')).toBeNull();
+    // REF.live: slashed and recovered in full (paid == owed, the subrogation test above): it closes like any loan
+    const done = decodeSubrogation(await account(streamSubrogationPda(REF.live)));
+    expect(done.paid).toBe(done.owed);
+    await tx(lender, settleIx(lender.publicKey, REF.live, LOAN));
+    await tx(lender, closeIx(REF.live));
+    expect(await connection.getAccountInfo(streamSlotPda(REF.live), 'confirmed')).toBeNull();
+    const receipt = decodeClosedSlot(await account(closedSlotPda(REF.live, LOAN)));
+    expect(receipt.lender.equals(lender.publicKey)).toBe(true);
+    // repaid in full with borrower excess still waiting: the inbox stays open, and the v2 receipt records the payout account
+    expect(receipt.repaid).toBe(receipt.principal);
+    expect(receipt.payoutTo).toBeDefined();
+    expect(await tokenBalance(connection, ataAddress(streamSlotPda(REF.live), asset, CLASSIC))).toBe(500_100n);
+  });
+
+  it('a repaid loan never waits on the pool: a slash still short of what it paid does not block the close once repaid >= principal', async () => {
+    const LOAN = SAFETY_STREAM_LOAN_PROGRAM_ID;
+    const ref = REF.slashedRepaid;
+    const sub = decodeSubrogation(await account(streamSubrogationPda(ref)));
+    expect([sub.owed, sub.paid]).toEqual([3_000_000n, 1_000_000n]);
+    const s = decodeStreamSlot(await account(streamSlotPda(ref)));
+    expect([s.settled, s.repaid]).toEqual([true, s.principal]);
+    await tx(lender, closeSlotIx(lender.publicKey, ref, { asset, tokenProgram: CLASSIC_TOKEN_PROGRAM_ID }, LOAN, SP));
+    expect(await connection.getAccountInfo(streamSlotPda(ref), 'confirmed')).toBeNull();
+    const receipt = decodeClosedSlot(await account(closedSlotPda(ref, LOAN)));
+    expect([receipt.principal, receipt.repaid]).toEqual([s.principal, s.principal]);
+    // the Subrogation record stays as it was (the pool can be credited nothing more on a repaid loan)
+    expect(decodeSubrogation(await account(streamSubrogationPda(ref))).paid).toBe(1_000_000n);
   });
 });
