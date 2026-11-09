@@ -4,12 +4,12 @@
 // Every id can be overridden through the environment (another cluster, a rehearsal validator); the defaults
 // are mainnet. The RPC default is the public mainnet endpoint: no private RPC key is ever embedded.
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { PublicKey } from '@solana/web3.js';
 import type { CircuitName } from '../../src/prover.js';
 import { LOCALNET_POOL_PROGRAM_ID } from '../../src/solana/program.js';
 import { LOCALNET_LOAN_PROGRAM_ID } from '../../src/solana/lender.js';
-import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID } from '../../src/solana/token.js';
+import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_PROGRAM_ID } from '../../src/solana/token.js';
 
 export const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
 
@@ -120,6 +120,26 @@ export interface H081Config {
   maxLend?: bigint;
 }
 
+/** `~` or `~/...` (also `~\...`) expanded with the home directory; anything else unchanged (trimmed). */
+export function expandHome(p: string): string {
+  const t = p.trim();
+  if (t === '~') return homedir();
+  if (t.startsWith('~/') || t.startsWith('~\\')) return join(homedir(), t.slice(2));
+  return t;
+}
+
+/** The H081 data directory: H081_HOME (a leading ~ expanded, made absolute) or ~/.h081. */
+export function h081Home(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.H081_HOME?.trim();
+  if (!raw) return join(homedir(), '.h081');
+  const p = expandHome(raw);
+  return isAbsolute(p) ? p : resolve(p);
+}
+
+/** The clusters this package runs on. Mainnet is the default; localnet is for tests on a private validator. */
+export const CLUSTERS = ['mainnet-beta', 'localnet'] as const;
+export type Cluster = (typeof CLUSTERS)[number];
+
 export const ENV_VARS = {
   H081_SOLANA_KEYPAIR: 'path to a Solana keypair JSON file (the agent key: pays fees, holds USDG, derives the shielded account)',
   H081_SOLANA_KEY: 'the same key as a base58 secret (or a JSON byte array); H081_SOLANA_KEYPAIR wins when both are set',
@@ -127,7 +147,7 @@ export const ENV_VARS = {
   H081_DERIVE_ACCOUNT: 'optional; 1 = derive the account from the key\'s signature over the label instead (one such signature then equals the key)',
   H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com; the public RPC rate-limits history scans); only its host is ever reported',
   H081_RELAYER_URL: 'relayer for withdrawals (default https://api.h081.xyz; empty = the signer sends directly, relayed withdrawals are not attempted)',
-  H081_CIRCUITS_DIR: 'where proving artifacts are stored (default ~/.h081/circuits)',
+  H081_CIRCUITS_DIR: 'where proving artifacts are stored (default $H081_HOME/circuits, i.e. ~/.h081/circuits)',
   H081_CIRCUITS_URL: 'where they are downloaded from (default https://www.h081.xyz/circuits/)',
   H081_POOL_PROGRAM_ID: 'stipend_pool program id (default mainnet E16DK…)',
   H081_LOAN_PROGRAM_ID: 'stream_loan program id (default mainnet 8JBd7…)',
@@ -140,6 +160,11 @@ export const ENV_VARS = {
   H081_MAX_PAY: 'optional operator ceiling per payment from an allowance (h081_pay) in base units',
   H081_MAX_GRANT: 'optional operator ceiling per allowance granted or delegated (h081_allowance_grant / h081_allowance_delegate) in base units',
   H081_MAX_LEND: 'optional operator ceiling per loan the agent funds as a lender (h081_lend fund) in base units',
+  H081_CLUSTER: 'mainnet-beta (default) or localnet (tests only: needs H081_RPC_URL and H081_USDG_MINT; the program ids default to the localnet ones). A cluster/id mismatch is refused before anything is signed',
+  H081_HOME: 'the data directory (default ~/.h081): agent.json, config.json, api-token, ops.jsonl, cache/, circuits/',
+  H081_API_PORT: 'port of the local gateway (h081 serve), default 8081; it binds 127.0.0.1 only',
+  H081_API_TOKEN_FILE: 'the gateway bearer token file (default $H081_HOME/api-token)',
+  H081_API_MAX_SENDS_PER_MIN: 'most confirmed writes the local gateway accepts per minute (default 30)',
 } as const;
 
 const key = (env: NodeJS.ProcessEnv, name: string, fallback: string): PublicKey => {
@@ -149,8 +174,17 @@ const key = (env: NodeJS.ProcessEnv, name: string, fallback: string): PublicKey 
 
 /** Configuration from the environment; every value has a mainnet default except the agent key. */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config {
+  const cluster = env.H081_CLUSTER?.trim() || MAINNET.cluster;
+  if (!(CLUSTERS as readonly string[]).includes(cluster)) throw new Error(`H081_CLUSTER must be mainnet-beta or localnet (got "${cluster}")`);
+  const localnet = cluster === 'localnet';
+  if (localnet && !env.H081_RPC_URL?.trim()) throw new Error('H081_CLUSTER=localnet needs H081_RPC_URL (the local validator)');
+  if (localnet && !env.H081_USDG_MINT?.trim()) throw new Error('H081_CLUSTER=localnet needs H081_USDG_MINT (the local test mint)');
   const relayerRaw = env.H081_RELAYER_URL;
-  const relayerUrl = relayerRaw === undefined ? MAINNET.relayer : relayerRaw.trim() || undefined;
+  // localnet never talks to the mainnet relayer: only to one named explicitly
+  const relayerUrl = relayerRaw === undefined ? (localnet ? undefined : MAINNET.relayer) : relayerRaw.trim() || undefined;
+  const ids = localnet
+    ? { pool: LOCALNET_POOL_PROGRAM_ID.toBase58(), loan: LOCALNET_LOAN_PROGRAM_ID.toBase58(), capacity: LOCALNET_CAPACITY_STAKE_PROGRAM_ID.toBase58(), safety: LOCALNET_SAFETY_POOL_PROGRAM_ID.toBase58() }
+    : MAINNET.programs;
   const maxDepositRaw = env.H081_MAX_DEPOSIT?.trim();
   if (maxDepositRaw !== undefined && maxDepositRaw !== '' && !/^\d+$/.test(maxDepositRaw)) throw new Error('H081_MAX_DEPOSIT must be an integer in base units');
   const maxPayRaw = env.H081_MAX_PAY?.trim();
@@ -160,15 +194,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
   const maxLendRaw = env.H081_MAX_LEND?.trim();
   if (maxLendRaw !== undefined && maxLendRaw !== '' && !/^\d+$/.test(maxLendRaw)) throw new Error('H081_MAX_LEND must be an integer in base units');
   return {
-    cluster: env.H081_CLUSTER?.trim() || MAINNET.cluster,
+    cluster,
     rpcUrl: env.H081_RPC_URL?.trim() || 'https://api.mainnet-beta.solana.com',
     relayerUrl,
-    circuitsDir: env.H081_CIRCUITS_DIR?.trim() || join(homedir(), '.h081', 'circuits'),
+    circuitsDir: env.H081_CIRCUITS_DIR?.trim() ? expandHome(env.H081_CIRCUITS_DIR) : join(h081Home(env), 'circuits'),
     circuitsUrl: env.H081_CIRCUITS_URL?.trim() || CIRCUITS_URL,
-    poolProgramId: key(env, 'H081_POOL_PROGRAM_ID', MAINNET.programs.pool),
-    loanProgramId: key(env, 'H081_LOAN_PROGRAM_ID', MAINNET.programs.loan),
-    capacityProgramId: key(env, 'H081_CAPACITY_PROGRAM_ID', MAINNET.programs.capacity),
-    safetyProgramId: key(env, 'H081_SAFETY_PROGRAM_ID', MAINNET.programs.safety),
+    poolProgramId: key(env, 'H081_POOL_PROGRAM_ID', ids.pool),
+    loanProgramId: key(env, 'H081_LOAN_PROGRAM_ID', ids.loan),
+    capacityProgramId: key(env, 'H081_CAPACITY_PROGRAM_ID', ids.capacity),
+    safetyProgramId: key(env, 'H081_SAFETY_PROGRAM_ID', ids.safety),
     usdgMint: key(env, 'H081_USDG_MINT', MAINNET.usdg.mint),
     stakeMint: key(env, 'H081_STAKE_MINT', MAINNET.h081.mint),
     loanTreasury: key(env, 'H081_LOAN_TREASURY', MAINNET.loanTreasury),

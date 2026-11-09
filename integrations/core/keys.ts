@@ -8,13 +8,16 @@
 // signature over the label (what the site does with a wallet's Sign-In-With-Solana signature). With it, one
 // signature of the label is as good as the key: never pair it with a tool that signs arbitrary messages.
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { ed25519 } from '@noble/curves/ed25519';
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha2';
 import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { FIELD, mod } from '../../src/crypto.js';
-import { DERIVE_LABEL } from './constants.js';
+import { DERIVE_LABEL, expandHome, h081Home } from './constants.js';
+
+export { expandHome, h081Home };
 
 /** A Keypair from a JSON byte array (the Solana CLI file format) or a base58 secret key. */
 export function parseSecret(text: string, what = 'the key'): Keypair {
@@ -34,23 +37,53 @@ export function parseSecret(text: string, what = 'the key'): Keypair {
 }
 
 export const KEY_HELP =
-  'set H081_SOLANA_KEYPAIR to a Solana keypair JSON file (e.g. ~/.config/solana/agent.json) or H081_SOLANA_KEY to a base58 secret key';
+  'run `npx -y @h081lll/agent init` (it creates ~/.h081/agent.json), or set H081_SOLANA_KEYPAIR to a Solana keypair JSON file (e.g. ~/.h081/agent.json) or H081_SOLANA_KEY to a base58 secret key';
 
-/** The agent key from the environment: H081_SOLANA_KEYPAIR (a path) first, then H081_SOLANA_KEY (the secret itself). */
-export function loadKeypair(env: NodeJS.ProcessEnv = process.env): Keypair {
+/** Where the agent key lives when the environment names none: <H081_HOME>/agent.json (default ~/.h081/agent.json). */
+export function defaultKeyPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(h081Home(env), 'agent.json');
+}
+
+/** Where the agent key comes from: the variable or the file path, never the key itself. */
+export interface KeySource { kind: 'H081_SOLANA_KEYPAIR' | 'H081_SOLANA_KEY' | 'default'; path?: string }
+
+/** Which source `loadKeypair` uses (undefined: none), without reading the key. */
+export function keySource(env: NodeJS.ProcessEnv = process.env): KeySource | undefined {
   const path = env.H081_SOLANA_KEYPAIR?.trim();
-  if (path) {
+  if (path) return { kind: 'H081_SOLANA_KEYPAIR', path: expandHome(path) };
+  if (env.H081_SOLANA_KEY?.trim()) return { kind: 'H081_SOLANA_KEY' };
+  const def = defaultKeyPath(env);
+  return existsSync(def) ? { kind: 'default', path: def } : undefined;
+}
+
+/** A short line for info/status: which variable or file holds the key (never the key). */
+export function describeKeySource(src: KeySource | undefined): string {
+  if (!src) return 'none';
+  if (src.kind === 'H081_SOLANA_KEY') return 'H081_SOLANA_KEY';
+  return src.kind === 'default' ? `file ${src.path}` : `H081_SOLANA_KEYPAIR (${src.path})`;
+}
+
+/**
+ * The agent key: H081_SOLANA_KEYPAIR (a path; a leading ~ is expanded) first, then H081_SOLANA_KEY (the secret
+ * itself), then the file <H081_HOME>/agent.json (default ~/.h081/agent.json, what `h081 init` writes).
+ */
+export function loadKeypair(env: NodeJS.ProcessEnv = process.env): Keypair {
+  const raw = env.H081_SOLANA_KEYPAIR?.trim();
+  if (raw) {
+    const path = expandHome(raw);
     if (!existsSync(path)) throw new Error(`H081_SOLANA_KEYPAIR: no file at ${path}`);
     return parseSecret(readFileSync(path, 'utf8'), `H081_SOLANA_KEYPAIR (${path})`);
   }
-  const raw = env.H081_SOLANA_KEY?.trim();
-  if (raw) return parseSecret(raw, 'H081_SOLANA_KEY');
+  const secret = env.H081_SOLANA_KEY?.trim();
+  if (secret) return parseSecret(secret, 'H081_SOLANA_KEY');
+  const def = defaultKeyPath(env);
+  if (existsSync(def)) return parseSecret(readFileSync(def, 'utf8'), `the key file ${def}`);
   throw new Error(`no agent key: ${KEY_HELP}`);
 }
 
-/** Whether the environment names an agent key at all. */
+/** Whether the environment names an agent key, or the default key file exists. */
 export function hasKeyInEnv(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.H081_SOLANA_KEYPAIR?.trim() || env.H081_SOLANA_KEY?.trim());
+  return keySource(env) !== undefined;
 }
 
 /**
