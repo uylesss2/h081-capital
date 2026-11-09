@@ -1,7 +1,7 @@
 // An McpServer (src/mcp-core.ts framing) serving the H081 bank tools.
 import { McpServer } from '../../../src/mcp-core.js';
 import { NOTICE } from '../../core/constants.js';
-import { classify } from '../../core/errors.js';
+import { classify, classifySend } from '../../core/errors.js';
 import type { BankLike } from '../../core/operations.js';
 import { h081Tools } from './tools.js';
 
@@ -30,10 +30,30 @@ export interface ServerOptions {
   version?: string;
 }
 
+const READS = new Set(['h081_bank_balance', 'h081_loan_quote', 'h081_protocol_info']);
+/** Tools that only return a plan unless called with confirm: true (for h081_lend: open, fund, settle, close). */
+const PLAN_FIRST = new Set(['h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim']);
+
+/** Whether this call can send a transaction (so a dropped connection leaves its outcome unknown). */
+export function sends(name: string, args: Record<string, unknown> = {}): boolean {
+  if (READS.has(name)) return false;
+  if (name === 'h081_stake' && (args.action ?? 'view') === 'view') return false;
+  if (name === 'h081_lend') {
+    if (args.action === 'status') return false;
+    if (['open', 'fund', 'settle', 'close'].includes(String(args.action)) && args.confirm !== true) return false;
+  }
+  if (PLAN_FIRST.has(name) && args.confirm !== true) return false;
+  return true;
+}
+
 export function createServer(opts: ServerOptions): McpServer {
   return new McpServer(h081Tools({ bank: opts.bank }), {
     name: SERVER_NAME, version: opts.version ?? SERVER_VERSION, instructions: INSTRUCTIONS,
     // the same stable code and retry flag the local API (@h081lll/agent) returns
-    errorContent: (e) => { const c = classify(e); return { error: { code: c.code, retryable: c.retryable, message: c.message } }; },
+    // a failure while sending is retryable only when nothing was sent (classifySend); otherwise it is outcome_unknown
+    errorContent: (e, call) => {
+      const c = sends(call.name, call.args) ? classifySend(e) : classify(e);
+      return { error: { code: c.code, retryable: c.retryable, message: c.message }, ...(c.code === 'outcome_unknown' ? { text: c.message } : {}) };
+    },
   });
 }

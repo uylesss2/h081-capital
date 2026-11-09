@@ -149,7 +149,7 @@ export const ERROR_CODES = {
   idempotency_key_required: { status: 400, retryable: false, description: 'a confirmed write needs an Idempotency-Key header (1-128 of A-Z a-z 0-9 _ . : -)' },
   idempotency_key_reused: { status: 422, retryable: false, description: 'this Idempotency-Key was used for a different request' },
   in_progress: { status: 409, retryable: true, description: 'a request with this Idempotency-Key is still running' },
-  outcome_unknown: { status: 409, retryable: false, description: 'the gateway stopped while this request was running; check /v1/balance before retrying with a new key' },
+  outcome_unknown: { status: 409, retryable: false, description: 'it may or may not have been sent (the gateway stopped, or the connection failed mid-send); check /v1/balance before retrying with a new key' },
   invalid_code: { status: 400, retryable: false, description: 'an h081-* code failed its checksum, kind or network check' },
   insufficient_shielded: { status: 409, retryable: false, description: 'the shielded balance is too low' },
   insufficient_wallet_usdg: { status: 409, retryable: false, description: 'the agent wallet holds too little USDG' },
@@ -290,4 +290,46 @@ export function classify(e: unknown): Classified {
   if (/^the relayer \S+ (is unreachable|does not|names|asks|serves)/.test(m)) return make('relayer_unavailable', m);
   if (INPUT.test(m)) return make('bad_request', m);
   return make('internal', m);
+}
+
+// ------------------------------------------------------------------ failures of a send: refused, or unknown
+
+const causeChain = (e: unknown): unknown[] => {
+  const out: unknown[] = [];
+  for (let x: unknown = e, i = 0; x && i < 6; x = (x as { cause?: unknown }).cause, i++) out.push(x);
+  return out;
+};
+
+/**
+ * True when a retryable failure of a send provably happened before anything could reach the chain: a refusal by the
+ * relayer (busy, 429, 409, any 4xx), the relayer terms check made before proving, the RPC unreachable when the bank
+ * was opened, or a transaction the program refused (stale root). A dropped connection or a relayer 5xx in the middle
+ * of a send is not one of these: the relayer or the RPC may already have sent it.
+ */
+export function refusedBeforeSend(e: unknown, c: Classified = classify(e)): boolean {
+  switch (c.code) {
+    case 'stale_root': case 'in_flight': case 'relayer_busy': case 'rate_limited': case 'busy': case 'in_progress':
+      return true;
+    case 'relayer_unavailable':
+      if (/^the relayer \S+ (is unreachable|does not|names|asks|serves)/.test(c.message)) return true;
+      return causeChain(e).some((x) => (x as { name?: unknown }).name === 'RelayerUnavailableError'
+        || (x instanceof RelayerError && (x.status < 500 || x.code === 'chain_disabled')));
+    case 'rpc_unreachable':
+      return causeChain(e).some((x) => x instanceof RpcUnreachableError);
+    default:
+      return false;
+  }
+}
+
+/**
+ * `classify` for a failure while sending money. A retryable code is kept only when nothing was sent
+ * (`refusedBeforeSend`); otherwise it becomes outcome_unknown (not retryable), so neither a retry with the same
+ * idempotency key nor an agent that retries on `retryable` can pay twice.
+ */
+export function classifySend(e: unknown): Classified {
+  const c = classify(e);
+  if (!c.retryable || refusedBeforeSend(e, c)) return c;
+  return make('outcome_unknown',
+    `the connection failed while it may already have been sent (${c.message}), so the outcome is unknown: check the balance (GET /v1/balance?fresh=1, h081 balance --fresh) before retrying with a new key`,
+    { cause: c.code, ...(c.details ?? {}) });
 }

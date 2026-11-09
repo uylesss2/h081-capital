@@ -155,3 +155,20 @@ describe('gateway auth and local security', () => {
     expect(warn).toEqual([]);
   });
 });
+
+describe('gateway: malformed requests are 400s, never 500s or a reset connection', () => {
+  it('a bad percent-escape in a path parameter and a body over 64 KB', async () => {
+    const a = await makeAgent();
+    const g = await startGateway(a.h);
+    try {
+      const pct = await g.api('POST', '/v1/allowances/%E0%A4%A/reclaim', { confirm: false });
+      expect(pct.status).toBe(400);
+      expect(pct.json.error.code).toBe('bad_request');
+      const big = await call(g.port, 'POST', '/v1/deposit', { raw: JSON.stringify({ usdg: 'x'.repeat(70_000) }), headers: { host: `127.0.0.1:${g.port}`, authorization: `Bearer ${g.token}`, 'content-type': 'application/json' } });
+      expect(big.status).toBe(400);
+      expect(big.json.error).toMatchObject({ code: 'bad_request', message: expect.stringMatching(/larger than 65536 bytes/) });
+      expect((await g.api('GET', '/v1/health')).status).toBe(200);
+      expect(a.bank.deposit).not.toHaveBeenCalled();
+    } finally { await g.close(); }
+  });
+});

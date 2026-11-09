@@ -17,7 +17,7 @@ import {
   decodeLoanTerms, encodeAddressCode,
 } from '../../core/codes.js';
 import { AGENT_CIRCUITS, MAINNET, type H081Config, configFromEnv, rpcHost } from '../../core/constants.js';
-import { CodedError, classify } from '../../core/errors.js';
+import { CodedError, classify, classifySend } from '../../core/errors.js';
 import { accountSkFromEnv, describeKeySource, keySource, loadKeypair } from '../../core/keys.js';
 import { openFromEnv } from '../../core/open.js';
 import { type Args, type BankLike, plain, runOp, validateArgs } from '../../core/operations.js';
@@ -495,8 +495,14 @@ export class H081 {
     if (this.queue.waiting >= QUEUE_MAX) throw new CodedError('busy', `${this.queue.waiting} sends are already waiting; try again shortly`, { retryAfter: 5 });
     const kind = KINDS[w.op] ?? w.op;
     this.ops.begin({ key, route: w.route, bodyHash: hash, kind, ...(w.usdg ? { usdg: w.usdg } : {}), ...(w.to ? { to: w.to } : {}) });
+    // a failure before the bank is open sent nothing; after that, classifySend decides whether anything may have gone out
+    let opened = false;
     try {
-      const raw = await this.queue.run(async () => this.runWithRetry(async () => w.run(await this.bank())));
+      const raw = await this.queue.run(async () => {
+        const bank = await this.bank();
+        opened = true;
+        return this.runWithRetry(() => w.run(bank));
+      });
       const result = plain<Record<string, unknown>>(raw);
       const signature = typeof result?.signature === 'string' ? result.signature
         : Array.isArray(result?.signatures) && typeof result.signatures[0] === 'string' ? result.signatures[0] as string
@@ -506,12 +512,16 @@ export class H081 {
       this.events.emit('op.completed', { idempotencyKey: key, kind, ...(signature ? { signature } : {}) });
       return { status: 'sent', result, idempotencyKey: key };
     } catch (e) {
-      const c = classify(e);
-      // a retryable failure sent nothing: forget the key so the same request may run again with it
+      const plainC = classify(e);
+      const c = opened ? classifySend(e) : plainC;
+      // a retryable failure here provably sent nothing: forget the key so the same request may run again with it.
+      // Anything else (a final error, or an outcome that is unknown) is stored and replayed, never sent again.
       if (c.retryable) this.ops.drop(key);
       else this.ops.finish(key, { state: 'failed', error: { code: c.code, message: this.redact(c.message), retryable: c.retryable, status: c.status, ...(c.details ? { details: c.details } : {}) } });
       this.events.emit('op.failed', { idempotencyKey: key, kind, code: c.code });
-      throw e;
+      if (c.code === plainC.code) throw e;
+      this.log(`${kind} ${key}: outcome unknown after ${plainC.code}; it is not retried`);
+      throw new CodedError(c.code, c.message, { ...(c.details ?? {}), idempotencyKey: key }, { cause: e });
     }
   }
 

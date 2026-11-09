@@ -4,8 +4,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayerError } from '../../src/relayer-client.js';
+import { RelayerUnavailableError } from '../../integrations/core/bank.js';
+import { H081Error, RpcUnreachableError } from '../../integrations/core/errors.js';
 import { bodyHash, OpStore, RETENTION_MS } from '../../integrations/agent/src/idempotency.js';
-import { FRESH, makeAgent, startGateway, stubBank, type Gateway } from './agent-helpers.js';
+import { FRESH, makeAgent, startGateway, stubBank, tempHome, type Gateway } from './agent-helpers.js';
 
 const gateways: Gateway[] = [];
 afterEach(async () => { while (gateways.length) await gateways.pop()!.close(); });
@@ -147,5 +149,62 @@ describe('idempotency (ops.jsonl)', () => {
     now += RETENTION_MS + 1000;
     const later = new OpStore(join(a.home, 'ops.jsonl'), () => {}, () => now);
     expect(later.get('keep-1')).toBeUndefined();
+  });
+});
+
+describe('a send whose outcome is unknown is never sent again', () => {
+  // the relayer or the RPC may already have sent it: a dropped connection mid-send, or a relayer 5xx such as a proxy 504
+  const reset = () => new H081Error('fetch failed', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) }));
+  const cases: Array<[string, () => Error]> = [
+    ['a connection reset while the relayer has the request', reset],
+    ['a relayer 504 from a proxy', () => new H081Error('relayer 504 error: gateway timeout', new RelayerError(504, 'error', 'gateway timeout'))],
+    ['a relayer 500', () => new RelayerError(500, 'error', 'confirm timed out')],
+    ['an RPC that stops answering while confirming a direct send', () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }) })],
+  ];
+  for (const [name, make] of cases) {
+    it(`${name}: 409 outcome_unknown, stored, and the same key never sends again`, async () => {
+      const withdraw = vi.fn(async () => { throw make(); });
+      const a = await makeAgent({ bank: stubBank({ withdraw }) });
+      const g = await gw(a.h);
+      const body = { usdg: '2', to: FRESH, confirm: true };
+      const first = await g.api('POST', '/v1/withdraw', body, { 'idempotency-key': 'wd-u' });
+      expect(first.status).toBe(409);
+      expect(first.json.error).toMatchObject({ code: 'outcome_unknown', retryable: false, details: { idempotencyKey: 'wd-u' } });
+      expect(first.json.error.message).toMatch(/before retrying with a new key/);
+      withdraw.mockImplementation(async () => ({ signature: 'sigAgain', amount: 2_000_000n }) as never);
+      const again = await g.api('POST', '/v1/withdraw', body, { 'idempotency-key': 'wd-u' });
+      expect(again.status).toBe(409);
+      expect(again.json.error).toMatchObject({ code: 'outcome_unknown', retryable: false, details: { replayed: true } });
+      expect(withdraw).toHaveBeenCalledTimes(1);
+      // and it stays so after a restart
+      const b = await makeAgent({ home: a.home, signer: a.signer, bank: stubBank({ withdraw }) });
+      await expect(b.h.withdraw('2', { to: FRESH, confirm: true, idempotencyKey: 'wd-u' })).rejects.toMatchObject({ code: 'outcome_unknown' });
+      expect(withdraw).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('a refusal before anything was sent still frees the key: the relayer terms check, a 4xx, the RPC down at open', async () => {
+    const refusals: Array<() => Error> = [
+      () => new Error('the relayer https://api.h081.xyz is unreachable (fetch failed). The withdrawal was not sent', { cause: new RelayerUnavailableError('unreachable', 'the relayer https://api.h081.xyz is unreachable (fetch failed)') }),
+      () => new RelayerError(409, 'in_flight', 'a note is being spent'),
+    ];
+    for (const [i, make] of refusals.entries()) {
+      const withdraw = vi.fn(async () => { throw make(); });
+      const a = await makeAgent({ bank: stubBank({ withdraw }) });
+      const g = await gw(a.h);
+      const r = await g.api('POST', '/v1/withdraw', { usdg: '2', to: FRESH, confirm: true }, { 'idempotency-key': `wd-r${i}` });
+      expect(r.json.error.retryable).toBe(true);
+      withdraw.mockImplementation(async () => ({ signature: 'sigOk', amount: 2_000_000n }) as never);
+      expect((await g.api('POST', '/v1/withdraw', { usdg: '2', to: FRESH, confirm: true }, { 'idempotency-key': `wd-r${i}` })).json.status).toBe('sent');
+    }
+    // the bank could not be opened at all: nothing was sent
+    const signer = (await makeAgent()).signer;
+    let fail = true;
+    const ok = stubBank();
+    const { H081 } = await import('../../integrations/agent/src/h081.js');
+    const h = await H081.open({ env: { H081_HOME: tempHome() }, signer, log: () => {}, bank: async () => { if (fail) throw new RpcUnreachableError('127.0.0.1:9', 'ECONNREFUSED'); return ok as never; } });
+    await expect(h.deposit('1', { confirm: true, idempotencyKey: 'dep-open' })).rejects.toMatchObject({ code: 'rpc_unreachable' });
+    fail = false;
+    expect((await h.deposit('1', { confirm: true, idempotencyKey: 'dep-open' })).status).toBe('sent');
   });
 });

@@ -147,6 +147,21 @@ describe('h081 MCP server', () => {
     expect(calls()).toBe(before);
   });
 
+  it('a send that fails mid-way is outcome_unknown (not retryable) so the model does not pay twice; a read stays retryable', async () => {
+    const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+    const b = mockBank({ withdraw: vi.fn(async () => { throw reset(); }), balance: vi.fn(async () => { throw reset(); }) } as never);
+    const server = createServer({ bank: async () => b });
+    const run = async (name: string, args: Record<string, unknown>) => (await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }))!.result as CallResult;
+    const w = await run('h081_bank_withdraw', { usdg: '2', to: Keypair.generate().publicKey.toBase58() });
+    expect(w.isError).toBe(true);
+    expect(w.structuredContent).toMatchObject({ error: { code: 'outcome_unknown', retryable: false } });
+    expect(w.structuredContent).not.toHaveProperty('text');
+    expect(w.content[0].text).toMatch(/outcome is unknown: check the balance .* before retrying/);
+    const r = await run('h081_bank_balance', {});
+    expect(r.structuredContent).toMatchObject({ error: { code: 'rpc_unreachable', retryable: true } });
+    expect(r.content[0].text).toBe('fetch failed');
+  });
+
   it('a bad argument or a bank refusal is a tool result with isError, not a protocol error', async () => {
     const both = await call('h081_bank_deposit', { usdg: '1', amount: '1' });
     expect(both.isError).toBe(true);

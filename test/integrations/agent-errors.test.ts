@@ -6,7 +6,7 @@ import { SimulationError } from '../../src/solana/send.js';
 import { RelayerUnavailableError } from '../../integrations/core/bank.js';
 import { CodeError } from '../../integrations/core/codes.js';
 import { MAINNET } from '../../integrations/core/constants.js';
-import { CodedError, ERROR_CODES, RpcUnreachableError, classify, explained } from '../../integrations/core/errors.js';
+import { CodedError, ERROR_CODES, RpcUnreachableError, classify, classifySend, explained } from '../../integrations/core/errors.js';
 import { InputError } from '../../integrations/core/operations.js';
 import { makeAgent, startGateway, stubBank } from './agent-helpers.js';
 
@@ -114,5 +114,28 @@ describe('classify', () => {
       expect(bank.withdraw).toHaveBeenCalledTimes(2);
       expect(a.h.events.since(0).filter((e) => e.type === 'op.failed').map((e) => e.data.code)).toEqual(['needs_sol', 'rate_limited']);
     } finally { await g.close(); }
+  });
+});
+
+describe('classifySend: a send that failed is retryable only when nothing was sent', () => {
+  const s = (e: unknown) => { const x = classifySend(e); return { code: x.code, retryable: x.retryable }; };
+  const reset = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+  it('refusals keep their retryable code', () => {
+    expect(s(new RelayerError(503, 'busy', 'x'))).toEqual({ code: 'relayer_busy', retryable: true });
+    expect(s(new RelayerError(429, 'rate_limited', 'x'))).toEqual({ code: 'rate_limited', retryable: true });
+    expect(s(new RelayerError(409, 'unknown_root', 'x'))).toEqual({ code: 'stale_root', retryable: true });
+    expect(s(new RelayerError(409, 'in_flight', 'x'))).toEqual({ code: 'in_flight', retryable: true });
+    expect(s(new RelayerError(404, 'not_found', 'x'))).toEqual({ code: 'relayer_unavailable', retryable: true });
+    expect(s(new Error('wrapped', { cause: new RelayerUnavailableError('unreachable', 'the relayer https://r is unreachable (fetch failed)') }))).toEqual({ code: 'relayer_unavailable', retryable: true });
+    expect(s(new RpcUnreachableError('127.0.0.1:9', 'ECONNREFUSED'))).toEqual({ code: 'rpc_unreachable', retryable: true });
+    expect(s(explained(new SimulationError('x', poolLogs('0x1772')), { ids }))).toMatchObject({ retryable: false });
+  });
+  it('a dropped connection or a relayer 5xx mid-send is outcome_unknown, not retryable', () => {
+    expect(s(reset)).toEqual({ code: 'outcome_unknown', retryable: false });
+    expect(s(explained(reset))).toEqual({ code: 'outcome_unknown', retryable: false });
+    for (const st of [500, 502, 504]) expect(s(new RelayerError(st, 'error', 'x'))).toEqual({ code: 'outcome_unknown', retryable: false });
+    expect(classifySend(new RelayerError(504, 'bad_response', '<html>')).details).toMatchObject({ cause: 'relayer_unavailable', relayerStatus: 504 });
+    // for a read, the same failure stays retryable
+    expect(c(reset)).toMatchObject({ code: 'rpc_unreachable', retryable: true });
   });
 });

@@ -151,8 +151,8 @@ Every response has `network`. Success: `{"ok": true, "network": "mainnet-beta", 
 | Same key, same body, finished | The stored response again (`"replayed": true`) |
 | Same key, still running | `409 in_progress`, `Retry-After: 5` |
 | Same key, another body | `422 idempotency_key_reused` |
-| The gateway stopped while it ran | `409 outcome_unknown`: check `/v1/balance` before retrying with a new key. Never retried automatically. |
-| A retryable error (nothing was sent) | The key is released: the same request may be sent again with it. |
+| The gateway stopped while it ran, or the connection to the relayer or RPC failed mid-send | `409 outcome_unknown`: it may have been sent. Check `/v1/balance?fresh=1` before retrying with a new key. The same key keeps answering `outcome_unknown`; it is never sent again. |
+| A retryable error where nothing was sent (relayer busy, 429, stale root) | The key is released: the same request may be sent again with it. |
 
 **Errors** (`code`, HTTP status, retryable): `unauthorized` 401; `forbidden_origin` 403; `bad_request` 400; `unsupported_media_type` 415; `idempotency_key_required` 400; `idempotency_key_reused` 422; `in_progress` 409 yes; `outcome_unknown` 409; `invalid_code` 400; `insufficient_shielded`, `insufficient_wallet_usdg`, `needs_sol`, `cap_per_deposit`, `cap_total`, `deposits_paused`, `over_operator_ceiling`, `needs_stake`, `allowance_blocked` 409; `relayer_unavailable`, `relayer_busy` 503 yes; `rate_limited` 429 yes; `busy` 503 yes; `stale_root`, `in_flight` 409 yes; `already_spent` 409; `simulation_failed`, `program_error` 422; `rpc_unreachable` 502 yes; `circuits_missing`, `circuit_hash_mismatch` 503; `not_available` 501; `internal` 500. A busy or rate-limited relayer is retried once before the error is returned.
 

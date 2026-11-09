@@ -338,7 +338,9 @@ function match(method: string, pathname: string): { route?: RouteDef; params: Re
     pathKnown = true;
     if (r.method !== method) continue;
     const params: Record<string, string> = {};
-    names.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1]); });
+    names.forEach((n, i) => {
+      try { params[n] = decodeURIComponent(m[i + 1]); } catch { throw bad(`the path segment "${m[i + 1]}" is not valid percent-encoding`); }
+    });
     return { route: r, params, pathKnown };
   }
   return { params: {}, pathKnown };
@@ -348,12 +350,15 @@ function readBody(req: IncomingMessage): Promise<Json> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooBig = false;
     req.on('data', (c: Buffer) => {
+      if (tooBig) return; // read and drop the rest, so the client gets the 400 instead of a reset connection
       size += c.length;
-      if (size > MAX_BODY) { reject(bad(`the body is larger than ${MAX_BODY} bytes`)); req.destroy(); return; }
+      if (size > MAX_BODY) { tooBig = true; chunks.length = 0; reject(bad(`the body is larger than ${MAX_BODY} bytes`)); return; }
       chunks.push(c);
     });
     req.on('end', () => {
+      if (tooBig) return;
       const text = Buffer.concat(chunks).toString('utf8').trim();
       if (!text) return resolve({});
       let v: unknown;
