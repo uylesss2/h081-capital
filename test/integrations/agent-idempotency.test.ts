@@ -1,12 +1,12 @@
 // Idempotency of confirmed writes: replay, key reuse, in progress, a restart with a pending record, no key, and a
 // retryable failure that releases its key.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayerError } from '../../src/relayer-client.js';
 import { RelayerUnavailableError } from '../../integrations/core/bank.js';
 import { H081Error, RpcUnreachableError } from '../../integrations/core/errors.js';
-import { bodyHash, OpStore, RETENTION_MS } from '../../integrations/agent/src/idempotency.js';
+import { bodyHash, COMPACT_MIN_STALE, OpStore, RETENTION_MS, withFileLock } from '../../integrations/agent/src/idempotency.js';
 import { FRESH, makeAgent, startGateway, stubBank, tempHome, type Gateway } from './agent-helpers.js';
 
 const gateways: Gateway[] = [];
@@ -149,6 +149,38 @@ describe('idempotency (ops.jsonl)', () => {
     now += RETENTION_MS + 1000;
     const later = new OpStore(join(a.home, 'ops.jsonl'), () => {}, () => now);
     expect(later.get('keep-1')).toBeUndefined();
+  });
+
+  it('two processes share ops.jsonl: loading never rewrites it, and a compaction keeps what the other appended', () => {
+    const file = join(tempHome(), 'ops.jsonl');
+    const gateway = new OpStore(file);
+    gateway.begin({ key: 'gw-1', route: 'withdraw', bodyHash: 'h1' });
+    gateway.finish('gw-1', { state: 'done', signature: 'sig1' });
+    // a CLI run starts while the gateway is up: a small file is not rewritten
+    const before = readFileSync(file, 'utf8');
+    new OpStore(file);
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    // enough stale lines to compact; the gateway appends after the CLI loaded but before it compacts
+    for (let i = 0; i < COMPACT_MIN_STALE; i++) { gateway.begin({ key: `old-${i}`, route: 'deposit', bodyHash: 'x' }); gateway.drop(`old-${i}`); }
+    gateway.begin({ key: 'gw-2', route: 'withdraw', bodyHash: 'h2' });
+    gateway.finish('gw-2', { state: 'done', signature: 'sig2' });
+    const cli = new OpStore(file);
+    expect(cli.get('gw-2')).toMatchObject({ state: 'done' });
+    expect(readFileSync(file, 'utf8').trim().split('\n')).toHaveLength(2);
+    // after a restart the gateway still refuses to send gw-1 and gw-2 again
+    const restarted = new OpStore(file);
+    expect(restarted.get('gw-1')).toMatchObject({ state: 'done', signature: 'sig1' });
+    expect(restarted.get('gw-2')).toMatchObject({ state: 'done', signature: 'sig2' });
+    expect(existsSync(`${file}.lock`)).toBe(false);
+  });
+
+  it('a lock held by a live process makes the other wait; a stale lock is taken over', () => {
+    const file = join(tempHome(), 'ops.jsonl');
+    writeFileSync(`${file}.lock`, '');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${file}.lock`, old, old);
+    expect(withFileLock(file, () => 'ran')).toBe('ran');
+    expect(existsSync(`${file}.lock`)).toBe(false);
   });
 });
 

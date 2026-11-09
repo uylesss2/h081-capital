@@ -255,6 +255,7 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
         const q = await h.withdrawFee(arg(1, '<usdg>'));
         return ok('done', q, () => {
           out(`Fee: ${q.fee} USDG; the recipient gets ${q.payout} USDG${q.relayer ? ` (relayer ${q.relayer})` : ''}`);
+          if (q.createAccountFee !== undefined) out(`If the recipient has no USDG account yet (a fresh wallet usually has none), the relayer adds ${q.createAccountFee} USDG to create it, so less arrives.`);
           if (q.needsStake) out(`Above ${q.freeTierMax} USDG the relayer needs H081 staked by the agent wallet; split it or use --direct.`);
           if (q.note) out(q.note);
         });

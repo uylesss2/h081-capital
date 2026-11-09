@@ -1,13 +1,34 @@
 // Idempotency records and local history in ops.jsonl (append-only, one JSON record per line, the last line for a key
-// wins; compacted on load; records older than 7 days are dropped). A record holds what a confirmed write was asked
+// wins; records older than 7 days are dropped). A gateway and CLI runs may share the file, so every append and the
+// occasional compaction hold ops.jsonl.lock. A record holds what a confirmed write was asked
 // (route and body hash), its state, and its result or error: never a key, a note or a token.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { appendPrivate, writePrivate, type Warn } from './home.js';
 
 /** What an Idempotency-Key may look like: 1-128 of A-Z a-z 0-9 _ . : - */
 export const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{1,128}$/;
 export const RETENTION_MS = 7 * 24 * 3600 * 1000;
+/** compaction runs only once at least this many lines are stale, so it is rare */
+export const COMPACT_MIN_STALE = 200;
+const LOCK_WAIT_MS = 5000, LOCK_STALE_MS = 30_000;
+
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/** Runs `fn` holding `<file>.lock` (an exclusive create), shared by every process that uses the file. */
+export function withFileLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try { closeSync(openSync(lock, 'wx', 0o600)); break; } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      try { if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { unlinkSync(lock); continue; } } catch { continue; }
+      if (Date.now() > deadline) throw new Error(`${lock} is held by another h081 process; if none is running, delete it`);
+      pause(10);
+    }
+  }
+  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* already gone */ } }
+}
 
 export type OpState = 'pending' | 'done' | 'failed';
 
@@ -52,28 +73,48 @@ export class OpStore {
     this.load();
   }
 
-  private load(): void {
-    if (!existsSync(this.file)) return;
-    const cutoff = this.now() - RETENTION_MS;
+  /** Every live record in the file, and how many of its lines are stale (superseded, dropped, expired or unreadable). */
+  private read(): { records: Map<string, OpRecord>; stale: number } {
+    const records = new Map<string, OpRecord>();
+    if (!existsSync(this.file)) return { records, stale: 0 };
+    let lines = 0;
     for (const line of readFileSync(this.file, 'utf8').split('\n')) {
       if (!line.trim()) continue;
+      lines++;
       let r: (OpRecord & { dropped?: boolean }) | undefined;
       try { r = JSON.parse(line); } catch { this.warn(`ops.jsonl: skipped an unreadable line`); continue; }
       if (!r || typeof r.key !== 'string') continue;
-      if (r.dropped) { this.records.delete(r.key); continue; }
-      this.records.set(r.key, r);
+      if (r.dropped) { records.delete(r.key); continue; }
+      records.set(r.key, r);
     }
-    for (const [k, r] of this.records) if (r.at < cutoff) this.records.delete(k);
-    this.compact();
+    const cutoff = this.now() - RETENTION_MS;
+    for (const [k, r] of records) if (r.at < cutoff) records.delete(k);
+    return { records, stale: lines - records.size };
   }
 
+  private load(): void {
+    const { records, stale } = this.read();
+    for (const [k, r] of records) this.records.set(k, r);
+    if (stale >= COMPACT_MIN_STALE) this.compact();
+  }
+
+  /**
+   * Rewrites the file without stale lines. A gateway and CLI runs may share the file, so this holds the lock and
+   * re-reads the file inside it: a record another process appended in the meantime is kept, never lost.
+   */
   private compact(): void {
-    const lines = [...this.records.values()].map((r) => JSON.stringify(r)).join('\n');
-    try { writePrivate(this.file, lines ? lines + '\n' : '', this.warn); } catch (e) { this.warn(`could not rewrite ${this.file}: ${(e as Error).message}`); }
+    try {
+      withFileLock(this.file, () => {
+        const { records } = this.read();
+        for (const [k, r] of records) { const mine = this.records.get(k); if (!mine || mine.at <= r.at) this.records.set(k, r); }
+        const lines = [...records.values()].map((r) => JSON.stringify(r)).join('\n');
+        writePrivate(this.file, lines ? lines + '\n' : '', this.warn);
+      });
+    } catch (e) { this.warn(`could not rewrite ${this.file}: ${(e as Error).message}`); }
   }
 
   private append(r: OpRecord | { key: string; dropped: true; at: number }): void {
-    appendPrivate(this.file, JSON.stringify(r), this.warn);
+    withFileLock(this.file, () => appendPrivate(this.file, JSON.stringify(r), this.warn));
   }
 
   get(key: string): OpRecord | undefined { return this.records.get(key); }
