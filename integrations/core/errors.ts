@@ -199,16 +199,22 @@ const NETWORK_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMED
 
 /** Why a request failed at the network level (undefined: it reached a server). */
 export function networkFailure(e: unknown): string | undefined {
+  // a fetch that failed before any answer ("fetch failed" / "Failed to fetch"): its cause says why (a network code
+  // below, or e.g. "bad port"); the first network code found anywhere in the chain wins
+  let fallback: string | undefined;
   for (let x: unknown = e, i = 0; x && i < 6; x = (x as { cause?: unknown }).cause, i++) {
-    const o = x as { code?: unknown; message?: unknown; errors?: unknown[] };
+    const o = x as { code?: unknown; message?: unknown; errors?: unknown[]; cause?: unknown };
     if (typeof o.code === 'string' && NETWORK_CODES.has(o.code)) return o.code;
     if (Array.isArray(o.errors)) for (const sub of o.errors) { const c = (sub as { code?: unknown })?.code; if (typeof c === 'string' && NETWORK_CODES.has(c)) return c; }
     const m = typeof o.message === 'string' ? o.message : '';
     const known = /\b(ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|ENETUNREACH)\b/.exec(m);
     if (known) return known[1];
-    if (/fetch failed|failed to fetch|getaddrinfo|socket hang up/i.test(m) && !(x as { cause?: unknown }).cause) return 'fetch failed';
+    if (fallback === undefined && /fetch failed|failed to fetch|getaddrinfo|socket hang up/i.test(m)) {
+      const cm = (o.cause as { message?: unknown } | undefined)?.message;
+      fallback = typeof cm === 'string' && cm ? cm.slice(0, 120) : 'fetch failed';
+    }
   }
-  return undefined;
+  return fallback;
 }
 
 export interface Classified {
