@@ -145,11 +145,14 @@ export function loanContext(config: H081Config): CodeContext {
   return { cluster: config.cluster, program: config.loanProgramId.toBase58(), mint: config.usdgMint.toBase58() };
 }
 
+const PREFIX_KIND_NAME: Record<string, string> = { [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof' };
+
 /** Checks any "h081-*:" code against `config`: its kind, its network and whether it is valid there. Offline, no key needed. */
 export function checkCode(config: H081Config, code: string): CodeCheck {
   const text = String(code ?? '').trim();
-  const m = /^h081-([a-z-]+):/i.exec(text);
-  const prefix = m ? m[0].toLowerCase() : undefined;
+  // the prefix after what copying adds in front (quotes, brackets, Markdown); unframeV2 cleans the rest
+  const m = /^[^A-Za-z0-9]{0,8}(h081-[a-z-]+:)/i.exec(text);
+  const prefix = m ? m[1].toLowerCase() : undefined;
   const pool = poolContext(config), loan = loanContext(config);
   const kinds: Record<string, { kind: string; ctx: CodeContext; decode: (c: CodeContext, s: string) => unknown }> = {
     [ADDRESS_PREFIX]: { kind: 'address', ctx: pool, decode: decodeAddressCode },
@@ -254,8 +257,8 @@ export class H081 {
   private requireCode(code: unknown, prefix: string, what: string): string {
     if (typeof code !== 'string' || !code.trim()) throw bad(`${what} is required`);
     const c = this.checkCode(code);
-    if (!c.valid || !code.trim().toLowerCase().startsWith(prefix)) {
-      throw new CodedError('invalid_code', c.valid ? `${what} must be an "${prefix}" code` : (c.reason ?? `${what} is not valid`), { kind: c.kind, network: c.network });
+    if (!c.valid || c.kind !== PREFIX_KIND_NAME[prefix]) {
+      throw new CodedError('invalid_code', c.valid ? `${what} must be an "${prefix}" code (this is a ${c.kind} code)` : (c.reason ?? `${what} is not valid`), { kind: c.kind, network: c.network });
     }
     return code.trim();
   }

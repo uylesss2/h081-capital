@@ -33,7 +33,7 @@
     "test:relayer": "vitest run test/relayer test/sdk/solana-alt.test.ts",
     "test:integrations": "vitest run test/integrations",
     "build:integrations": "npm run build --prefix integrations/mcp && npm run build --prefix integrations/solana-agent-kit && npm run build --prefix integrations/agent",
-    "test:agent": "vitest run test/integrations/agent-*.test.ts"
+    "test:agent": "vitest run test/integrations/agent-"
   },
   "dependencies": {
     "@meteora-ag/cp-amm-sdk": "1.5.1",
