@@ -12,3 +12,6 @@ export { fetchCircuits, verifyCircuits, FlatDirProver } from '../../core/circuit
 export { explainProgramError, H081Error } from '../../core/errors.js';
 export { OPS, DESCRIPTIONS, JSON_SCHEMA, type OpName } from '../../core/schemas.js';
 export { runOp, plain, type BankLike } from '../../core/operations.js';
+export {
+  ADDRESS_PREFIX, PROOF_PREFIX, TERMS_PREFIX, CodeError, decodeAddressCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms, type CodeContext,
+} from '../../core/codes.js';

@@ -9,7 +9,7 @@ export const bankBalanceAction = makeAction({
       input: {},
       output: {
         status: 'success', shielded: '25000000', shieldedUsdg: '25', walletUsdg: '100000000', walletUsdgHuman: '100', walletSol: 0.21,
-        signer: 'AgentWallet…', shieldedAddress: { pk: '1234…', viewPub: '0xab…' }, subAccounts: [], agentAllowances: [],
+        signer: 'AgentWallet…', shieldedAddress: { pk: '1234…', viewPub: '0xab…' }, subAccounts: [], agentAllowances: [], grantedToOthers: [], heldBySubAccounts: [],
         caps: { perDeposit: '1000000000', total: '10000000000', inVault: '2500000000', paused: false },
       },
       explanation: 'The shielded balance (visible only to this key), the wallet\'s public balances and the live deposit caps.',

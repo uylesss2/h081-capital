@@ -304,6 +304,23 @@ describe('H081Bank', () => {
     expect(grant).not.toHaveBeenCalled();
   });
 
+  it('borrow sizes the budget to the principal and refuses a bigger one (the lender would take more than it lent)', async () => {
+    const signer = Keypair.generate();
+    const { bank } = await open(signer);
+    const grant = vi.spyOn(bank.owner, 'grant');
+    const { encodeTerms } = await import('../../integrations/core/codes.js');
+    const { slotPda } = await import('../../src/solana/lender.js');
+    const loan = new PublicKey(MAINNET.programs.loan);
+    const terms = encodeTerms({ v: 1, cluster: 'mainnet-beta', program: MAINNET.programs.loan, mint: MAINNET.usdg.mint, lender: slotPda(3n, loan), loanRef: 3n, pledgeBps: 4000n, lenderViewPub: new Uint8Array(32) });
+    // 100 pledged at 40% lets the lender take 40 against a 20 loan: refused, and the right budget (50) is named
+    await expect(bank.borrow(terms, { budget: 100_000_000n, principal: 20_000_000n, days: 30, unlockDays: 30 })).rejects.toThrow(/Overpay:.*up to 40 .*Use a budget of 50 .*Nothing was sent/);
+    // exactly the needed budget, or none (sized for you), pass the overpay check and reach the chain checks
+    await expect(bank.borrow(terms, { budget: 50_000_000n, principal: 20_000_000n, days: 30, unlockDays: 30 })).rejects.toThrow(/loan slot #3 does not exist/);
+    await expect(bank.borrow(terms, { principal: 20_000_000n, days: 30, unlockDays: 30 })).rejects.toThrow(/loan slot #3 does not exist/);
+    await expect(bank.borrow(terms, { days: 30, unlockDays: 30 })).rejects.toThrow(/give a budget or a principal/);
+    expect(grant).not.toHaveBeenCalled();
+  });
+
   it('checkCluster refuses mainnet with localnet ids and other clusters with the mainnet ids', () => {
     const cfg = configFromEnv({});
     expect(isMainnetConfig(cfg)).toBe(true);

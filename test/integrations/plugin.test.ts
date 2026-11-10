@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { KeypairWallet, SolanaAgentKit, type Action, type BaseWallet } from 'solana-agent-kit';
 import H081Plugin, { H081_ACTIONS, UNSUPPORTED_WALLET, keypairOfWallet, resetBank, setBankProvider, signerFromAgent } from '../../integrations/solana-agent-kit/src/index.js';
+import { encodeAddressCode } from '../../integrations/core/codes.js';
 import { EXAMPLE_INPUTS, OPS } from '../../integrations/core/schemas.js';
 import { mockBank } from './helpers.js';
 
@@ -22,13 +23,13 @@ describe('H081 Agent Kit plugin', () => {
   });
   afterEach(() => { setBankProvider(undefined); resetBank(agent); });
 
-  it('has the upstream Plugin shape: name, seven unique UPPER_SNAKE actions with snake-case similes, methods, initialize', () => {
+  it('has the upstream Plugin shape: name, one unique UPPER_SNAKE action per operation with snake-case similes, methods, initialize', () => {
     expect(H081Plugin.name).toBe('h081');
     expect(typeof H081Plugin.initialize).toBe('function');
-    expect(H081_ACTIONS).toHaveLength(7);
+    expect(H081_ACTIONS).toHaveLength(OPS.length);
     const names = H081_ACTIONS.map((a) => a.name);
-    expect(new Set(names).size).toBe(7);
-    expect(names).toEqual(['H081_BANK_DEPOSIT', 'H081_BANK_WITHDRAW', 'H081_BANK_BALANCE', 'H081_LOAN_QUOTE', 'H081_LOAN_BORROW', 'H081_STAKE', 'H081_PROTOCOL_INFO']);
+    expect(new Set(names).size).toBe(OPS.length);
+    expect(names).toEqual(['H081_BANK_DEPOSIT', 'H081_BANK_WITHDRAW', 'H081_BANK_BALANCE', 'H081_LOAN_QUOTE', 'H081_LOAN_BORROW', 'H081_STAKE', 'H081_PROTOCOL_INFO', 'H081_PAY', 'H081_ALLOWANCE_GRANT', 'H081_ALLOWANCE_DELEGATE', 'H081_ALLOWANCE_RECLAIM', 'H081_LEND']);
     for (const [i, a] of H081_ACTIONS.entries()) {
       expect(a.similes[0]).toBe(OPS[i]);
       expect(a.similes.length).toBeGreaterThan(2);
@@ -42,7 +43,7 @@ describe('H081 Agent Kit plugin', () => {
       for (const ex of EXAMPLE_INPUTS[OPS[i]]) expect(a.schema.safeParse(ex).success).toBe(true);
       expect(typeof a.handler).toBe('function');
     }
-    expect(Object.keys(H081Plugin.methods).sort()).toEqual(['h081BankBalance', 'h081BankDeposit', 'h081BankWithdraw', 'h081LoanBorrow', 'h081LoanQuote', 'h081ProtocolInfo', 'h081Stake']);
+    expect(Object.keys(H081Plugin.methods).sort()).toEqual(['h081AllowanceDelegate', 'h081AllowanceGrant', 'h081AllowanceReclaim', 'h081BankBalance', 'h081BankDeposit', 'h081BankWithdraw', 'h081Lend', 'h081LoanBorrow', 'h081LoanQuote', 'h081Pay', 'h081ProtocolInfo', 'h081Stake']);
     for (const m of Object.values(H081Plugin.methods)) expect(typeof m).toBe('function');
     expect(agent.actions.map((a) => a.name)).toEqual(names);
     expect(Object.keys(agent.methods).sort()).toEqual(Object.keys(H081Plugin.methods).sort());
@@ -72,6 +73,53 @@ describe('H081 Agent Kit plugin', () => {
     expect(await by.H081_STAKE.handler(agent, { action: 'request_unstake', amount: '7' })).toMatchObject({ status: 'success', pending: '7' });
     expect(await by.H081_STAKE.handler(agent, { action: 'unstake' })).toMatchObject({ status: 'success', signature: 'sigUnstake' });
     expect(await by.H081_PROTOCOL_INFO.handler(agent, {})).toMatchObject({ status: 'success', cluster: 'mainnet-beta' });
+
+    // h081_pay: a public payout to a wallet, a private one to an address code, and refusals before the bank is asked
+    const payTo = Keypair.generate().publicKey.toBase58();
+    expect(await by.H081_PAY.handler(agent, { usdg: '2.5', to: payTo })).toMatchObject({ status: 'success', signature: 'sigPay', amount: '2500000', fee: '50000', received: '2450000', to: payTo, private: false, via: 'relayer', remaining: '1000000' });
+    expect(bank.pay.mock.calls[0][0]).toMatchObject({ amount: 2_500_000n, allowanceId: undefined, agentIndex: undefined, direct: false });
+    expect((bank.pay.mock.calls[0][0].to as PublicKey).toBase58()).toBe(payTo);
+    const addr = { pk: 123456789n, viewPub: Uint8Array.from({ length: 32 }, (_, i) => i + 1) };
+    const code = encodeAddressCode(bank.codeContext, addr);
+    expect(await by.H081_PAY.handler(agent, { amount: '1000000', toAddressCode: code, agentIndex: 2, allowanceId: '42' })).toMatchObject({ status: 'success', private: true, to: 'shielded', via: 'direct', agentIndex: 2 });
+    expect(bank.pay.mock.calls[1][0]).toMatchObject({ amount: 1_000_000n, to: addr, allowanceId: 42n, agentIndex: 2, direct: false });
+    const devnetCode = encodeAddressCode({ ...bank.codeContext, cluster: 'devnet' }, addr);
+    expect(await by.H081_PAY.handler(agent, { usdg: '1', toAddressCode: devnetCode })).toMatchObject({ status: 'error', message: expect.stringMatching(/another network, program or asset/) });
+    expect(await by.H081_PAY.handler(agent, { usdg: '1', to: payTo, toAddressCode: code })).toMatchObject({ status: 'error', message: expect.stringMatching(/exactly one recipient/) });
+    expect(await by.H081_PAY.handler(agent, { usdg: '1', toAddressCode: code, direct: true })).toMatchObject({ status: 'error', message: expect.stringMatching(/direct applies to a public payout/) });
+    expect(bank.pay).toHaveBeenCalledTimes(2);
+
+    // allowances: a plan by default, the send with confirm, and refusals before the bank is asked
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '50', agentIndex: 1, windowCapUsdg: '10', maxPerTxUsdg: '2', days: 30 })).toMatchObject({ status: 'success', sent: false, dryRun: true });
+    expect(bank.allowanceGrant.mock.calls[0][0]).toMatchObject({ amount: 50_000_000n, agentIndex: 1, windowCap: 10_000_000n, maxPerTx: 2_000_000n, days: 30, confirm: false });
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '20', toAddressCode: code, unlockDays: 10, confirm: true })).toMatchObject({ status: 'success', sent: true, allowanceId: '11' });
+    expect(bank.allowanceGrant.mock.calls[1][0]).toMatchObject({ amount: 20_000_000n, to: addr, unlockDays: 10, confirm: true });
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '1', toAddressCode: devnetCode })).toMatchObject({ status: 'error', message: expect.stringMatching(/another network/) });
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '1', agentIndex: 1, toAddressCode: code })).toMatchObject({ status: 'error', message: expect.stringMatching(/not both/) });
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '1', days: 2, unlockDays: 3 })).toMatchObject({ status: 'error', message: expect.stringMatching(/unlockDays must not exceed days/) });
+    expect(await by.H081_ALLOWANCE_GRANT.handler(agent, { usdg: '1', windowCapUsdg: '0' })).toMatchObject({ status: 'error', message: expect.stringMatching(/positive/) });
+    expect(bank.allowanceGrant).toHaveBeenCalledTimes(2);
+    expect(await by.H081_ALLOWANCE_DELEGATE.handler(agent, { allowanceId: '42', agentIndex: 1, toAgentIndex: 2, usdg: '10', confirm: true })).toMatchObject({ status: 'success', sent: true, parentId: '42', allowanceId: '12' });
+    expect(bank.allowanceDelegate.mock.calls[0][0]).toMatchObject({ allowanceId: 42n, agentIndex: 1, toAgentIndex: 2, amount: 10_000_000n, confirm: true });
+    expect(await by.H081_ALLOWANCE_DELEGATE.handler(agent, { allowanceId: '42', toAgentIndex: 2, toAddressCode: code, usdg: '1' })).toMatchObject({ status: 'error', message: expect.stringMatching(/exactly one recipient for the child/) });
+    expect(bank.allowanceDelegate).toHaveBeenCalledTimes(1);
+    expect(await by.H081_ALLOWANCE_RECLAIM.handler(agent, { allowanceId: '11' })).toMatchObject({ status: 'success', sent: false, dryRun: true });
+    expect(await by.H081_ALLOWANCE_RECLAIM.handler(agent, { allowanceId: '11', confirm: true })).toMatchObject({ status: 'success', sent: true, reclaimedUsdg: '5' });
+  });
+
+  it('H081_LEND runs each lender action against the bank, a plan unless confirm, and refuses fields another action takes', async () => {
+    const by = Object.fromEntries(H081_ACTIONS.map((a) => [a.name, a])) as Record<string, Action>;
+    expect(await by.H081_LEND.handler(agent, { action: 'open', pledgeBps: 4000 })).toMatchObject({ status: 'success', sent: false, dryRun: true });
+    expect(await by.H081_LEND.handler(agent, { action: 'open', pledgeBps: 4000, confirm: true })).toMatchObject({ status: 'success', sent: true, termsCode: 'h081-loan-terms:4mD9q' });
+    expect(await by.H081_LEND.handler(agent, { action: 'fund', proofCode: 'h081-loan-proof:abc', confirm: true })).toMatchObject({ status: 'success', sent: true, borrowerReceivesUsdg: '39.9' });
+    expect(bank.lendFund).toHaveBeenLastCalledWith({ proofCode: 'h081-loan-proof:abc', loanRef: undefined, principal: undefined, pledgeBps: undefined, confirm: true });
+    expect(await by.H081_LEND.handler(agent, { action: 'status', loanRef: '3' })).toMatchObject({ status: 'success', slots: [{ loanRef: '3' }] });
+    expect(await by.H081_LEND.handler(agent, { action: 'claim', loanRef: '3' })).toMatchObject({ status: 'success', action: 'claim' });
+    expect(await by.H081_LEND.handler(agent, { action: 'settle', loanRef: '3', proofCode: 'h081-loan-proof:abc' })).toMatchObject({ status: 'error', message: expect.stringMatching(/each action takes only its own fields/) });
+    expect(await by.H081_LEND.handler(agent, { action: 'open' })).toMatchObject({ status: 'error', message: expect.stringMatching(/open needs pledgeBps/) });
+    expect(await by.H081_LEND.handler(agent, { action: 'collect' })).toMatchObject({ status: 'error', message: expect.stringMatching(/need loanRef/) });
+    expect(bank.lendSettle).not.toHaveBeenCalled();
+    expect(await agent.methods.h081Lend(agent, { action: 'status' })).toMatchObject({ slots: [{ loanRef: '3' }] });
   });
 
   it('handlers never throw: a schema violation or a bank error is {status: "error", message}', async () => {
