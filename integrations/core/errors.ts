@@ -39,6 +39,12 @@ export const ERROR_TEXT: Record<ProgramKind, Partial<Record<number, string>>> = 
     [LOAN_ERROR.PrincipalTooLarge]: 'the principal is more than the pledged share of the proven stream can repay',
     [LOAN_ERROR.BadTreasury]: 'the fee treasury account is wrong (it must be the treasury owner\'s token account)',
     [LOAN_ERROR.StreamNotStarted]: 'the pledged stream has not started yet',
+    [LOAN_ERROR.LoanRepaid]: 'the loan is repaid: the lender is owed nothing more (any excess goes back to the borrower)',
+    [LOAN_ERROR.ClaimTooLarge]: 'the claim is more than the loan still owes',
+    [LOAN_ERROR.NoExcess]: 'nothing in this loan inbox belongs to the borrower',
+    [LOAN_ERROR.PayoutCannotReceive]: 'the borrower payout account cannot receive right now (frozen or missing); its owner can redirect the excess',
+    [LOAN_ERROR.LegacyReceiptNoPayout]: 'this loan was closed before the overpay cap and records no payout account',
+    [LOAN_ERROR.ReceiptNotWritable]: 'pass the closed-loan receipt writable: the lender is still owed on this loan',
   },
   capacity: {
     [CAPACITY_ERROR.StakingPaused]: 'staking is paused by the config authority; unstaking still works',

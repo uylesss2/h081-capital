@@ -76,7 +76,7 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_ALLOWANCE_GRANT` | `h081_allowance_grant` | `{amount|usdg, agentIndex? | toAddressCode?, windowCap?|windowCapUsdg?, windowLen?, maxPerTx?|maxPerTxUsdg?, days?, unlockDays?, confirm?: boolean}` |
 | `H081_ALLOWANCE_DELEGATE` | `h081_allowance_delegate` | `{allowanceId, agentIndex?, toAgentIndex | toAddressCode, amount|usdg, windowCap?|windowCapUsdg?, maxPerTx?|maxPerTxUsdg?, days?, unlockDays?, confirm?: boolean}` |
 | `H081_ALLOWANCE_RECLAIM` | `h081_allowance_reclaim` | `{allowanceId, confirm?: boolean}` |
-| `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
+| `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close' \| 'sweep', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
 | `H081_TRANSFER` | `h081_transfer` | `{amount|usdg, toAddressCode: "h081-address:…"}` (from the main shielded balance, sent by the agent key) |
 
 The three allowance actions send nothing without `confirm: true`: they return the plan of exactly what would be sent. A delegated child can never be looser than its parent; the error names the limit. `h081_allowance_delegate` needs the delegate proving artifacts, which the site does not ship yet.
@@ -141,6 +141,12 @@ The upstream repository is `github.com/sendaifun/solana-agent-kit` (branch `v2` 
 7. SendAI has paid bounties for toolkit work on Superteam Earn before; check `earn.superteam.fun` for an open Solana Agent Kit bounty and link the PR there if one fits.
 
 Nothing in this repository publishes or opens the PR: the package ships with `private: false` but unpublished, and the steps above are the owner's.
+
+## Changes
+
+### 0.2.1
+
+- loans: lender payout capped at the principal; claim sized to what is owed. `H081_LEND` `claim` asks for at most principal - repaid - what is already on its way to the slot, and refuses once the loan is repaid; `collect` takes at most what is still owed; `close` (now enabled) closes a settled slot, returns its rent and sends any borrower excess back to the borrower's payout account; the new `sweep` action takes what reached a closed loan since, up to what it still owes, and sends the rest back to the borrower. `status` shows `borrowerExcess` and lists closed loans from their receipts (both receipt sizes). Works against stream_loan before and after its overpay-cap upgrade: it only ever asks the program for less.
 
 ## Development
 

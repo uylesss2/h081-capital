@@ -127,3 +127,60 @@ pub fn create_ata_idempotent<'info>(
     )?;
     Ok(())
 }
+
+/// Token-2022 account extension TLV: the base account (165 B), the account-type byte, then
+/// (type u16 LE, length u16 LE, value) entries. ExtensionType::TransferFeeAmount = 2, value = withheld u64.
+const EXT_TRANSFER_FEE_AMOUNT: u16 = 2;
+
+/// Transfer fees withheld in a Token-2022 account (TransferFeeAmount extension); 0 for SPL Token accounts and
+/// accounts without the extension. CloseAccount refuses an account whose withheld amount is not 0.
+pub fn withheld_amount(info: &AccountInfo) -> u64 {
+    if *info.owner != TOKEN_2022_ID {
+        return 0;
+    }
+    let Ok(data) = info.try_borrow_data() else { return 0 };
+    let mut o = ACCOUNT_LEN + 1;
+    while o + 4 <= data.len() {
+        let t = u16::from_le_bytes([data[o], data[o + 1]]);
+        let len = u16::from_le_bytes([data[o + 2], data[o + 3]]) as usize;
+        let v = o + 4;
+        if t == 0 || v + len > data.len() {
+            break;
+        }
+        if t == EXT_TRANSFER_FEE_AMOUNT && len >= 8 {
+            return u64::from_le_bytes(data[v..v + 8].try_into().unwrap());
+        }
+        o = v + len;
+    }
+    0
+}
+
+/// Token-2022 `HarvestWithheldTokensToMint` (permissionless): moves the account's withheld transfer fees to the
+/// mint, so the account can be closed. TokenInstruction::TransferFeeExtension (26), HarvestWithheldTokensToMint (4).
+pub fn harvest_withheld_to_mint<'info>(token_program: &AccountInfo<'info>, mint: &AccountInfo<'info>, account: &AccountInfo<'info>) -> Result<()> {
+    let ix = Instruction {
+        program_id: *token_program.key,
+        accounts: vec![AccountMeta::new(*mint.key, false), AccountMeta::new(*account.key, false)],
+        data: vec![26u8, 4u8],
+    };
+    invoke(&ix, &[mint.clone(), account.clone(), token_program.clone()])?;
+    Ok(())
+}
+
+/// `CloseAccount` (SPL Token and Token-2022): the empty `account` is closed, its rent goes to `destination`;
+/// `owner` (a PDA) signs with `signer_seeds`.
+pub fn close_account<'info>(
+    token_program: &AccountInfo<'info>,
+    account: &AccountInfo<'info>,
+    destination: &AccountInfo<'info>,
+    owner: &AccountInfo<'info>,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    let ix = Instruction {
+        program_id: *token_program.key,
+        accounts: vec![AccountMeta::new(*account.key, false), AccountMeta::new(*destination.key, false), AccountMeta::new_readonly(*owner.key, true)],
+        data: vec![9u8],
+    };
+    invoke_signed(&ix, &[account.clone(), destination.clone(), owner.clone(), token_program.clone()], signer_seeds)?;
+    Ok(())
+}

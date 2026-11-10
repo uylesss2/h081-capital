@@ -1323,7 +1323,7 @@
                   "amount": {
                     "type": "string",
                     "pattern": "^\\d+$",
-                    "description": "claim: at most this much (base units); default: everything claimable now"
+                    "description": "claim: at most this much (base units); default: everything claimable now, capped at what the loan still owes"
                   },
                   "usdg": {
                     "type": "string",

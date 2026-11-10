@@ -156,6 +156,7 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
     lendSettle: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
       ? { sent: true, action: 'settle', loanRef: req.loanRef, signatures: ['sigSettle'] }
       : { sent: false, dryRun: true, plan: { action: 'settle', loanRef: req.loanRef }, next: 'nothing was sent' })),
+    lendSweep: vi.fn(async (req: { loanRef: bigint }) => ({ sent: true, action: 'sweep', loanRef: req.loanRef, signatures: ['sigSweep'], collected: 1_000_000n, collectedUsdg: '1', returnedToBorrower: 0n, returnedToBorrowerUsdg: '0' })),
     lendClose: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
       ? { sent: true, action: 'close', loanRef: req.loanRef, signatures: ['sigClose'] }
       : { sent: false, dryRun: true, plan: { action: 'close', loanRef: req.loanRef }, next: 'nothing was sent' })),

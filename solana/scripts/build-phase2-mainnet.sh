@@ -6,6 +6,9 @@
 # Usage (WSL): TREASURY=<pubkey> bash build-phase2-mainnet.sh <snapshot.tar> <mainnet_keys_dir> <out_dir> [program ...]
 #   <mainnet_keys_dir> holds stream_loan-keypair.json, safety_pool-keypair.json, capacity_stake-keypair.json
 #   (only their PUBLIC keys are read, with solana-keygen pubkey).
+#   <mainnet_keys_dir> = "-": no key file is opened at all; the public program ids come from the environment:
+#   STREAM_LOAN_ID, SAFETY_POOL_ID, CAPACITY_STAKE_ID (those being built), and DEVNET_IDS (space-separated devnet
+#   program ids to refuse in the .so; the devnet keys dir is not read in this mode).
 #   TREASURY (required when stream_loan is built): owner of the token accounts that receive the 0.25% loan
 #   origination fee (fee::TREASURY). docs/FLYWHEEL.md: the treasury Squads multisig vault. It is patched into
 #   fee.rs here (the source keeps the placeholder, which every non-localnet build refuses); it must not be the
@@ -31,11 +34,18 @@ rm -rf "$SRC"; mkdir -p "$SRC" "$OUT"; tar -xf "$TAR" -C "$SRC"; cd "$SRC/solana
 declare -A LOCAL=([stream_loan]=FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc [safety_pool]=EvKjwxVQX1RhyoBXisdbzk1JGLb5fMgZzHVLQAiPKJwe [capacity_stake]=6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3)
 POOL=E16DKmtrYtYGp7guSso25Pvq8gzKunnUULU28RmRmDGM
 declare -A NEW
-for p in stream_loan safety_pool capacity_stake; do
-  [ -f "$KEYS/$p-keypair.json" ] && NEW[$p]=$(solana-keygen pubkey "$KEYS/$p-keypair.json")
-done
+if [ "$KEYS" = - ]; then
+  NEW[stream_loan]=${STREAM_LOAN_ID:-}; NEW[safety_pool]=${SAFETY_POOL_ID:-}; NEW[capacity_stake]=${CAPACITY_STAKE_ID:-}
+  for p in stream_loan safety_pool capacity_stake; do
+    [ -z "${NEW[$p]}" ] || [[ "${NEW[$p]}" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "$p: bad program id ${NEW[$p]}"; exit 1; }
+  done
+else
+  for p in stream_loan safety_pool capacity_stake; do
+    [ -f "$KEYS/$p-keypair.json" ] && NEW[$p]=$(solana-keygen pubkey "$KEYS/$p-keypair.json")
+  done
+fi
 for p in "${PROGS[@]}"; do
-  [ -n "${NEW[$p]:-}" ] || { echo "missing $KEYS/$p-keypair.json"; exit 1; }
+  [ -n "${NEW[$p]:-}" ] || { echo "missing the $p program id ($KEYS/$p-keypair.json, or ${p^^}_ID with keys dir -)"; exit 1; }
   sed -i "s/^declare_id!(\"${LOCAL[$p]}\");/declare_id!(\"${NEW[$p]}\");/" "programs/$p/src/lib.rs"
   grep -q "^declare_id!(\"${NEW[$p]}\");" "programs/$p/src/lib.rs" || { echo "$p: declare_id not patched"; exit 1; }
   echo "$p declare_id ${LOCAL[$p]} -> ${NEW[$p]}"
@@ -59,8 +69,9 @@ fi
 
 FORBIDDEN=(AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3 FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc EvKjwxVQX1RhyoBXisdbzk1JGLb5fMgZzHVLQAiPKJwe
   6yzLZPu3JcLQHZQqLKWpGnHUpNTGAkoRcW8Ji8oSgCd3 5K2L3eNBzmeznEZpY4vav74UHRaBHgQJv582W5i4kT7 DoiRuuwMkN8M4CWQy45Lne2wGP7JCPUtPDiC1pE9QM1q)
+for k in ${DEVNET_IDS:-}; do FORBIDDEN+=("$k"); done
 DEVNET_KEYS="$(dirname "$KEYS")/devnet"
-if [ -d "$DEVNET_KEYS" ]; then
+if [ "$KEYS" != - ] && [ -d "$DEVNET_KEYS" ]; then
   for f in "$DEVNET_KEYS"/*-keypair.json; do [ -f "$f" ] && FORBIDDEN+=("$(solana-keygen pubkey "$f")"); done
 fi
 
@@ -89,6 +100,9 @@ for p in "${PROGS[@]}"; do
   fi
   if [ "$p" = stream_loan ]; then
     so_has "$so" "$TREASURY" && echo "  ok: treasury $TREASURY" || { echo "  FAIL: treasury $TREASURY missing"; fail=1; }
+    # close_slot reads safety_pool's Cover PDA: the mainnet build must carry the mainnet safety_pool id (safety.rs)
+    SAFETY_MAINNET=HmzKNPn8LaRyjmggt2uT95B7KvphtoVXQkeVc2HHARTt
+    so_has "$so" "$SAFETY_MAINNET" && echo "  ok: mainnet safety_pool $SAFETY_MAINNET" || { echo "  FAIL: mainnet safety_pool id missing"; fail=1; }
   fi
   if [ "$p" = safety_pool ]; then
     so_has "$so" "${NEW[stream_loan]}" && echo "  ok: stream_loan ${NEW[stream_loan]}" || { echo "  FAIL: mainnet stream_loan id missing"; fail=1; }

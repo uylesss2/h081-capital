@@ -4,6 +4,7 @@
 // stream_loan state, at times relative to T0 (the WSL clock, which the validator uses).
 // Usage: npx tsx test/solana/staking-fixtures.ts <T0 unix seconds>
 // The lender keypair here is a throwaway localnet test key, generated per run.
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
@@ -18,7 +19,7 @@ export const LIVE_SECONDS = 200n;
 
 export const REF = {
   live: 1001n, unfunded: 1002n, noExpiry: 1003n, expired: 1004n, settled: 1005n, pending: 1006n, huge: 1007n, wrongOwner: 1008n,
-  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n, long: 1014n, repaid: 1015n, dust: 1016n,
+  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n, long: 1014n, repaid: 1015n, dust: 1016n, slashedRepaid: 1017n,
 } as const;
 
 export interface StakingMeta {
@@ -124,6 +125,18 @@ export function writeFixtures(t0: bigint): StakingMeta {
   slot('repaid', { principal: 2_000_000n, repaid: 1_500_000n }, { amount: 600_000n, held: 100_000n });
   // a shortfall of 2M tokens minus one base unit: slashing a 2M-token pool for it leaves dust
   slot('dust', { principal: 2_000_000_000_000n - 1n });
+  // settled and repaid in full while a recorded slash is still short (paid < owed). Today's safety_pool cannot produce
+  // this (it recovers first, inside the room), so the Subrogation is written directly: it is how close_slot's
+  // "a repaid loan never waits on the pool" rule (overpay cap) runs on chain.
+  slot('slashedRepaid', { principal: 4_000_000n, repaid: 4_000_000n, settled: true });
+  {
+    const le = (v: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(v); return b; };
+    const [sub, sbump] = PublicKey.findProgramAddressSync([new TextEncoder().encode('subrogation'), le(REF.slashedRepaid)], SAFETY_STREAM_LOAN_PROGRAM_ID);
+    put(sub, SAFETY_STREAM_LOAN_PROGRAM_ID, Buffer.concat([
+      createHash('sha256').update('account:Subrogation').digest().subarray(0, 8), le(REF.slashedRepaid), Keypair.generate().publicKey.toBuffer(),
+      Keypair.generate().publicKey.toBuffer(), le(3_000_000n), le(1_000_000n), Buffer.from([sbump]),
+    ]));
+  }
 
   // the loan asset itself: its supply is what the fixture accounts hold; tests mint receipts with assetAuthority
   put(asset, CLASSIC_TOKEN_PROGRAM_ID, mintData(assetAuthority.publicKey, supply));
