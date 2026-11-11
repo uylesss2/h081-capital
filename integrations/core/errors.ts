@@ -7,6 +7,7 @@ import { POOL_ERROR } from '../../src/solana/program.js';
 import { LOAN_ERROR } from '../../src/solana/lender.js';
 import { CAPACITY_ERROR, SAFETY_ERROR } from '../../src/solana/token.js';
 import { SimulationError } from '../../src/solana/send.js';
+import { isRateLimited } from '../../src/solana/events.js';
 
 export type ProgramKind = 'pool' | 'loan' | 'capacity' | 'safety';
 
@@ -168,7 +169,7 @@ export const ERROR_CODES = {
   allowance_blocked: { status: 409, retryable: false, description: 'no allowance can pay this amount now (the message names the cap)' },
   relayer_unavailable: { status: 503, retryable: true, description: 'the relayer is unreachable or refused; nothing was sent (reason in details)' },
   relayer_busy: { status: 503, retryable: true, description: 'the relayer is busy; nothing was sent' },
-  rate_limited: { status: 429, retryable: true, description: 'too many requests (relayer 429, or the local send limit); see Retry-After' },
+  rate_limited: { status: 429, retryable: true, description: 'too many requests (relayer 429, the local send limit, or the Solana RPC: details.source "rpc", set H081_RPC_URL to a private RPC); see Retry-After' },
   busy: { status: 503, retryable: true, description: 'the local queue is full; see Retry-After' },
   stale_root: { status: 409, retryable: true, description: 'the proof used a Merkle root or timestamp that is no longer current; try again' },
   in_flight: { status: 409, retryable: true, description: 'a note in this operation is already being spent; try again shortly' },
@@ -270,6 +271,11 @@ export function classify(e: unknown): Classified {
   }
   const net = networkFailure(e);
   if (net && !/relayer/i.test(top)) return make('rpc_unreachable', /cannot reach the Solana RPC/.test(top) ? top : `cannot reach the Solana RPC: ${net}. Set H081_RPC_URL.`);
+  // the RPC itself answering 429 (the relayer's 429 is a RelayerError, handled above)
+  if (isRateLimited(e) && !/relayer/i.test(top)) {
+    return make('rate_limited', 'the Solana RPC is rate limiting this agent (HTTP 429, too many requests). Nothing was lost: the next call continues where this one stopped. '
+      + 'The free public RPC (api.mainnet-beta.solana.com) limits each IP; for a reliable bank set H081_RPC_URL to a private mainnet RPC URL (Helius, Alchemy, QuickNode, Triton) in this MCP server\'s environment and restart it.', { source: 'rpc' });
+  }
   // an on-chain program error, as explainProgramError words it, or an Anchor code in the cause's logs
   const anchor = /^([A-Z][A-Za-z]+) \((\d+), (stipend_pool|stream_loan|capacity_stake|safety_pool)\)/.exec(top);
   if (anchor) return make(ANCHOR_CODE[anchor[1]] ?? 'program_error', top, { anchor: anchor[1], errorCode: Number(anchor[2]), program: anchor[3] });

@@ -178,7 +178,8 @@ The directory is 0700 on macOS and Linux. On Windows, access is limited to your 
 |---|---|---|
 | `H081_HOME` | `~/.h081` | The data directory |
 | `H081_SOLANA_KEYPAIR` / `H081_SOLANA_KEY` | `~/.h081/agent.json` | The agent key (file path, or the secret itself) |
-| `H081_RPC_URL` | from `config.json`, else the public mainnet RPC | Your Solana RPC; only its host is ever shown |
+| `H081_RPC_URL` | from `config.json`, else the public mainnet RPC | Your Solana RPC; only its host is ever shown. The public RPC limits each IP (a 429 is `rate_limited` with `details.source: "rpc"`): a private mainnet RPC (Helius, Alchemy, QuickNode, Triton) is recommended |
+| `H081_EVENTS_SEED_URL` | `https://api.h081.xyz/events/mainnet-beta-<pool>.events.json` | The pool event-log snapshot a fresh install starts from (checked against the chain before use); `off` = scan every pool transaction from the RPC |
 | `H081_CLUSTER` | `mainnet-beta` | `mainnet-beta` or `localnet` (tests only) |
 | `H081_API_PORT` | `8081` | Gateway port |
 | `H081_API_TOKEN_FILE` | `$H081_HOME/api-token` | Token file |

@@ -85,7 +85,7 @@ describe('gateway auth and local security', () => {
     const host = { host: `127.0.0.1:${g.port}` };
     const health = await call(g.port, 'GET', '/v1/health', { headers: host });
     expect(health.status).toBe(200);
-    expect(health.json).toMatchObject({ ok: true, network: 'mainnet-beta', result: { version: '0.1.1', network: 'mainnet-beta' } });
+    expect(health.json).toMatchObject({ ok: true, network: 'mainnet-beta', result: { version: '0.1.2', network: 'mainnet-beta' } });
     const doc = await call(g.port, 'GET', '/v1/openapi.json', { headers: host });
     expect(doc.status).toBe(200);
     expect(doc.json.openapi).toBe('3.1.0');

@@ -296,6 +296,8 @@ export interface BankOptions {
 }
 
 const MAX_AGENTS = 16;
+/** largest seed snapshot read (the mainnet log is a few MB) */
+const SEED_MAX_BYTES = 200_000_000;
 
 export class H081Bank {
   readonly connection: Connection;
@@ -319,6 +321,7 @@ export class H081Bank {
   private readonly subAccountsFile?: string;
   private readonly derivation: AccountDerivation;
   private readonly accountSource: AccountSource;
+  private readonly fetchFn: typeof fetch;
 
   private constructor(opts: BankOptions, connection: Connection, prover: Prover) {
     this.config = opts.config;
@@ -331,7 +334,14 @@ export class H081Bank {
     this.stakeMint = opts.config.stakeMint;
     this.decimals = opts.config.decimals;
     this.log = opts.log ?? (() => {});
+    this.fetchFn = opts.fetch ?? fetch;
     this.pool = new SolanaPool(connection, opts.config.poolProgramId, prover);
+    // a long scan (a fresh install without the seed) says how far it got instead of looking stuck
+    let reported = 0;
+    this.pool.log.onProgress = (done, total) => {
+      if (total < 200) return;
+      if (done === total || done - reported >= 500) { reported = done; this.log(`syncing the pool's event log: ${done}/${total} transactions`); }
+    };
     this.account = new Account(opts.accountSk);
     this.owner = new SolanaWallet(this.account, this.pool, opts.signer);
     this.owner.registerMint(this.usdg);
@@ -384,16 +394,47 @@ export class H081Bank {
 
   // ---- event-log cache (public chain data only: commitments, nullifiers, encrypted memos; never a key)
 
+  /**
+   * Starts the event log from the local cache or, on a fresh install, from the hosted seed snapshot (so the first
+   * sync fetches only the transactions since the snapshot, not every one since launch). Either way the result is
+   * checked against the chain before it is trusted: the commitment tree against the pool's root history, this
+   * account's notes against their nullifier accounts. A log that fails is dropped and the next sync scans from the
+   * start. False = drop this bank and open a fresh one.
+   */
   private async loadCache(): Promise<boolean> {
-    if (!this.cacheFile || !existsSync(this.cacheFile)) return true;
-    let snap: PoolEventLogSnapshot;
-    try { snap = JSON.parse(readFileSync(this.cacheFile, 'utf8')); } catch { return true; }
-    if (!this.pool.log.restore(snap)) return true;
+    if (!this.cacheFile) return true;
+    let snap: PoolEventLogSnapshot | undefined;
+    let from = 'event cache';
+    if (existsSync(this.cacheFile)) {
+      try { snap = JSON.parse(readFileSync(this.cacheFile, 'utf8')); } catch { /* unreadable: treated as none */ }
+    }
+    if (!snap && this.config.eventsSeedUrl) {
+      snap = await this.fetchSeed(this.config.eventsSeedUrl);
+      from = 'seed event log';
+    }
+    if (!snap || !this.pool.log.restore(snap)) return true;
     try { await this.owner.sync(); } finally { this.saveCache(); }
-    if (await this.owner.matchesChain()) return true;
-    this.log('event cache does not match the chain; rescanning');
+    if ((await this.owner.matchesChain()) && (await this.owner.notesMatchChain())) return true;
+    this.log(`the ${from} does not match the chain; scanning from the start`);
     try { unlinkSync(this.cacheFile); } catch { /* ignore */ }
     return false;
+  }
+
+  /** The hosted seed snapshot, or undefined (unreachable, too large, not JSON): the scan then starts from nothing. */
+  private async fetchSeed(url: string): Promise<PoolEventLogSnapshot | undefined> {
+    const host = rpcHost(url);
+    try {
+      const res = await this.fetchFn(url, { signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) { this.log(`no seed event log at ${host} (HTTP ${res.status}); scanning the pool from the start`); return undefined; }
+      const text = await res.text();
+      if (text.length > SEED_MAX_BYTES) { this.log(`the seed event log at ${host} is too large; scanning the pool from the start`); return undefined; }
+      const snap = JSON.parse(text) as PoolEventLogSnapshot;
+      this.log(`starting from the seed event log at ${host} (${snap?.events?.length ?? 0} events; checked against the chain before use)`);
+      return snap;
+    } catch (e) {
+      this.log(`could not read the seed event log at ${host} (${(e as Error).message}); scanning the pool from the start`);
+      return undefined;
+    }
   }
 
   private saveCache(): void {

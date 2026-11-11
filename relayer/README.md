@@ -143,6 +143,24 @@ Without `via` the wallet sends exactly as before. Lookup tables for the v0 path:
 `extendLookupTable`, `poolLookupAddresses`, `buildV0Transaction`, `planOperation` in `src/solana/alt.ts`, and
 `SolanaPool.useLookupTables(tables)`.
 
+## Event-log seed (fresh installs)
+
+A fresh MCP / agent / Agent Kit install would otherwise fetch every pool transaction since launch (thousands of
+`getTransaction` calls), which the public mainnet RPC answers with 429. The Vercel bundle therefore ships a second
+function, `api/events-seed.mjs` (`relayer/events-seed.ts`):
+
+- `GET /events/mainnet-beta-<pool>.events.json`: 307 to the stored snapshot (the clients' default `H081_EVENTS_SEED_URL`).
+- `GET /api/events-seed`: the hourly cron (vercel.json, `7 * * * *`) extends the stored snapshot with the newer
+  transactions over `RELAYER_SOLANA_RPC` and stores it again when something changed. Only with
+  `Authorization: Bearer $CRON_SECRET` (Vercel sends it); without `CRON_SECRET` it answers 503.
+
+It needs, in the relayer's Vercel project: a **public** Vercel Blob store connected to it (sets
+`BLOB_READ_WRITE_TOKEN`), `CRON_SECRET`, and the existing `RELAYER_SOLANA_RPC` (a private RPC: the first build is
+~5k transactions, ~100 s on Alchemy). Optional: `EVENTS_SEED_CLUSTER` (default `mainnet-beta`),
+`RELAYER_SOLANA_PROGRAM_ID` (default the mainnet pool). It never touches the hot key. The snapshot is public chain
+data only; clients check it against the chain (root history, their own nullifier accounts) before using it.
+`npx tsx scripts/events-seed.mts --out <dir>` builds the same file locally.
+
 ## Not yet
 
 - Not run end to end against a validator in this pass (the localnet suites are run separately).

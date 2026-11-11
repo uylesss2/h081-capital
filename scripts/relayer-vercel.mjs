@@ -22,9 +22,10 @@ const out = join(root, 'deploy', 'relayer-vercel');
 rmSync(join(out, 'api'), { recursive: true, force: true });
 rmSync(join(out, 'circuits'), { recursive: true, force: true });
 mkdirSync(join(out, 'api'), { recursive: true });
-await build({
-  entryPoints: [join(root, 'relayer', 'vercel.ts')],
-  outfile: join(out, 'api', 'index.mjs'),
+// api/index.mjs: the relayer; api/events-seed.mjs: the fresh-install event-log snapshot (relayer/events-seed.ts)
+for (const [entry, outName] of [['vercel.ts', 'index.mjs'], ['events-seed-vercel.ts', 'events-seed.mjs']]) await build({
+  entryPoints: [join(root, 'relayer', entry)],
+  outfile: join(out, 'api', outName),
   bundle: true, platform: 'node', format: 'esm', target: 'node22', minify: false, legalComments: 'none',
   // CommonJS dependencies inside an ESM bundle still use require, __filename and __dirname (e.g. `bindings`)
   banner: {
@@ -65,7 +66,13 @@ if (discloseFiles.every((f) => existsSync(join(circuitsDir, 'disclose', f)))) {
 }
 writeFileSync(join(out, 'package.json'), JSON.stringify({ name: 'h081-relayer', private: true, type: 'module', engines: { node: '24.x' } }, null, 2) + '\n');
 writeFileSync(join(out, 'vercel.json'), JSON.stringify({
-  functions: { 'api/index.mjs': fn },
-  rewrites: [{ source: '/(.*)', destination: '/api/index' }],
+  functions: { 'api/index.mjs': fn, 'api/events-seed.mjs': { maxDuration: 300 } },
+  // the seed snapshot's cron, hourly (a Hobby plan allows only daily crons: there, use '7 6 * * *')
+  crons: [{ path: '/api/events-seed', schedule: '7 * * * *' }],
+  rewrites: [
+    { source: '/api/events-seed', destination: '/api/events-seed' },
+    { source: '/events/:file', destination: '/api/events-seed' },
+    { source: '/(.*)', destination: '/api/index' },
+  ],
 }, null, 2) + '\n');
 console.log(`bundled relayer -> ${out}`);

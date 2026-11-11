@@ -112,7 +112,31 @@ export interface PoolEventLogOptions {
   fetchAttempts?: number;
   /** Delay between those attempts in ms. Default 400. */
   retryDelayMs?: number;
+  /**
+   * getTransaction calls in flight at once. Default 8. After a rate-limit answer (HTTP 429) the next chunks
+   * of that refresh run one call at a time: the public mainnet RPC allows ~40 calls of a method per 10 s per IP.
+   */
+  concurrency?: number;
+  /** Attempts per RPC call answered 429 before the refresh fails (its progress is kept). Default 8. */
+  rateLimitAttempts?: number;
+  /** First wait after a 429 in ms, doubled per attempt up to 30 s, with jitter. Default 1000. */
+  rateLimitDelayMs?: number;
+  /** Called after each committed chunk of a refresh: transactions fetched so far in this refresh, and its total. */
+  onProgress?: (done: number, total: number) => void;
 }
+
+/** Whether an RPC error is a rate limit (HTTP 429 / "Too many requests"), as web3.js and fetch report it. */
+export function isRateLimited(e: unknown): boolean {
+  let x: unknown = e;
+  for (let depth = 0; x && depth < 5; depth++) {
+    const m = x instanceof Error ? x.message : String(x);
+    if (/\b429\b|too many requests/i.test(m)) return true;
+    x = (x as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export class PoolEventLog {
   readonly events: LocatedEvent[] = [];
@@ -122,11 +146,55 @@ export class PoolEventLog {
   readonly address: PublicKey;
   private readonly fetchAttempts: number;
   private readonly retryDelayMs: number;
+  private readonly concurrency: number;
+  private readonly rateLimitAttempts: number;
+  private readonly rateLimitDelayMs: number;
+  /** set by a 429 during a refresh: its next chunks fetch one transaction at a time */
+  private throttled = false;
+  onProgress?: (done: number, total: number) => void;
 
   constructor(readonly connection: Connection, readonly programId: PublicKey, opts: PoolEventLogOptions = {}) {
     this.address = PublicKey.findProgramAddressSync([new TextEncoder().encode('pool')], programId)[0];
     this.fetchAttempts = Math.max(1, opts.fetchAttempts ?? 5);
     this.retryDelayMs = opts.retryDelayMs ?? 400;
+    this.concurrency = Math.max(1, Math.floor(opts.concurrency ?? 8));
+    this.rateLimitAttempts = Math.max(1, opts.rateLimitAttempts ?? 8);
+    this.rateLimitDelayMs = Math.max(0, opts.rateLimitDelayMs ?? 1000);
+    this.onProgress = opts.onProgress;
+  }
+
+  /** Runs one RPC call, waiting and retrying while it is answered 429 (exponential backoff with jitter). */
+  private async paced<T>(call: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await call();
+      } catch (e) {
+        if (!isRateLimited(e) || attempt >= this.rateLimitAttempts) throw e;
+        this.throttled = true;
+        const base = Math.min(30_000, this.rateLimitDelayMs * 2 ** (attempt - 1));
+        await sleep(base / 2 + (Math.random() * base) / 2);
+      }
+    }
+  }
+
+  /** Fetches `sigs` in order with at most `concurrency` calls in flight (one at a time once rate limited). */
+  private async fetchAll(sigs: string[]): Promise<VersionedTransactionResponse[]> {
+    const out = new Array<VersionedTransactionResponse>(sigs.length);
+    let next = 0;
+    let failed = false;
+    const worker = async (): Promise<void> => {
+      while (!failed && next < sigs.length) {
+        const i = next++;
+        try { out[i] = await this.fetchTx(sigs[i]); } catch (e) { failed = true; throw e; }
+      }
+    };
+    const n = this.throttled ? 1 : Math.min(this.concurrency, sigs.length);
+    // after a failure no worker starts another call, and the refresh ends only once every call in flight has
+    // settled: nothing keeps hitting the RPC after it, or overlaps the next refresh
+    const settled = await Promise.allSettled(Array.from({ length: n }, worker));
+    const bad = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+    if (bad) throw bad.reason;
+    return out;
   }
 
   /**
@@ -144,7 +212,7 @@ export class PoolEventLog {
 
   private async fetchTx(signature: string): Promise<VersionedTransactionResponse> {
     for (let attempt = 1; ; attempt++) {
-      const tx = await this.connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      const tx = await this.paced(() => this.connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }));
       if (tx) return tx;
       if (attempt >= this.fetchAttempts) throw new Error(`transaction ${signature} not found`);
       await new Promise((r) => setTimeout(r, this.retryDelayMs));
@@ -152,10 +220,11 @@ export class PoolEventLog {
   }
 
   private async refreshOnce(): Promise<number> {
+    this.throttled = false;
     const sigs: ConfirmedSignatureInfo[] = [];
     let before: string | undefined;
     for (;;) {
-      const page = await this.connection.getSignaturesForAddress(this.address, { before, until: this.newest, limit: 1000 }, 'confirmed');
+      const page = await this.paced(() => this.connection.getSignaturesForAddress(this.address, { before, until: this.newest, limit: 1000 }, 'confirmed'));
       sigs.push(...page);
       if (page.length < 1000) break;
       before = page[page.length - 1].signature;
@@ -165,7 +234,7 @@ export class PoolEventLog {
     let added = 0;
     for (let i = 0; i < ordered.length; i += 25) {
       const chunk = ordered.slice(i, i + 25);
-      const txs = await Promise.all(chunk.map((s) => this.fetchTx(s.signature)));
+      const txs = await this.fetchAll(chunk.map((s) => s.signature));
       const staged: Array<[string, LocatedEvent[]]> = [];
       txs.forEach((tx, j) => {
         const evs = eventsOfTransaction(tx, this.programId).map((e, seq) => ({ ...e, signature: chunk[j].signature, slot: tx.slot, seq }));
@@ -178,6 +247,7 @@ export class PoolEventLog {
         added += evs.length;
       }
       this.newest = chunk[chunk.length - 1].signature;
+      this.onProgress?.(Math.min(i + 25, ordered.length), ordered.length);
     }
     this.newest = sigs[0].signature;
     return added;
