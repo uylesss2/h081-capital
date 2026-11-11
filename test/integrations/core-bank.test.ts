@@ -283,6 +283,10 @@ describe('H081Bank', () => {
     expect(q).toMatchObject({ pledgeBps: 4000, maxPrincipal: 40_000_000n, principal: 40_000_000n, originationFee: 100_000n, originationFeeBps: 25, payout: 39_900_000n });
     expect((await bank.loanQuote({ pledgeBps: 4000, minRemaining: 100_000_000n, principal: 10_000_000n })).payout).toBe(9_975_000n);
     await expect(bank.loanQuote({ pledgeBps: 4000, minRemaining: 100_000_000n, principal: 40_000_001n })).rejects.toThrow(/PrincipalTooLarge/);
+    // a principal with no budget quotes the budget that principal needs (was: "at most 0 USDG")
+    const byPrincipal = await bank.loanQuote({ pledgeBps: 4000, principal: 20_000_000n });
+    expect(byPrincipal).toMatchObject({ minRemaining: 50_000_000n, maxPrincipal: 20_000_000n, principal: 20_000_000n, payout: 19_950_000n });
+    expect((await bank.loanQuote({ pledgeBps: 3333, principal: 7_000_001n })).maxPrincipal).toBe(7_000_001n);
     await expect(bank.loanQuote({})).rejects.toThrow(/termsCode, a pledgeBps or a loanRef/);
     expect((await bank.loanQuote({ loanRef: 3n })).slot).toBeNull();
     await expect(bank.loanQuote({ termsCode: 'h081-loan-proof:x' })).rejects.toThrow(/not a loan terms code/);

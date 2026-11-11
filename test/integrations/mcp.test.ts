@@ -25,7 +25,7 @@ describe('h081 MCP server', () => {
 
   it('initializes (version negotiation, instructions) and lists one tool per operation with input schemas', async () => {
     const init = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
-    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.2.1' }, instructions: INSTRUCTIONS });
+    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.2.2' }, instructions: INSTRUCTIONS });
     expect(INSTRUCTIONS).toMatch(/not audited yet/);
     const newer = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2099-01-01' } });
     expect(newer!.result).toMatchObject({ protocolVersion: '2025-11-25' });

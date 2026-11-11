@@ -1255,7 +1255,9 @@ export class H081Bank {
     const slot = loanRef === undefined ? undefined : await this.loanSlot(loanRef);
     if (pledgeBps === undefined && slot?.funded) pledgeBps = Number(slot.pledgeBps);
     const bps = pledgeBps ?? 0;
-    const minRemaining = q.minRemaining ?? 0n;
+    // With a principal and no budget, quote the budget that principal needs (what borrow pledges by default).
+    // Assuming a 0 budget refused every principal ("at most 0 USDG").
+    const minRemaining = q.minRemaining ?? (q.principal !== undefined && q.principal > 0n && bps > 0 ? minRemainingFor(q.principal, BigInt(bps)) : 0n);
     const max = maxPrincipal(minRemaining, bps);
     const principal = q.principal ?? max;
     if (principal > max) throw new Error(`PrincipalTooLarge: at most ${fromUnits(max, this.decimals)} USDG against ${fromUnits(minRemaining, this.decimals)} USDG pledged at ${bps} bps.`);
