@@ -1,7 +1,12 @@
 // Bundles relayer/vercel.ts into a self-contained Vercel project in deploy/relayer-vercel/ (gitignored):
 //   node scripts/relayer-vercel.mjs            # bundle only
 //   cd deploy/relayer-vercel && vercel deploy --prod
-// Every path is served by the one function (api/index.mjs). Secrets live only in the Vercel project's
+// Deploy from INSIDE that folder, never with `vercel --cwd <folder>` from another directory: the CLI reads the
+// vercel.json of the shell's working directory first, and from another Vercel project's folder it ships THAT
+// project's routing instead of this one (none of the rewrites below: every path but /api/* is a platform 404).
+// Check a preview before promoting: /v1/stats must reach the relayer, /house.json must not answer 200.
+// /events/<file> and /api/events-seed are served by api/events-seed.mjs, every other path by the relayer
+// (api/index.mjs). Secrets live only in the Vercel project's
 // environment (RELAYER_SOLANA_KEYPAIR_JSON etc., see relayer/README.md), never in the bundle.
 //
 // Circuit artifacts (RELAYER_X402_CIRCUITS_DIR at bundle time names a build/circuits-style directory; default
