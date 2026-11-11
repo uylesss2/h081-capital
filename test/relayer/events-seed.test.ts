@@ -7,7 +7,7 @@ import { sha256 } from '@noble/hashes/sha2';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { EVENT_IX_TAG_LE } from '../../src/solana/events.js';
 import { be32, concatBytes } from '../../src/solana/field.js';
-import { createSeedHandler, refreshSeed, seedFileName, type SeedOptions, type SeedStore } from '../../relayer/events-seed.js';
+import { createSeedHandler, refreshSeed, runSeedCron, seedFileName, type SeedOptions, type SeedStore } from '../../relayer/events-seed.js';
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function base58(bytes: Uint8Array): string {
@@ -77,6 +77,44 @@ describe('refreshSeed', () => {
     expect(await refreshSeed(opts(rpc, store))).toMatchObject({ stored: true, events: 1 });
     store.files.set(file(), JSON.stringify({ v: 1, programId: Keypair.generate().publicKey.toBase58(), events: [] }));
     expect(await refreshSeed(opts(rpc, store))).toMatchObject({ stored: true, events: 1 });
+  });
+});
+
+describe('time budget and status', () => {
+  it('a run that is out of time stores what it has; the next run continues and finishes', async () => {
+    const rpc = new FakeRpc();
+    const store = new MemStore();
+    for (let i = 1; i <= 60; i++) rpc.add(`S${i}`, BigInt(i));
+    let t = 0;
+    const o = opts(rpc, store, { budgetMs: 10, now: () => (t += 20) }); // out of time after the first chunk of 25
+    expect(await refreshSeed(o)).toMatchObject({ stored: true, partial: true, events: 25, newest: 'S25' });
+    expect(await refreshSeed(opts(rpc, store))).toMatchObject({ stored: true, partial: false, events: 60, newest: 'S60' });
+    expect(rpc.fetched).toBe(60); // nothing fetched twice
+  });
+
+  it('the cron records each outcome; /events/status reports its age and a failure after the last success', async () => {
+    const rpc = new FakeRpc();
+    rpc.add('S1', 1n);
+    const store = new MemStore();
+    let now = Date.parse('2026-11-12T00:00:00Z');
+    const o = opts(rpc, store, { now: () => now });
+    await runSeedCron(o);
+    const server = createServer(createSeedHandler(o));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      now += 90 * 60_000;
+      expect(await (await fetch(`${base}/events/status`)).json()).toMatchObject({ okAt: '2026-11-12T00:00:00.000Z', newest: 'S1', events: 1, partial: false, ageSeconds: 5400, failing: false });
+      rpc.getSignaturesForAddress = async () => { throw new Error('rpc down'); };
+      await expect(runSeedCron(o)).rejects.toThrow(/rpc down/);
+      expect(await (await fetch(`${base}/events/status`)).json()).toMatchObject({ okAt: '2026-11-12T00:00:00.000Z', error: 'rpc down', failing: true });
+    } finally { server.close(); }
+  });
+
+  it('/events/status before any run is 404', async () => {
+    const server = createServer(createSeedHandler(opts(new FakeRpc(), new MemStore())));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    try { expect((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/events/status`)).status).toBe(404); } finally { server.close(); }
   });
 });
 

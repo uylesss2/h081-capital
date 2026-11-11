@@ -26,7 +26,9 @@ const store: SeedStore = {
   },
   async write(path, body) {
     const r = await put(path, body, {
-      access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'application/json', cacheControlMaxAge: 300, multipart: true,
+      access: 'public', addRandomSuffix: false, allowOverwrite: true, contentType: 'application/json',
+      // the snapshot is ~20 MB (multipart, 5 min of CDN cache); the status file is tiny and must read fresh
+      cacheControlMaxAge: body.length > 1_000_000 ? 300 : 60, multipart: body.length > 5_000_000,
     });
     return r.url;
   },

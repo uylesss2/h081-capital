@@ -161,6 +161,13 @@ It needs, in the relayer's Vercel project: a **public** Vercel Blob store connec
 data only; clients check it against the chain (root history, their own nullifier accounts) before using it.
 `npx tsx scripts/events-seed.mts --out <dir>` builds the same file locally.
 
+- `GET /events/status`: when the cron last succeeded, what it stored, and `failing` when the last run failed. A run that
+  runs out of time stores what it has and the next one continues, so a slow RPC only delays the snapshot.
+- `node scripts/seed-watch.mjs` (hourly in `.github/workflows/seed-watch.yml`) fails when the snapshot is missing,
+  failing or older than 3 hours.
+- Deploy only with `node scripts/relayer-deploy.mjs [folder]`: it stages the build off the domain, checks the routes
+  (relayer catch-all, `/events`, cron refusal, no foreign `vercel.json`), and promotes only when they are right.
+
 ## Not yet
 
 - Not run end to end against a validator in this pass (the localnet suites are run separately).

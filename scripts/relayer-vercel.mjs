@@ -1,6 +1,6 @@
 // Bundles relayer/vercel.ts into a self-contained Vercel project in deploy/relayer-vercel/ (gitignored):
 //   node scripts/relayer-vercel.mjs            # bundle only
-//   cd deploy/relayer-vercel && vercel deploy --prod
+//   node scripts/relayer-deploy.mjs            # stage, check the routes, then take the domain (never `vercel deploy --prod` by hand)
 // Deploy from INSIDE that folder, never with `vercel --cwd <folder>` from another directory: the CLI reads the
 // vercel.json of the shell's working directory first, and from another Vercel project's folder it ships THAT
 // project's routing instead of this one (none of the rewrites below: every path but /api/* is a platform 404).

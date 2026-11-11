@@ -1,0 +1,15 @@
+name: seed-watch
+# Fails (and GitHub emails the repo owner) when the fresh-install snapshot on the relayer is missing or stale.
+on:
+  schedule:
+    - cron: '37 * * * *'
+  workflow_dispatch:
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/seed-watch.mjs
