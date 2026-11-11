@@ -40,14 +40,15 @@ import { type StreamArgs, decodeAssetCaps, decodeConfig } from '../../src/solana
 import { fieldOf } from '../../src/solana/field.js';
 import { sendLegacy } from '../../src/solana/send.js';
 import {
-  SolanaLoanLenderWallet, type SlotAccount, decodeRegistry, decodeSlot, maxPrincipal, originationFee, payoutAudience, registryPda, shortfallOf, slotInbox, slotPda,
+  type ClosedSlotAccount, SolanaLoanLenderWallet, type SlotAccount, claimRoom, decodeClosedSlot, decodeRegistry, decodeSlot, isClosedSlotAccount, maxPrincipal,
+  originationFee, payoutAudience, registryPda, shortfallOf, slotEscrow, slotInbox, slotPda, sweepSplit,
 } from '../../src/solana/lender.js';
 import { createAtaIdempotentIx, readCapacity, requestUnstakeIx, stakeIx, unstakeIx } from '../../src/solana/token.js';
 import type { PoolEventLogSnapshot } from '../../src/solana/events.js';
 import { FlatDirProver } from './circuits.js';
-import { type CodeContext, PLEDGE_BPS_MAX, PLEDGE_BPS_MIN, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms } from './codes.js';
+import { type CodeContext, PLEDGE_BPS_MAX, PLEDGE_BPS_MIN, decodeAddressCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms } from './codes.js';
 import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, checkCluster, isMainnetConfig, rpcHost } from './constants.js';
-import { type ProgramKind, explained } from './errors.js';
+import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from './errors.js';
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
 
@@ -87,6 +88,15 @@ export interface WithdrawResult {
   signature: string; amount: bigint; fee: bigint; received: bigint; receivedUsdg: string; to: string; via: 'relayer' | 'direct'; shielded: bigint; shieldedUsdg: string;
   /** the agent wallet, when it was named to the relayer as capacity operator (public amount above the free tier) */
   operator?: string;
+}
+
+export interface TransferResult {
+  signature: string; amount: bigint; amountUsdg: string;
+  /** always "shielded": the recipient is hidden on chain */
+  to: 'shielded';
+  /** the agent key sends it */
+  via: 'direct';
+  shielded: bigint; shieldedUsdg: string;
 }
 
 export interface PayRequest {
@@ -203,13 +213,21 @@ export interface LendSlotView {
   loanRef: bigint; slot: string; lender: string;
   /** owned by this agent key */
   mine: boolean;
-  /** open (not lent yet), funded (being repaid), repaid (principal repaid, not settled), settled */
-  state: 'open' | 'funded' | 'repaid' | 'settled';
+  /**
+   * open (not lent yet), funded (being repaid), repaid (principal repaid, not settled), settled, closed (the lender
+   * closed the slot and took its rent back: the figures come from its ClosedSlot receipt)
+   */
+  state: 'open' | 'funded' | 'repaid' | 'settled' | 'closed';
   funded: boolean; settled: boolean; principal: bigint; principalUsdg: string; repaid: bigint; repaidUsdg: string; outstanding: bigint; outstandingUsdg: string;
-  /** the vested lender share of the borrower's stream h081_lend claim pulls now */
+  /** the vested lender share of the borrower's stream h081_lend claim pulls now, capped at what the loan still owes */
   claimable: bigint; claimableUsdg: string;
-  /** shares already routed to the slot that h081_lend collect takes */
+  /**
+   * shares already routed to the slot that h081_lend collect (sweep, once closed) takes: the lender is never paid more
+   * than the principal
+   */
   collectable: bigint; collectableUsdg: string;
+  /** routed to the slot beyond the principal: the borrower's, sent back to its payout account (stream_loan return_excess) */
+  borrowerExcess: bigint; borrowerExcessUsdg: string;
   pledgeBps: bigint | null; expiry: bigint; expiresAt: string | null;
   /** unpaid principal once expiry + 7 days has passed */
   shortfall: bigint;
@@ -220,8 +238,10 @@ export interface LendSlotView {
   termsCode?: string;
 }
 export interface LendSentResult {
-  sent: true; action: 'collect' | 'claim' | 'settle' | 'close'; loanRef: bigint; signatures: string[];
+  sent: true; action: 'collect' | 'claim' | 'settle' | 'close' | 'sweep'; loanRef: bigint; signatures: string[];
   collected?: bigint; collectedUsdg?: string; refundedLamports?: bigint; slot?: LendSlotView;
+  /** sweep: the borrower's excess sent back to its payout account in the same transaction */
+  returnedToBorrower?: bigint; returnedToBorrowerUsdg?: string;
 }
 
 /** The relayer is configured but cannot be used: unreachable, wrong pool or asset, or a fee account that is not the treasury's. */
@@ -338,15 +358,24 @@ export class H081Bank {
     } catch (e) { this.log(`could not save the sub-account list: ${(e as Error).message}`); }
   }
 
-  /** Opens the bank: crypto init, cluster check, event-log cache. No transaction is sent. */
+  /**
+   * Opens the bank: crypto init, cluster check, event-log cache. No transaction is sent. An RPC that cannot be reached
+   * at all is reported as RpcUnreachableError ("cannot reach the Solana RPC at <host>: <cause>"), naming only the host.
+   */
   static async open(opts: BankOptions): Promise<H081Bank> {
     await initCrypto();
     const connection = opts.connection ?? new Connection(opts.config.rpcUrl, 'confirmed');
-    if (!opts.skipClusterCheck) checkCluster(opts.config, await connection.getGenesisHash());
-    const prover = opts.prover ?? new FlatDirProver(opts.config.circuitsDir);
-    let bank = new H081Bank(opts, connection, prover);
-    if (!(await bank.loadCache())) bank = new H081Bank(opts, connection, prover); // the cache did not match the chain
-    return bank;
+    try {
+      if (!opts.skipClusterCheck) checkCluster(opts.config, await connection.getGenesisHash());
+      const prover = opts.prover ?? new FlatDirProver(opts.config.circuitsDir);
+      let bank = new H081Bank(opts, connection, prover);
+      if (!(await bank.loadCache())) bank = new H081Bank(opts, connection, prover); // the cache did not match the chain
+      return bank;
+    } catch (e) {
+      const why = networkFailure(e);
+      if (why) throw new RpcUnreachableError(rpcHost(opts.config.rpcUrl), why, { cause: e });
+      throw e;
+    }
   }
 
   get programIds(): Partial<Record<ProgramKind, string>> {
@@ -602,13 +631,16 @@ export class H081Bank {
     const tier = fromUnits(terms.freeTier, d);
     if (cap && pub > terms.freeTier + cap.shieldCap) {
       throw new Error(
-        `${fromUnits(pub, d)} ${sym} is above the relayer's anonymous free tier (${tier} ${sym} per 30 days) plus the agent wallet's staked capacity ` +
-        `(${fromUnits(cap.shieldCap, d)} ${sym} from ${fromUnits(cap.staked, MAINNET.h081.decimals)} ${MAINNET.h081.symbol} in capacity_stake). Nothing was sent. ` +
-        `Stake more ${MAINNET.h081.symbol} (h081_stake), ${verb} at most ${fromUnits(terms.freeTier + cap.shieldCap, d)} ${sym} per 30 days through the relayer, or ${directHint}.`,
+        `${fromUnits(pub, d)} ${sym} is more than the relayer takes with nothing staked (up to ${tier} ${sym} per withdrawal; above that, ` +
+        `${MAINNET.h081.symbol} staked in capacity_stake sets a 30-day limit: ` +
+        (cap.staked === 0n
+          ? `the agent wallet has none staked). Nothing was sent. `
+          : `the agent wallet's ${fromUnits(cap.staked, MAINNET.h081.decimals)} ${MAINNET.h081.symbol} staked allows ${fromUnits(terms.freeTier + cap.shieldCap, d)} ${sym} per 30 days). Nothing was sent. `) +
+        `Stake more ${MAINNET.h081.symbol} (h081_stake), ${verb} at most ${tier} ${sym} at a time, or ${directHint}.`,
       );
     }
     const seed = this.signer.secretKey.subarray(0, 32);
-    this.log(`${fromUnits(pub, d)} ${sym} is above the free tier of ${tier}: the agent wallet is named to the relayer as capacity operator`);
+    this.log(`${fromUnits(pub, d)} ${sym} is above ${tier} ${sym}: the agent wallet is named to the relayer as capacity operator (its H081 stake sets a 30-day limit)`);
     return { operator: this.signer.publicKey, sign: (m) => ed25519.sign(m, seed) };
   }
 
@@ -629,7 +661,7 @@ export class H081Bank {
       } else {
         // fail closed: a configured relayer that cannot be used never turns into a direct send
         try { terms = await this.relayTerms(); } catch (e) {
-          throw new Error(`${(e as Error).message}. The withdrawal was not sent: retry later, or ${directHint}.`);
+          throw new Error(`${(e as Error).message}. The withdrawal was not sent: retry later, or ${directHint}.`, { cause: e });
         }
       }
     }
@@ -789,7 +821,7 @@ export class H081Bank {
       else {
         // fail closed: a configured relayer that cannot be used never turns into a direct send
         try { terms = await this.relayTerms(); } catch (e) {
-          throw new Error(`${(e as Error).message}. The payment was not sent: retry later, or ${directHint}.`);
+          throw new Error(`${(e as Error).message}. The payment was not sent: retry later, or ${directHint}.`, { cause: e });
         }
       }
     }
@@ -830,6 +862,35 @@ export class H081Bank {
           privacy: `paid from an allowance pledged to loan slot ${pick.owned.lender?.loanRef}: the slot and the lender share ${u(share)} are public in this transaction, which links it to the borrower wallet (the slot's payout account) and reveals the gross amount ${u(amount)}`,
         } : {}),
       };
+    } catch (e) {
+      this.saveCache();
+      throw explained(e, { program: 'pool', ids: this.programIds });
+    }
+  }
+
+  // ---- transfer from the main shielded balance
+
+  /**
+   * Pays `amount` USDG from this account's main shielded balance to another account's shielded address, given as its
+   * "h081-address:" code (checksum, kind and network checked before anything else). Note to note: the amount and the
+   * recipient stay hidden; the agent key sends it (there is no public leg a relayer could take its fee from), so the
+   * chain shows that the agent wallet used the bank. Needs about 0.02 SOL and the transact circuit.
+   */
+  async transfer(amount: bigint, toAddressCode: string): Promise<TransferResult> {
+    const d = this.decimals, sym = MAINNET.usdg.symbol;
+    if (amount <= 0n) throw new Error('the amount must be positive');
+    const to = decodeAddressCode(this.codeContext, toAddressCode);
+    if (to.pk === this.account.keys.pk) throw new Error('that is this account\'s own shielded address; a transfer to itself does nothing. Nothing was sent.');
+    await this.sync();
+    const shielded = this.owner.balance(this.usdg);
+    if (amount > shielded) throw new Error(`the shielded balance is ${fromUnits(shielded, d)} ${sym}, less than ${fromUnits(amount, d)}. Nothing was sent.`);
+    await this.needSol(DEPOSIT_SOL_MIN, 'a transfer the agent key sends');
+    await this.requireArtifacts('transact');
+    try {
+      const r = await this.owner.transfer(this.usdg, amount, to);
+      this.saveCache();
+      const left = this.owner.balance(this.usdg);
+      return { signature: r.tx.signature, amount, amountUsdg: fromUnits(amount, d), to: 'shielded', via: 'direct', shielded: left, shieldedUsdg: fromUnits(left, d) };
     } catch (e) {
       this.saveCache();
       throw explained(e, { program: 'pool', ids: this.programIds });
@@ -1194,7 +1255,9 @@ export class H081Bank {
     const slot = loanRef === undefined ? undefined : await this.loanSlot(loanRef);
     if (pledgeBps === undefined && slot?.funded) pledgeBps = Number(slot.pledgeBps);
     const bps = pledgeBps ?? 0;
-    const minRemaining = q.minRemaining ?? 0n;
+    // With a principal and no budget, quote the budget that principal needs (what borrow pledges by default).
+    // Assuming a 0 budget refused every principal ("at most 0 USDG").
+    const minRemaining = q.minRemaining ?? (q.principal !== undefined && q.principal > 0n && bps > 0 ? minRemainingFor(q.principal, BigInt(bps)) : 0n);
     const max = maxPrincipal(minRemaining, bps);
     const principal = q.principal ?? max;
     if (principal > max) throw new Error(`PrincipalTooLarge: at most ${fromUnits(max, this.decimals)} USDG against ${fromUnits(minRemaining, this.decimals)} USDG pledged at ${bps} bps.`);
@@ -1471,26 +1534,72 @@ export class H081Bank {
     };
   }
 
+  /**
+   * Where a funded slot's money stands under the overpay cap: stream_loan credits the lender at most principal - repaid
+   * (sync_inbox), and the rest of the inbox is the borrower's excess (return_excess sends it to the payout account).
+   * `pending`: unsynced inbox value (inbox - held); `owed`: what a claim may still ask (principal - repaid - pending -
+   * the slot's pool escrow, as the program checks); `collectable`: what sync + collect pay the lender; `excess`: the
+   * borrower's. Before the program carries the cap these figures only ever count less for the lender, never more.
+   */
+  private async loanSplit(ref: bigint, s: SlotAccount) {
+    const pid = this.config.loanProgramId;
+    const [inbox, ledger, escrowed] = await Promise.all([
+      this.pool.tokenBalance(slotInbox(ref, s.asset, s.tokenProgram, pid)).catch(() => 0n),
+      this.lender().ledger(ref, s.asset).catch(() => undefined),
+      this.pool.tokenBalance(slotEscrow(ref, s.asset, this.pool.programId, pid)).catch(() => 0n),
+    ]);
+    const held = ledger?.held ?? 0n;
+    const pending = inbox > held ? inbox - held : 0n;
+    const room = s.principal > s.repaid ? s.principal - s.repaid : 0n;
+    const credit = pending < room ? pending : room;
+    return { inbox, held, escrowed, pending, owed: claimRoom(s, pending, escrowed), collectable: held + credit, excess: pending - credit };
+  }
+
+  /**
+   * A closed loan as its lender sees it (status, sweep): the receipt's figures, and what reached the slot since the
+   * close: `collectable` is what sweep pays the lender (what the mint's Ledger still holds, then up to principal -
+   * receipt.repaid), `borrowerExcess` the rest, which sweep sends back to the borrower.
+   */
+  private async closedView(r: ClosedSlotAccount): Promise<LendSlotView> {
+    const d = this.decimals, pid = this.config.loanProgramId;
+    const tp = await this.pool.tokenProgramOf(r.asset).catch(() => undefined);
+    const [inbox, ledger, escrowed] = await Promise.all([
+      tp ? this.pool.tokenBalance(slotInbox(r.loanRef, r.asset, tp, pid)).catch(() => 0n) : Promise.resolve(0n),
+      this.lender().ledger(r.loanRef, r.asset).catch(() => undefined),
+      this.pool.tokenBalance(slotEscrow(r.loanRef, r.asset, this.pool.programId, pid)).catch(() => 0n),
+    ]);
+    const room = r.principal > r.repaid ? r.principal - r.repaid : 0n;
+    const { fromHeld, fromRoom } = sweepSplit(inbox + escrowed, ledger?.held ?? 0n, room);
+    const collectable = fromHeld + fromRoom, excess = inbox + escrowed - collectable;
+    return {
+      loanRef: r.loanRef, slot: slotPda(r.loanRef, pid).toBase58(), lender: r.lender.toBase58(), mine: r.lender.equals(this.signer.publicKey),
+      state: 'closed', funded: true, settled: true, principal: r.principal, principalUsdg: fromUnits(r.principal, d), repaid: r.repaid, repaidUsdg: fromUnits(r.repaid, d),
+      outstanding: room, outstandingUsdg: fromUnits(room, d), claimable: 0n, claimableUsdg: fromUnits(0n, d), collectable, collectableUsdg: fromUnits(collectable, d),
+      borrowerExcess: excess, borrowerExcessUsdg: fromUnits(excess, d), pledgeBps: null, expiry: 0n, expiresAt: null, shortfall: 0n,
+      payoutTo: r.payoutTo?.toBase58() ?? null, borrowerWithheldMemo: false,
+    };
+  }
+
   /** One slot as its lender sees it (status). */
   private async lendView(ref: bigint, s: SlotAccount, now: bigint, pledgeBps?: bigint): Promise<LendSlotView> {
     const d = this.decimals;
     const lender = this.lender();
-    const [inbox, ledger] = await Promise.all([
-      s.funded ? this.pool.tokenBalance(slotInbox(ref, s.asset, s.tokenProgram, this.config.loanProgramId)).catch(() => 0n) : Promise.resolve(0n),
-      s.funded ? lender.ledger(ref, s.asset).catch(() => undefined) : Promise.resolve(undefined),
-    ]);
+    const split = s.funded ? await this.loanSplit(ref, s) : undefined;
     const mine = s.lender.equals(this.signer.publicKey);
-    const claimable = mine && s.funded && !s.settled ? lender.claimable(ref, now) : 0n;
+    const vested = mine && s.funded && !s.settled ? lender.claimable(ref, now) : 0n;
+    const claimable = split && vested > split.owed ? split.owed : vested;
     const outstanding = s.funded && s.principal > s.repaid ? s.principal - s.repaid : 0n;
-    const collectable = inbox + (ledger?.held ?? 0n);
+    const collectable = split?.collectable ?? 0n;
+    const excess = split?.excess ?? 0n;
     const view: LendSlotView = {
       loanRef: ref, slot: slotPda(ref, this.config.loanProgramId).toBase58(), lender: s.lender.toBase58(), mine,
       state: !s.funded ? 'open' : s.settled ? 'settled' : outstanding === 0n ? 'repaid' : 'funded',
       funded: s.funded, settled: s.settled, principal: s.principal, principalUsdg: fromUnits(s.principal, d), repaid: s.repaid, repaidUsdg: fromUnits(s.repaid, d),
       outstanding, outstandingUsdg: fromUnits(outstanding, d), claimable, claimableUsdg: fromUnits(claimable, d), collectable, collectableUsdg: fromUnits(collectable, d),
+      borrowerExcess: excess, borrowerExcessUsdg: fromUnits(excess, d),
       pledgeBps: s.funded ? s.pledgeBps : pledgeBps ?? null, expiry: s.expiry,
       expiresAt: s.funded && s.expiry !== 0n ? new Date(Number(s.expiry) * 1000).toISOString() : null,
-      shortfall: shortfallOf(s, now, inbox), payoutTo: s.funded ? s.payoutTo.toBase58() : null,
+      shortfall: shortfallOf(s, now, split ? split.pending + split.escrowed : 0n), payoutTo: s.funded ? s.payoutTo.toBase58() : null,
       borrowerWithheldMemo: mine && s.funded && lender.opaque(ref),
     };
     if (!s.funded && mine && pledgeBps !== undefined) view.termsCode = this.loanTermsCode(ref, pledgeBps);
@@ -1507,12 +1616,20 @@ export class H081Bank {
     const pid = this.config.loanProgramId;
     let refs: bigint[] = [];
     let note: string | undefined;
+    const receipts = new Map<bigint, ClosedSlotAccount>();
     if (req.loanRef !== undefined) refs = [req.loanRef];
     else {
       try {
-        // Slot: 8-byte discriminator, loan_ref u64, lender pubkey at offset 16
+        // Slot and ClosedSlot receipt (98 or 130 bytes): 8-byte discriminator, loan_ref u64, lender pubkey at offset 16
         const found = await this.connection.getProgramAccounts(pid, { commitment: 'confirmed', filters: [{ memcmp: { offset: 16, bytes: this.signer.publicKey.toBase58() } }] });
-        for (const f of found) { try { refs.push(decodeSlot(f.account.data).loanRef); } catch { /* not a slot */ } }
+        for (const f of found) {
+          try {
+            if (isClosedSlotAccount(f.account.data)) {
+              const r = decodeClosedSlot(f.account.data);
+              if (r.lender.equals(this.signer.publicKey)) { receipts.set(r.loanRef, r); refs.push(r.loanRef); }
+            } else refs.push(decodeSlot(f.account.data).loanRef);
+          } catch { /* not a slot */ }
+        }
       } catch (e) {
         note = `this RPC cannot list the agent's slots (${(e as Error).message}); pass loanRef`;
       }
@@ -1523,7 +1640,13 @@ export class H081Bank {
     for (const ref of [...new Set(refs)].sort((x, y) => (x < y ? 1 : -1))) {
       const info = await this.connection.getAccountInfo(slotPda(ref, pid), 'confirmed');
       if (!info) {
-        if (req.loanRef !== undefined) throw new Error(`loan slot #${ref} does not exist on chain (or its lender closed it)`);
+        let r = receipts.get(ref);
+        if (!r && req.loanRef !== undefined) {
+          const st = await this.lender().status(ref).catch(() => undefined);
+          if (st?.state === 'closed' && st.receipt) r = st.receipt;
+        }
+        if (r) { slots.push(await this.closedView(r)); continue; }
+        if (req.loanRef !== undefined) throw new Error(`loan slot #${ref} does not exist on chain (or its lender closed it before it lent anything)`);
         continue;
       }
       let s: SlotAccount;
@@ -1540,23 +1663,29 @@ export class H081Bank {
     const s = await this.mySlot(ref, 'collect its repayments');
     if (!s.funded) throw new Error(`loan slot #${ref} has not lent anything yet; there is nothing to collect. Nothing was sent.`);
     const lender = this.lender();
-    const inbox = await this.pool.tokenBalance(slotInbox(ref, s.asset, s.tokenProgram, this.config.loanProgramId)).catch(() => 0n);
-    const held = (await lender.ledger(ref, s.asset).catch(() => undefined))?.held ?? 0n;
-    if (inbox === 0n && held === 0n) {
-      throw new Error(`nothing has been routed to loan slot #${ref} since the last collect (h081_lend action "claim" pulls the vested share of the borrower's stream). Nothing was sent.`);
+    // overpay cap: the lender takes at most principal - repaid; what is routed beyond it is the borrower's
+    const sp = await this.loanSplit(ref, s);
+    if (sp.collectable === 0n) {
+      throw new Error(sp.excess > 0n
+        ? `loan #${ref} is repaid: the ${fromUnits(sp.excess, d)} ${MAINNET.usdg.symbol} in its slot is the borrower's excess (it goes back to the borrower's payout account), not the lender's. Nothing was sent.`
+        : `nothing has been routed to loan slot #${ref} since the last collect (h081_lend action "claim" pulls the vested share of the borrower's stream). Nothing was sent.`);
     }
     await this.needSol(LEND_SOL_MIN, 'collecting');
     const signatures: string[] = [];
     try {
-      if (inbox > 0n) signatures.push((await lender.syncLoan(ref)).signature);
+      if (sp.collectable > sp.held) signatures.push((await lender.syncLoan(ref)).signature);
       const left = (await lender.ledger(ref, s.asset).catch(() => undefined))?.held ?? 0n;
       if (left > 0n) signatures.push((await lender.collect(ref, s.asset)).signature);
     } catch (e) { throw this.loanErr(e); }
     const v = await this.lendView(ref, await this.mySlot(ref, 'read it'), await this.pool.now());
-    return { sent: true, action: 'collect', loanRef: ref, signatures, collected: inbox + held, collectedUsdg: fromUnits(inbox + held, d), slot: v };
+    return { sent: true, action: 'collect', loanRef: ref, signatures, collected: sp.collectable, collectedUsdg: fromUnits(sp.collectable, d), slot: v };
   }
 
-  /** Pulls the vested share of the borrower's pledged stream to the lender (a lender-claim spend proof the agent key sends). */
+  /**
+   * Pulls the vested share of the borrower's pledged stream to the lender (a lender-claim spend proof the agent key
+   * sends), sized to what the loan still owes (principal - repaid - value already on its way): the lender is never paid
+   * more than the principal, and nothing is claimed once the loan is repaid.
+   */
   async lendClaim(req: { loanRef: bigint; amount?: bigint }): Promise<LendSentResult> {
     const ref = req.loanRef, d = this.decimals;
     const s = await this.mySlot(ref, 'claim on it');
@@ -1564,12 +1693,19 @@ export class H081Bank {
     if (s.settled) throw new Error(`loan #${ref} is settled. Nothing was sent.`);
     const lender = this.lender();
     await lender.sync();
-    const claimable = lender.claimable(ref, await this.pool.now());
-    if (claimable === 0n) {
+    const vested = lender.claimable(ref, await this.pool.now());
+    if (vested === 0n) {
       throw new Error(lender.opaque(ref)
         ? 'the borrower moved its pledged note without handing this lender its successor: nothing can be claimed; 7 days after expiry the unpaid principal is a shortfall. Nothing was sent.'
         : `nothing is claimable on loan #${ref} yet (the borrower's stream has not vested more of the pledged share). Nothing was sent.`);
     }
+    const sp = await this.loanSplit(ref, s);
+    if (sp.owed === 0n) {
+      throw new Error(s.repaid >= s.principal
+        ? `loan #${ref} is repaid: the lender is owed nothing more, so there is nothing to claim (what the borrower's stream still routes is the borrower's). Settle it with h081_lend action "settle". Nothing was sent.`
+        : `what loan #${ref} still owes is already on its way to the slot: take it with h081_lend action "collect". Nothing was sent.`);
+    }
+    const claimable = vested < sp.owed ? vested : sp.owed;
     if (req.amount !== undefined && (req.amount <= 0n || req.amount > claimable)) {
       throw new Error(`at most ${fromUnits(claimable, d)} ${MAINNET.usdg.symbol} is claimable now. Nothing was sent.`);
     }
@@ -1604,27 +1740,55 @@ export class H081Bank {
   }
 
   /**
-   * Closes a settled (or never funded) slot and takes its rent back, where the SDK has stream_loan close_slot (this
-   * build's does not yet: the action is refused, nothing sent). Without `confirm`, the plan.
+   * Closes a settled (or never funded) slot and takes its rent back (stream_loan close_slot): repayments still in the
+   * slot are collected first, up to the principal, and the borrower's excess, if any, is sent back to its payout
+   * account. Without `confirm`, the plan.
    */
   async lendClose(req: { loanRef: bigint; confirm?: boolean }): Promise<LendSentResult | LendPlanResult> {
     const ref = req.loanRef;
     const s = await this.mySlot(ref, 'close it');
     if (s.funded && !s.settled) throw new Error(`loan #${ref} is not settled: settle it first (h081_lend action "settle"). Nothing was sent.`);
-    const lender = this.lender() as SolanaLoanLenderWallet & { close?: (loanRef: bigint) => Promise<{ signature: string; refunded?: bigint }> };
-    if (typeof lender.close !== 'function') {
-      throw new Error('closing a loan slot (stream_loan close_slot) is not in this build\'s SDK yet; the slot stays open and keeps its rent. Nothing was sent.');
-    }
+    const lender = this.lender();
     if (!req.confirm) {
       return H081Bank.lendPlan({
         action: 'close', loanRef: ref, funded: s.funded,
-        note: 'the slot\'s accounts are closed and their rent goes back to the agent wallet; repayments still in the slot are collected first',
+        note: 'the slot\'s accounts are closed and their rent goes back to the agent wallet; repayments still in the slot are collected first (up to the principal) and any borrower excess is sent back to the borrower\'s payout account',
       }, 'Call h081_lend again with action "close", the same loanRef and confirm: true to close it.');
     }
     await this.needSol(LEND_SOL_MIN, 'closing a slot');
     let tx: { signature: string; refunded?: bigint };
-    try { tx = await lender.close(ref); } catch (e) { throw this.loanErr(e); }
+    // returnExcess: a repaid loan may close with borrower excess in its inbox; it is sent back right after (best effort)
+    try { tx = await lender.close(ref, { returnExcess: true }); } catch (e) { throw this.loanErr(e); }
     return { sent: true, action: 'close', loanRef: ref, signatures: [tx.signature], ...(tx.refunded === undefined ? {} : { refundedLamports: tx.refunded }) };
+  }
+
+  /**
+   * After a close: takes what the borrower's pledge routed to the closed loan since, up to what the loan still owes
+   * the lender (principal - receipt.repaid; nothing once it is repaid), and sends the rest, the borrower's excess, back
+   * to the borrower's payout account in the same transaction (stream_loan sweep_closed + return_excess). A loan closed
+   * before the overpay cap has an older receipt with no payout account: only the lender's part is swept.
+   */
+  async lendSweep(req: { loanRef: bigint }): Promise<LendSentResult> {
+    const ref = req.loanRef, d = this.decimals;
+    const lender = this.lender();
+    let st: Awaited<ReturnType<SolanaLoanLenderWallet['status']>>;
+    try { st = await lender.status(ref); } catch (e) { throw this.loanErr(e); }
+    if (st.state === 'open') {
+      throw new Error(`loan slot #${ref} is still open: sweep is for a closed loan (h081_lend action "collect" takes what is routed to an open slot). Nothing was sent.`);
+    }
+    if (st.state !== 'closed' || !st.receipt) throw new Error(`loan #${ref} has no closed-loan receipt (it never lent anything, or was never opened). Nothing was sent.`);
+    if (!st.receipt.lender.equals(this.signer.publicKey)) {
+      throw new Error(`loan #${ref} belongs to another lender (${st.receipt.lender.toBase58()}); only its owner can sweep it. Nothing was sent.`);
+    }
+    const v = await this.closedView(st.receipt);
+    await this.needSol(LEND_SOL_MIN, 'sweeping a closed loan');
+    let tx: { signature: string };
+    try { tx = await lender.sweepClosed(ref, undefined, undefined, { returnExcess: true }); } catch (e) { throw this.loanErr(e); }
+    const returned = v.payoutTo ? v.borrowerExcess : 0n;
+    return {
+      sent: true, action: 'sweep', loanRef: ref, signatures: [tx.signature], collected: v.collectable, collectedUsdg: fromUnits(v.collectable, d),
+      returnedToBorrower: returned, returnedToBorrowerUsdg: fromUnits(returned, d),
+    };
   }
 
   // ---- info

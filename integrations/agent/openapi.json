@@ -1,0 +1,2041 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "H081 Agent API",
+    "version": "0.1.1",
+    "description": "The H081 private bank on your own machine. `h081 serve` (npm package @h081lll/agent) runs it on 127.0.0.1:8081. The agent key, notes and viewing keys stay on this machine; the gateway talks only to your Solana RPC, the H081 relayer (already-proven payloads) and the circuit downloads (checked against pinned sha256 hashes). Every write returns a plan and sends nothing unless the body has \"confirm\": true and the request has an Idempotency-Key header. Live on Solana mainnet; not audited yet; use at your own risk.\n\nError codes:\n- unauthorized (401): missing or wrong bearer token\n- forbidden_origin (403): the Host or Origin header is not allowed (the gateway answers 127.0.0.1 and localhost only)\n- not_found (404): no such route\n- bad_request (400): the request body or query is invalid; the message says which field\n- unsupported_media_type (415): a POST body must be Content-Type: application/json\n- idempotency_key_required (400): a confirmed write needs an Idempotency-Key header (1-128 of A-Z a-z 0-9 _ . : -)\n- idempotency_key_reused (422): this Idempotency-Key was used for a different request\n- in_progress (409, retryable): a request with this Idempotency-Key is still running\n- outcome_unknown (409): it may or may not have been sent (the gateway stopped, or the connection failed mid-send); check /v1/balance before retrying with a new key\n- invalid_code (400): an h081-* code failed its checksum, kind or network check\n- insufficient_shielded (409): the shielded balance is too low\n- insufficient_wallet_usdg (409): the agent wallet holds too little USDG\n- needs_sol (409): the agent wallet needs more SOL (details.needSol)\n- cap_per_deposit (409): over the per-deposit cap\n- cap_total (409): the bank is at its total deposit cap\n- deposits_paused (409): deposits are paused; withdrawals still work\n- over_operator_ceiling (409): over an H081_MAX_* ceiling set on this machine\n- needs_stake (409): above what the relayer relays with nothing staked; stake H081 or split the amount\n- allowance_blocked (409): no allowance can pay this amount now (the message names the cap)\n- relayer_unavailable (503, retryable): the relayer is unreachable or refused; nothing was sent (reason in details)\n- relayer_busy (503, retryable): the relayer is busy; nothing was sent\n- rate_limited (429, retryable): too many requests (relayer 429, or the local send limit); see Retry-After\n- busy (503, retryable): the local queue is full; see Retry-After\n- stale_root (409, retryable): the proof used a Merkle root or timestamp that is no longer current; try again\n- in_flight (409, retryable): a note in this operation is already being spent; try again shortly\n- already_spent (409): a note in this operation was already spent\n- simulation_failed (422): the transaction failed in simulation; nothing was sent\n- program_error (422): an on-chain program refused it (Anchor name in details)\n- rpc_unreachable (502, retryable): the Solana RPC cannot be reached; set H081_RPC_URL\n- circuits_missing (503): the proving files are missing; run h081 fetch-circuits\n- circuit_hash_mismatch (503): a proving file does not match its pinned sha256\n- not_available (501): not available in this version\n- no_key (500): no agent key; run h081 init\n- internal (500): an unexpected error",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8081",
+      "description": "h081 serve (local only)"
+    }
+  ],
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Liveness",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "ok: {version, network}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenapiJson",
+        "summary": "This document (OpenAPI 3.1)",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "the OpenAPI document (not wrapped in the envelope)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Where things stand (no RPC call)",
+        "responses": {
+          "200": {
+            "description": "ok: {network, agent, keySource, rpcHost, relayer, circuits:{present, missing}, syncedAt, syncing, queue:{depth}, fundingNeeded}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          }
+        }
+      }
+    },
+    "/v1/address": {
+      "get": {
+        "operationId": "getAddress",
+        "summary": "The agent wallet and its h081-address: code (offline)",
+        "responses": {
+          "200": {
+            "description": "ok: {wallet, addressCode}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          }
+        }
+      }
+    },
+    "/v1/balance": {
+      "get": {
+        "operationId": "getBalance",
+        "summary": "Shielded and wallet balances, caps, allowances",
+        "description": "Served from cache when the last sync is under 15 s old; fresh=1 forces a sync.",
+        "parameters": [
+          {
+            "name": "fresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ]
+            },
+            "description": "1: sync now"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: {shielded, wallet:{usdg, sol}, caps, allowances:[{id, remaining, dailyCap?, expires?, ...}], addressCode, syncedAt}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/history": {
+      "get": {
+        "operationId": "getHistory",
+        "summary": "What this gateway or CLI did (from ops.jsonl), newest first",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "the `next` cursor of the previous page"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
+            "description": "items per page"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: {items:[{id, time, kind, usdg, signature, state, to?}], next}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/fees/withdraw": {
+      "get": {
+        "operationId": "getFeesWithdraw",
+        "summary": "The relayer fee for a withdrawal (no proof is made)",
+        "parameters": [
+          {
+            "name": "usdg",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "description": "decimal USDG, e.g. \"5.25\""
+            },
+            "description": "the amount to withdraw (decimal)"
+          },
+          {
+            "name": "amount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$",
+              "description": "base units instead of usdg (\"5250000\" = 5.25 USDG)"
+            },
+            "description": "or in base units"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: {fee, feeBps, minFee, payout, freeTierMax, needsStake, relayer}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/deposit": {
+      "post": {
+        "operationId": "postDeposit",
+        "summary": "Deposit USDG from the agent wallet into the shielded account",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG, e.g. \"5.25\""
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "base units instead of usdg (\"5250000\" = 5.25 USDG)"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "exactly one of usdg or amount"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {signature, amount, shielded, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/withdraw": {
+      "post": {
+        "operationId": "postWithdraw",
+        "summary": "Withdraw USDG to a wallet through the relayer",
+        "description": "`to` is required: a fresh wallet, or \"self\" for the agent wallet (the plan then warns that this links the two).",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG, e.g. \"5.25\""
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "base units instead of usdg (\"5250000\" = 5.25 USDG)"
+                  },
+                  "to": {
+                    "type": "string",
+                    "description": "a base58 wallet address, or \"self\" (the agent wallet)"
+                  },
+                  "direct": {
+                    "type": "boolean",
+                    "description": "true: the agent key sends the withdrawal itself (no relay fee, no free-tier limit, sender visible on chain); default false: through the relayer, refused (not sent) when the relayer is unavailable"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "to"
+                ],
+                "additionalProperties": false,
+                "description": "exactly one of usdg or amount"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {signature, fee, received, via, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/pay": {
+      "post": {
+        "operationId": "postPay",
+        "summary": "Pay from an allowance this agent holds",
+        "description": "To a wallet (public payout through the relayer) or to an h081-address: code (private; sent by the agent key).",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG, e.g. \"5.25\""
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "base units instead of usdg (\"5250000\" = 5.25 USDG)"
+                  },
+                  "to": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "public payout to this Solana wallet (its USDG account); must be a wallet, not a token account or program"
+                  },
+                  "toAddressCode": {
+                    "type": "string",
+                    "description": "private payment to this shielded H081 address: the recipient's \"h081-address:\" code (h081_bank_balance shows this agent's own as shieldedAddressCode)"
+                  },
+                  "allowanceId": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "the allowance to spend, its id from h081_bank_balance (agentAllowances, or subAccounts with agentIndex); default: picked automatically"
+                  },
+                  "agentIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 15,
+                    "description": "spend an allowance held by this sub-account (default: allowances granted to this account)"
+                  },
+                  "direct": {
+                    "type": "boolean",
+                    "description": "public payout only. true: the agent key sends it (no relay fee, sender visible on chain); default false: through the relayer, refused (not sent) when the relayer is unavailable"
+                  },
+                  "allowPledged": {
+                    "type": "boolean",
+                    "description": "default false: a pledged (loan) allowance is never used. true accepts one, whose loan slot and lender share go on chain next to the payment, linking the recipient to the borrower wallet and revealing the gross amount"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "exactly one of usdg or amount, and exactly one of to or toAddressCode"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {signature, fee, received, via, allowanceId, remaining, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/transfer": {
+      "post": {
+        "operationId": "postTransfer",
+        "summary": "Pay from the main shielded balance to an h081-address: code",
+        "description": "Note to note: amount and recipient stay hidden. Sent by the agent key, so the agent wallet is visible as a bank user.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG, e.g. \"5.25\""
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "base units instead of usdg (\"5250000\" = 5.25 USDG)"
+                  },
+                  "toAddressCode": {
+                    "type": "string",
+                    "description": "the recipient's \"h081-address:\" code (its h081_bank_balance shows it as shieldedAddressCode)"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "toAddressCode"
+                ],
+                "additionalProperties": false,
+                "description": "exactly one of usdg or amount"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {signature, amount, shielded, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/allowances": {
+      "post": {
+        "operationId": "postAllowances",
+        "summary": "Give a sub-account or another agent a budget",
+        "description": "Needs about 0.1 SOL and the grant circuit (about 51 MB).",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "budget": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "the lifetime budget (decimal USDG)"
+                  },
+                  "dailyCap": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "most it may pay per day (decimal USDG)"
+                  },
+                  "maxPerTx": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "most per payment (decimal USDG)"
+                  },
+                  "days": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 3650,
+                    "description": "lifetime in days; default: no expiry"
+                  },
+                  "unlockDays": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 3650,
+                    "description": "stream: the budget unlocks linearly over this many days (<= days); default: all of it at once"
+                  },
+                  "agentIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 15,
+                    "description": "grant to this sub-account of the agent (default, without toAddressCode: the first free one)"
+                  },
+                  "toAddressCode": {
+                    "type": "string",
+                    "description": "grant to another agent: its \"h081-address:\" code (its h081_bank_balance shows it as shieldedAddressCode)"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "budget"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the grant result {signature, allowanceId, rules, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/allowances/{id}/reclaim": {
+      "post": {
+        "operationId": "postAllowancesByIdReclaim",
+        "summary": "Take back what is left of an allowance this account granted",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            },
+            "description": "the allowance id /v1/balance shows"
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the reclaim result {signature, reclaimed, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/loans/quote": {
+      "get": {
+        "operationId": "getLoansQuote",
+        "summary": "Price a loan from a lender's terms code (read-only)",
+        "parameters": [
+          {
+            "name": "termsCode",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "the lender's \"h081-loan-terms:\" code"
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+(\\.\\d+)?$",
+              "description": "decimal USDG, e.g. \"5.25\""
+            },
+            "description": "a principal to price (decimal USDG); default the most it backs"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: the loanQuote result {pledgeBps, maxPrincipal, principal, originationFee, payout, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/loans/borrow": {
+      "post": {
+        "operationId": "postLoansBorrow",
+        "summary": "Pledge an allowance to a lender's terms and get the proof code",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "termsCode": {
+                    "type": "string",
+                    "description": "the lender's \"h081-loan-terms:\" code"
+                  },
+                  "days": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 3650,
+                    "description": "lifetime of the allowance in days"
+                  },
+                  "unlockDays": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 3650,
+                    "description": "the budget unlocks linearly over this many days (<= days)"
+                  },
+                  "principal": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "the loan amount (decimal USDG); the lender must fund exactly this"
+                  },
+                  "budget": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "the pledged budget (decimal USDG); default sized to the principal"
+                  },
+                  "dailyCap": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "most per day (decimal USDG)"
+                  },
+                  "maxPerTx": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "most per payment (decimal USDG)"
+                  },
+                  "agentIndex": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 15,
+                    "description": "which sub-account to use (default: the first free one)"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "termsCode",
+                  "days",
+                  "unlockDays"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {proofCode, principal, ...}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/loans/lend": {
+      "post": {
+        "operationId": "postLoansLend",
+        "summary": "Lender actions: open, fund, collect, claim, settle",
+        "description": "The fields are the h081_lend schema's. close answers 501 not_available. Every lender action is sent by the agent key.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "fund",
+                      "collect",
+                      "claim",
+                      "settle"
+                    ]
+                  },
+                  "pledgeBps": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 9000,
+                    "description": "open: the share of every borrower payment routed to the slot (basis points). fund: the least share the proof must pledge. status: show an open slot terms code with this share"
+                  },
+                  "proofCode": {
+                    "type": "string",
+                    "description": "fund: the borrower proof code, \"h081-loan-proof:...\" (from h081_loan_borrow)"
+                  },
+                  "loanRef": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "the loan slot number; status without it lists every slot of this agent; fund defaults to the slot in the proof code"
+                  },
+                  "principal": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "fund: the amount you expect to lend (base units); refused unless it is exactly what the proof backs. Default: what the proof backs"
+                  },
+                  "principalUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "claim: at most this much (base units); default: everything claimable now, capped at what the loan still owes"
+                  },
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the matching lend result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/loans/lent": {
+      "get": {
+        "operationId": "getLoansLent",
+        "summary": "This agent's loan slots as a lender",
+        "parameters": [
+          {
+            "name": "loanRef",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            },
+            "description": "one slot; default all of this agent's slots"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: the lendStatus result {slots:[...]}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/stake": {
+      "get": {
+        "operationId": "getStake",
+        "summary": "The agent wallet's H081 stake in capacity_stake",
+        "responses": {
+          "200": {
+            "description": "ok: the stakeView result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      },
+      "post": {
+        "operationId": "postStake",
+        "summary": "Stake, request unstake (30-day cooldown) or unstake H081",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "stake",
+                      "request_unstake",
+                      "unstake"
+                    ]
+                  },
+                  "h081": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal H081 amount, e.g. \"12.5\""
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the stake result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/codes/check": {
+      "post": {
+        "operationId": "postCodesCheck",
+        "summary": "Check any h081-* code: kind, network, valid",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "an \"h081-address:\", \"h081-loan-terms:\", \"h081-loan-proof:\" or \"h081-key:\" code"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {kind, network, valid, reason?}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "getEvents",
+        "summary": "Server-sent events",
+        "description": "balance.changed {shielded, wallet, deltaShielded}, allowance.changed {id, remaining}, op.completed {idempotencyKey, kind, signature}, op.failed {idempotencyKey, code}. Resume with Last-Event-ID. A background sync runs every --poll seconds while a client is connected.",
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "resume after this event id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "text/event-stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "the token in ~/.h081/api-token (h081 token prints it)"
+      }
+    },
+    "schemas": {
+      "Success": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "network": {
+            "type": "string",
+            "enum": [
+              "mainnet-beta",
+              "localnet"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "done",
+              "plan",
+              "sent"
+            ]
+          },
+          "result": {},
+          "replayed": {
+            "type": "boolean",
+            "description": "true when an Idempotency-Key replay returned the stored result"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "network",
+          "status",
+          "result",
+          "requestId"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": false
+          },
+          "network": {
+            "type": "string"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "unauthorized",
+                  "forbidden_origin",
+                  "not_found",
+                  "bad_request",
+                  "unsupported_media_type",
+                  "idempotency_key_required",
+                  "idempotency_key_reused",
+                  "in_progress",
+                  "outcome_unknown",
+                  "invalid_code",
+                  "insufficient_shielded",
+                  "insufficient_wallet_usdg",
+                  "needs_sol",
+                  "cap_per_deposit",
+                  "cap_total",
+                  "deposits_paused",
+                  "over_operator_ceiling",
+                  "needs_stake",
+                  "allowance_blocked",
+                  "relayer_unavailable",
+                  "relayer_busy",
+                  "rate_limited",
+                  "busy",
+                  "stale_root",
+                  "in_flight",
+                  "already_spent",
+                  "simulation_failed",
+                  "program_error",
+                  "rpc_unreachable",
+                  "circuits_missing",
+                  "circuit_hash_mismatch",
+                  "not_available",
+                  "no_key",
+                  "internal"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "details": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "network",
+          "error",
+          "requestId"
+        ]
+      },
+      "Plan": {
+        "type": "object",
+        "description": "What a write would do. Returned (status \"plan\") when confirm is missing or false; nothing is proven, signed or sent.",
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "usdg": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "fee": {
+            "type": "string",
+            "description": "USDG taken out of the amount"
+          },
+          "payout": {
+            "type": "string",
+            "description": "USDG the recipient gets"
+          },
+          "solNeeded": {
+            "type": "string",
+            "description": "SOL the agent wallet needs for this"
+          },
+          "circuit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "download": {
+            "type": "string",
+            "description": "what the first proof downloads, once"
+          },
+          "publicOnChain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sentBy": {
+            "type": "string",
+            "enum": [
+              "relayer",
+              "agent key"
+            ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "details": {},
+          "next": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "fee",
+          "solNeeded",
+          "circuit",
+          "download",
+          "publicOnChain",
+          "sentBy",
+          "warnings",
+          "next"
+        ]
+      }
+    },
+    "responses": {
+      "E400": {
+        "description": "Bad request: bad_request, idempotency_key_required, invalid_code",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E401": {
+        "description": "Missing or wrong token: unauthorized",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E403": {
+        "description": "Host or Origin not allowed: forbidden_origin",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E404": {
+        "description": "Not found: not_found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E409": {
+        "description": "Conflict: in_progress, outcome_unknown, insufficient_shielded, insufficient_wallet_usdg, needs_sol, cap_per_deposit, cap_total, deposits_paused, over_operator_ceiling, needs_stake, allowance_blocked, stale_root, in_flight, already_spent",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E415": {
+        "description": "Not JSON: unsupported_media_type",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E422": {
+        "description": "Refused: idempotency_key_reused, simulation_failed, program_error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E429": {
+        "description": "Too many requests: rate_limited",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E500": {
+        "description": "Internal error: no_key, internal",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E501": {
+        "description": "Not available: not_available",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E502": {
+        "description": "RPC unreachable: rpc_unreachable",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E503": {
+        "description": "Unavailable: relayer_unavailable, relayer_busy, busy, circuits_missing, circuit_hash_mismatch",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

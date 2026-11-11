@@ -25,7 +25,7 @@ describe('h081 MCP server', () => {
 
   it('initializes (version negotiation, instructions) and lists one tool per operation with input schemas', async () => {
     const init = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
-    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.2.0' }, instructions: INSTRUCTIONS });
+    expect(init!.result).toMatchObject({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: SERVER_NAME, version: '0.2.2' }, instructions: INSTRUCTIONS });
     expect(INSTRUCTIONS).toMatch(/not audited yet/);
     const newer = await mcp.handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2099-01-01' } });
     expect(newer!.result).toMatchObject({ protocolVersion: '2025-11-25' });
@@ -117,6 +117,11 @@ describe('h081 MCP server', () => {
     const capped = await call('h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:abc', confirm: true });
     expect(capped).toMatchObject({ isError: true });
     expect(capped.content[0].text).toMatch(/H081_MAX_LEND.*Nothing was sent/);
+    // the same stable code and retry flag as the local API
+    expect(capped.structuredContent).toMatchObject({ error: { code: 'over_operator_ceiling', retryable: false } });
+    expect((await call('h081_lend', { action: 'fund' })).structuredContent).toMatchObject({ error: { code: 'bad_request', retryable: false } });
+    expect((await call('h081_transfer', { usdg: '1', toAddressCode: 'h081-address:abc' })).structuredContent).toMatchObject({ amount: '1000000', to: 'shielded' });
+    expect(bank.transfer).toHaveBeenLastCalledWith(1_000_000n, 'h081-address:abc');
     const d = ((await mcp.handle({ jsonrpc: '2.0', id: 6, method: 'tools/list' }))!.result as { tools: Array<{ name: string; description: string }> }).tools.find((t) => t.name === 'h081_lend')!.description;
     expect(d).toMatch(/WITHOUT `confirm: true` open, fund, settle and close send NOTHING/);
     expect(d).toMatch(/H081_MAX_LEND/);
@@ -140,6 +145,21 @@ describe('h081 MCP server', () => {
     expect(pay.content[0].text).toMatch(/Unrecognized key.*confirm.*Nothing was sent/);
     expect((await call('h081_bank_deposit', { usdg: '1', extra: 1 })).content[0].text).toMatch(/Unrecognized key/);
     expect(calls()).toBe(before);
+  });
+
+  it('a send that fails mid-way is outcome_unknown (not retryable) so the model does not pay twice; a read stays retryable', async () => {
+    const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+    const b = mockBank({ withdraw: vi.fn(async () => { throw reset(); }), balance: vi.fn(async () => { throw reset(); }) } as never);
+    const server = createServer({ bank: async () => b });
+    const run = async (name: string, args: Record<string, unknown>) => (await server.handle({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }))!.result as CallResult;
+    const w = await run('h081_bank_withdraw', { usdg: '2', to: Keypair.generate().publicKey.toBase58() });
+    expect(w.isError).toBe(true);
+    expect(w.structuredContent).toMatchObject({ error: { code: 'outcome_unknown', retryable: false } });
+    expect(w.structuredContent).not.toHaveProperty('text');
+    expect(w.content[0].text).toMatch(/outcome is unknown: check the balance .* before retrying/);
+    const r = await run('h081_bank_balance', {});
+    expect(r.structuredContent).toMatchObject({ error: { code: 'rpc_unreachable', retryable: true } });
+    expect(r.content[0].text).toBe('fetch failed');
   });
 
   it('a bad argument or a bank refusal is a tool result with isError, not a protocol error', async () => {

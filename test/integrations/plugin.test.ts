@@ -29,7 +29,7 @@ describe('H081 Agent Kit plugin', () => {
     expect(H081_ACTIONS).toHaveLength(OPS.length);
     const names = H081_ACTIONS.map((a) => a.name);
     expect(new Set(names).size).toBe(OPS.length);
-    expect(names).toEqual(['H081_BANK_DEPOSIT', 'H081_BANK_WITHDRAW', 'H081_BANK_BALANCE', 'H081_LOAN_QUOTE', 'H081_LOAN_BORROW', 'H081_STAKE', 'H081_PROTOCOL_INFO', 'H081_PAY', 'H081_ALLOWANCE_GRANT', 'H081_ALLOWANCE_DELEGATE', 'H081_ALLOWANCE_RECLAIM', 'H081_LEND']);
+    expect(names).toEqual(['H081_BANK_DEPOSIT', 'H081_BANK_WITHDRAW', 'H081_BANK_BALANCE', 'H081_LOAN_QUOTE', 'H081_LOAN_BORROW', 'H081_STAKE', 'H081_PROTOCOL_INFO', 'H081_PAY', 'H081_ALLOWANCE_GRANT', 'H081_ALLOWANCE_DELEGATE', 'H081_ALLOWANCE_RECLAIM', 'H081_LEND', 'H081_TRANSFER']);
     for (const [i, a] of H081_ACTIONS.entries()) {
       expect(a.similes[0]).toBe(OPS[i]);
       expect(a.similes.length).toBeGreaterThan(2);
@@ -43,7 +43,7 @@ describe('H081 Agent Kit plugin', () => {
       for (const ex of EXAMPLE_INPUTS[OPS[i]]) expect(a.schema.safeParse(ex).success).toBe(true);
       expect(typeof a.handler).toBe('function');
     }
-    expect(Object.keys(H081Plugin.methods).sort()).toEqual(['h081AllowanceDelegate', 'h081AllowanceGrant', 'h081AllowanceReclaim', 'h081BankBalance', 'h081BankDeposit', 'h081BankWithdraw', 'h081Lend', 'h081LoanBorrow', 'h081LoanQuote', 'h081Pay', 'h081ProtocolInfo', 'h081Stake']);
+    expect(Object.keys(H081Plugin.methods).sort()).toEqual(['h081AllowanceDelegate', 'h081AllowanceGrant', 'h081AllowanceReclaim', 'h081BankBalance', 'h081BankDeposit', 'h081BankWithdraw', 'h081Lend', 'h081LoanBorrow', 'h081LoanQuote', 'h081Pay', 'h081ProtocolInfo', 'h081Stake', 'h081Transfer']);
     for (const m of Object.values(H081Plugin.methods)) expect(typeof m).toBe('function');
     expect(agent.actions.map((a) => a.name)).toEqual(names);
     expect(Object.keys(agent.methods).sort()).toEqual(Object.keys(H081Plugin.methods).sort());

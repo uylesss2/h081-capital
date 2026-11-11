@@ -156,9 +156,11 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
     lendSettle: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
       ? { sent: true, action: 'settle', loanRef: req.loanRef, signatures: ['sigSettle'] }
       : { sent: false, dryRun: true, plan: { action: 'settle', loanRef: req.loanRef }, next: 'nothing was sent' })),
+    lendSweep: vi.fn(async (req: { loanRef: bigint }) => ({ sent: true, action: 'sweep', loanRef: req.loanRef, signatures: ['sigSweep'], collected: 1_000_000n, collectedUsdg: '1', returnedToBorrower: 0n, returnedToBorrowerUsdg: '0' })),
     lendClose: vi.fn(async (req: { loanRef: bigint; confirm?: boolean }) => (req.confirm
       ? { sent: true, action: 'close', loanRef: req.loanRef, signatures: ['sigClose'] }
       : { sent: false, dryRun: true, plan: { action: 'close', loanRef: req.loanRef }, next: 'nothing was sent' })),
+    transfer: vi.fn(async (amount: bigint, _code: string) => ({ signature: 'sigTransfer', amount, amountUsdg: (Number(amount) / 1e6).toString(), to: 'shielded', via: 'direct', shielded: 1n, shieldedUsdg: '0.000001' })),
     ...over,
   };
   return b as unknown as BankLike & Record<keyof BankLike, ReturnType<typeof vi.fn>>;

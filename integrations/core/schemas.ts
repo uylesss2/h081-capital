@@ -8,7 +8,7 @@ const DECIMAL = /^\d+(\.\d+)?$/;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export const OPS = ['h081_bank_deposit', 'h081_bank_withdraw', 'h081_bank_balance', 'h081_loan_quote', 'h081_loan_borrow', 'h081_stake', 'h081_protocol_info', 'h081_pay',
-  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend'] as const;
+  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer'] as const;
 export type OpName = (typeof OPS)[number];
 
 const NOTICE_SHORT = 'H081 Capital is live on Solana mainnet, not audited yet; use at your own risk.';
@@ -25,8 +25,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'the transaction and takes its fee out of the amount: max(0.05 USDG, 0.20%) of the public amount, paid to the protocol ' +
     'treasury (checked before anything is proven); the chain then does not link the agent wallet to the withdrawal. If the ' +
     'relayer is unreachable or refuses, the withdrawal is NOT sent and the error says why; it is never silently sent by the ' +
-    'agent key. Above the relayer\'s anonymous free tier (100 USDG per 30 days today) the agent wallet is named to the relayer ' +
-    'as capacity operator, which needs H081 staked in capacity_stake (`h081_stake`); otherwise split the withdrawal or go direct. ' +
+    'agent key. Up to 100 USDG per withdrawal with nothing staked; above that, H081 staked in capacity_stake sets a 30-day ' +
+    'limit (the agent wallet is named to the relayer as capacity operator, `h081_stake`); otherwise split the withdrawal or go direct. ' +
     '`direct: true` has the agent key send it instead (no relay fee, no limit, but the agent wallet is visible on chain as the ' +
     'sender). Give `amount` or `usdg`. ' + NOTICE_SHORT,
   h081_bank_balance:
@@ -58,7 +58,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     NOTICE_SHORT,
   h081_stake:
     'capacity_stake: stake H081 from the agent wallet to earn relayer capacity (desks and shield capacity: how much ' +
-    'the relayer relays for this wallet per 30 days above the anonymous free tier, used by h081_bank_withdraw), request ' +
+    'the relayer relays for this wallet per 30 days above 100 USDG per withdrawal, used by h081_bank_withdraw), request ' +
     'unstake (30-day cooldown), unstake after the cooldown, or `view` the position. Caps: 100,000 H081 per stake, ' +
     '1,000,000 H081 total. Give `amount` (base units, 6 decimals) or `h081` (decimal) for stake / request_unstake. ' +
     NOTICE_SHORT,
@@ -78,7 +78,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'through the relayer, fee max(0.05 USDG, 0.20% of the amount), plus a surcharge when the wallet has no USDG account ' +
     'yet, to the protocol treasury (checked before anything is ' +
     'proven); if the relayer is unreachable or refuses, the payment is NOT sent, never silently sent by the agent key; ' +
-    'above the relayer\'s free tier (100 USDG per 30 days today) the agent wallet is named as capacity operator (h081_stake). ' +
+    'up to 100 USDG per withdrawal with nothing staked; above that, H081 staked in capacity_stake sets a 30-day limit (the agent wallet is named as capacity operator, h081_stake). ' +
     '`direct: true` has the agent key send a public payout (no fee; the agent wallet is then visible as the sender). A ' +
     'private payment is always sent by the agent key (no public leg to pay a relayer from): the chain sees that the ' +
     'agent wallet submitted a payment, not to whom or how much. A pledged (loan) allowance is never used unless ' +
@@ -129,14 +129,22 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'amount), leaves the agent wallet\'s public USDG (not the shielded balance), and the borrower receives it minus the ' +
     '0.25% origination fee to the protocol treasury; "status" lists the agent\'s slots (or `loanRef`): funded, repaid, ' +
     'outstanding, claimable, collectable, shortfall, and with `pledgeBps` an open slot\'s terms code again; "claim" ' +
-    'pulls the vested lender share of the borrower\'s stream (spend circuit); "collect" takes shares already routed to ' +
-    'the slot; "settle" closes the books (no shortfall can be reported after); "close" returns a settled slot\'s rent ' +
-    'where the SDK supports it (this build refuses it, nothing sent). WITHOUT `confirm: true` open, fund, settle and ' +
-    'close send NOTHING and return the plan. The operator ceiling H081_MAX_LEND caps every loan funded. Risk: repayment is ' +
+    'pulls the vested lender share of the borrower\'s stream (spend circuit), sized to what the loan still owes; ' +
+    '"collect" takes shares already routed to the slot; "settle" closes the books (no shortfall can be reported after); ' +
+    '"close" returns a settled slot\'s rent (repayments still in it are collected first); "sweep" takes what reached a ' +
+    'closed loan since, up to what it still owes. The lender is never paid more than the principal: anything routed ' +
+    'beyond it is the borrower\'s and is sent back to the borrower\'s payout account. WITHOUT `confirm: true` open, ' +
+    'fund, settle and close send NOTHING and return the plan. The operator ceiling H081_MAX_LEND caps every loan funded. Risk: repayment is ' +
     'only the pledged share of what the borrower\'s allowance pays, until the principal is repaid; there is no collateral ' +
     'beyond it. Privacy: stream_loan needs the slot owner\'s signature, so the agent key sends every lender action (no ' +
     'relayer): the agent wallet is public as the lender, and the principal and payout account are public; the ' +
     'borrower\'s budget and payments are not. Needs SOL for slot rent and fees (~0.02 SOL to fund). ' + NOTICE_SHORT,
+  h081_transfer:
+    'Pay USDG from this account\'s main shielded balance to another account\'s shielded address, given as its ' +
+    '"h081-address:" code (its checksum, kind and network are checked first). Note to note: the amount and the recipient ' +
+    'stay hidden on chain. The agent key sends it (there is no public leg a relayer could take a fee from), so the chain ' +
+    'shows that the agent wallet used the bank. No relay fee. Sends when called (no plan step). Needs ~0.02 SOL and the ' +
+    'transact circuit. Give `amount` (base units) or `usdg` (decimal). ' + NOTICE_SHORT,
 };
 
 // ------------------------------------------------------------------ zod
@@ -250,7 +258,7 @@ export const AllowanceDelegateZ = z.object({
 
 export const AllowanceReclaimZ = z.object({ allowanceId: idZ, confirm: z.boolean().optional() }).strict();
 
-export const LEND_ACTIONS = ['open', 'fund', 'status', 'claim', 'collect', 'settle', 'close'] as const;
+export const LEND_ACTIONS = ['open', 'fund', 'status', 'claim', 'collect', 'settle', 'close', 'sweep'] as const;
 export const LEND_FIELDS: Record<(typeof LEND_ACTIONS)[number], string[]> = {
   open: ['pledgeBps', 'confirm'],
   fund: ['proofCode', 'loanRef', 'principal', 'principalUsdg', 'pledgeBps', 'confirm'],
@@ -259,6 +267,7 @@ export const LEND_FIELDS: Record<(typeof LEND_ACTIONS)[number], string[]> = {
   collect: ['loanRef'],
   settle: ['loanRef', 'confirm'],
   close: ['loanRef', 'confirm'],
+  sweep: ['loanRef'],
 };
 export const LendZ = z.object({
   action: z.enum(LEND_ACTIONS, { errorMap: () => ({ message: `action must be one of ${LEND_ACTIONS.join(', ')}` }) }),
@@ -274,15 +283,20 @@ export const LendZ = z.object({
   })
   .refine((o) => o.action !== 'open' || o.pledgeBps !== undefined, { message: 'pledgeBps is required: open needs pledgeBps (100..9000)' })
   .refine((o) => o.action !== 'fund' || o.proofCode !== undefined, { message: 'proofCode (the borrower\'s "h081-loan-proof:" code) is required: fund needs proofCode' })
-  .refine((o) => !['claim', 'collect', 'settle', 'close'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: claim, collect, settle and close need loanRef (the loan slot number)' })
+  .refine((o) => !['claim', 'collect', 'settle', 'close', 'sweep'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: claim, collect, settle, close and sweep need loanRef (the loan slot number)' })
   .refine(atMostOne('principal', 'principalUsdg'), bothMsg('principal', 'principalUsdg'))
   .refine(atMostOne('amount', 'usdg'), bothMsg('amount', 'usdg'));
+
+export const TransferZ = z.object({
+  amount: amountZ.optional(), usdg: decimalZ.optional(),
+  toAddressCode: z.string({ required_error: 'must be given: the recipient\'s "h081-address:" code' }).min(1),
+}).strict().refine(exactlyOne('amount', 'usdg'), oneOfMsg('amount', 'usdg'));
 
 export const ZOD: Record<OpName, z.ZodType<any>> = {
   h081_bank_deposit: DepositZ, h081_bank_withdraw: WithdrawZ, h081_bank_balance: BalanceZ, h081_loan_quote: LoanQuoteZ,
   h081_loan_borrow: LoanBorrowZ, h081_stake: StakeZ, h081_protocol_info: ProtocolInfoZ, h081_pay: PayZ,
   h081_allowance_grant: AllowanceGrantZ, h081_allowance_delegate: AllowanceDelegateZ, h081_allowance_reclaim: AllowanceReclaimZ,
-  h081_lend: LendZ,
+  h081_lend: LendZ, h081_transfer: TransferZ,
 };
 
 // ------------------------------------------------------------------ JSON Schema (MCP inputSchema)
@@ -413,19 +427,29 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   h081_lend: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: [...LEND_ACTIONS], description: 'open a slot, fund it against a borrower proof, status, claim the vested share, collect routed shares, settle, close' },
+      action: { type: 'string', enum: [...LEND_ACTIONS], description: 'open a slot, fund it against a borrower proof, status, claim the vested share (up to what is owed), collect routed shares, settle, close, sweep a closed loan' },
       pledgeBps: { type: 'integer', minimum: 100, maximum: 9000, description: 'open: the share of every borrower payment routed to the slot (basis points). fund: the least share the proof must pledge. status: show an open slot terms code with this share' },
       proofCode: { type: 'string', description: 'fund: the borrower proof code, "h081-loan-proof:..." (from h081_loan_borrow)' },
       loanRef: { type: 'string', pattern: BASE.source, description: 'the loan slot number; status without it lists every slot of this agent; fund defaults to the slot in the proof code' },
       principal: { ...amountJ, description: 'fund: the amount you expect to lend (base units); refused unless it is exactly what the proof backs. Default: what the proof backs' },
       principalUsdg: decimalJ('USDG'),
-      amount: { ...amountJ, description: 'claim: at most this much (base units); default: everything claimable now' },
+      amount: { ...amountJ, description: 'claim: at most this much (base units); default: everything claimable now, capped at what the loan still owes' },
       usdg: decimalJ('USDG'),
       confirm: { type: 'boolean', description: 'open, fund, settle, close: true sends it. Default false: nothing is sent, the result is the plan' },
     },
     required: ['action'],
     additionalProperties: false,
     description: 'open needs pledgeBps; fund needs proofCode; claim, collect, settle and close need loanRef; each action takes only its own fields',
+  },
+  h081_transfer: {
+    type: 'object',
+    properties: {
+      amount: { ...amountJ, description: 'taken out of the main shielded balance (base units)' }, usdg: decimalJ('USDG'),
+      toAddressCode: { type: 'string', description: 'the recipient\'s "h081-address:" code (its h081_bank_balance shows it as shieldedAddressCode)' },
+    },
+    required: ['toAddressCode'],
+    additionalProperties: false,
+    description: 'exactly one of amount (base units) or usdg (decimal), and the recipient\'s address code',
   },
 };
 
@@ -463,5 +487,7 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'claim', loanRef: '3' },
     { action: 'collect', loanRef: '3' },
     { action: 'settle', loanRef: '3', confirm: true },
+    { action: 'sweep', loanRef: '3' },
   ],
+  h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
 };

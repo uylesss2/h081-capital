@@ -4,7 +4,7 @@
 //   import H081Plugin from '@h081lll/solana-agent-kit-plugin';
 //   const agent = new SolanaAgentKit(new KeypairWallet(keypair, rpc), rpc, {}).use(H081Plugin);
 //   const tools = createVercelAITools(agent, agent.actions);          // or createLangchainTools / createOpenAITools
-//   await agent.methods.h081BankDeposit({ usdg: '25' });              // or call the methods directly
+//   await agent.methods.h081BankDeposit(agent, { usdg: '25' });       // or call the methods directly
 //
 // Live on Solana mainnet; not audited yet; use at your own risk.
 import type { Plugin, SolanaAgentKit } from 'solana-agent-kit';
@@ -18,11 +18,12 @@ import { protocolInfoAction } from './actions/protocolInfo.js';
 import { payAction } from './actions/pay.js';
 import { allowanceDelegateAction, allowanceGrantAction, allowanceReclaimAction } from './actions/allowance.js';
 import { lendAction } from './actions/lend.js';
+import { transferAction } from './actions/transfer.js';
 import { METHODS } from './tools/index.js';
 
 export const H081_ACTIONS = [
   bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction,
-  allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction,
+  allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction, transferAction,
 ];
 
 const H081Plugin = {
@@ -37,9 +38,9 @@ const H081Plugin = {
 
 export default H081Plugin;
 export { H081Plugin };
-export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction, allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction };
+export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction, allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction, transferAction };
 export {
-  h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend,
+  h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer,
 } from './tools/index.js';
 export { signerFromAgent, keypairOfWallet, UNSUPPORTED_WALLET } from './signer.js';
 export { bankFor, setBankProvider, resetBank, type BankProvider, type AgentLike } from './bank.js';

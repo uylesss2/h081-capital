@@ -34,16 +34,23 @@ export interface McpServerInfo {
   version: string;
   /** text the client shows its model after initialize */
   instructions?: string;
+  /**
+   * structured content for a failed tool call (e.g. a stable error code); default none. When it returns
+   * `text`, that replaces the error message the model reads.
+   */
+  errorContent?: (e: unknown, call: { name: string; args: Record<string, unknown> }) => (Record<string, unknown> & { text?: string }) | undefined;
 }
 
 export class McpServer {
   private readonly byName: Map<string, McpTool>;
   readonly info: { name: string; version: string };
   readonly instructions: string;
+  private readonly errorContent?: McpServerInfo['errorContent'];
 
   constructor(readonly tools: McpTool[], info: McpServerInfo = { name: 'stipend', version: '0.1.0' }) {
     this.byName = new Map(tools.map((t) => [t.name, t]));
     this.info = { name: info.name, version: info.version };
+    this.errorContent = info.errorContent;
     this.instructions = info.instructions ?? 'Stipend wallet tools. ' + POLICY_NOTE;
   }
 
@@ -75,13 +82,18 @@ export class McpServer {
         const name = String(req.params?.name ?? '');
         const tool = this.byName.get(name);
         if (!tool) return fail(-32602, `unknown tool: ${name}`);
+        const args = (req.params?.arguments ?? {}) as Record<string, unknown>;
         try {
-          const out = await tool.handler((req.params?.arguments ?? {}) as Record<string, unknown>);
+          const out = await tool.handler(args);
           const text = toJson(out);
           return reply({ content: [{ type: 'text', text }], structuredContent: JSON.parse(text), isError: false });
         } catch (e) {
           // a tool failure (a refused proof, a bad argument) is a result the model can read, not a protocol error
-          return reply({ content: [{ type: 'text', text: (e as Error).message }], isError: true });
+          let structured: (Record<string, unknown> & { text?: string }) | undefined;
+          try { structured = this.errorContent?.(e, { name, args }); } catch { structured = undefined; }
+          let text = (e as Error).message;
+          if (structured && typeof structured.text === 'string') { const { text: t, ...rest } = structured; text = t; structured = rest; }
+          return reply({ content: [{ type: 'text', text }], ...(structured ? { structuredContent: structured } : {}), isError: true });
         }
       }
       default:

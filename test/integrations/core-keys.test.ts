@@ -1,5 +1,5 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -10,7 +10,7 @@ import bs58 from 'bs58';
 import { FIELD, mod } from '../../src/crypto.js';
 import { DERIVE_LABEL } from '../../integrations/core/constants.js';
 import {
-  accountDerivationFromEnv, accountSkFromEnv, deriveAccountSk, deriveAccountSkFromSignature, deriveAgentSk, hasKeyInEnv, loadKeypair, parseFieldElement, parseSecret,
+  accountDerivationFromEnv, accountSkFromEnv, defaultKeyPath, describeKeySource, expandHome, h081Home, keySource, deriveAccountSk, deriveAccountSkFromSignature, deriveAgentSk, hasKeyInEnv, loadKeypair, parseFieldElement, parseSecret,
 } from '../../integrations/core/keys.js';
 
 const field = (h: Uint8Array) => { const k = mod(BigInt('0x' + Buffer.from(h).toString('hex'))); return k === 0n ? 1n : k; };
@@ -60,14 +60,39 @@ describe('keys', () => {
     expect(loadKeypair({ H081_SOLANA_KEY: JSON.stringify(Array.from(kp.secretKey)) }).publicKey.equals(kp.publicKey)).toBe(true);
     // the file wins when both are set
     expect(loadKeypair({ H081_SOLANA_KEYPAIR: file, H081_SOLANA_KEY: bs58.encode(Keypair.generate().secretKey) }).publicKey.equals(kp.publicKey)).toBe(true);
-    expect(() => loadKeypair({})).toThrow(/H081_SOLANA_KEYPAIR/);
+    const empty = { H081_HOME: join(dir, 'empty-home') };
+    expect(() => loadKeypair(empty)).toThrow(/H081_SOLANA_KEYPAIR/);
     expect(() => loadKeypair({ H081_SOLANA_KEYPAIR: join(dir, 'missing.json') })).toThrow(/no file/);
     expect(() => parseSecret('not base58!!')).toThrow(/neither base58/);
     expect(() => parseSecret('[1,2,3]')).toThrow(/64 bytes/);
     expect(parseSecret(bs58.encode(kp.secretKey.subarray(0, 32))).publicKey.equals(kp.publicKey)).toBe(true); // a 32-byte seed
-    expect(hasKeyInEnv({})).toBe(false);
-    expect(hasKeyInEnv({ H081_SOLANA_KEY: ' ' })).toBe(false);
+    expect(hasKeyInEnv(empty)).toBe(false);
+    expect(hasKeyInEnv({ ...empty, H081_SOLANA_KEY: ' ' })).toBe(false);
     expect(hasKeyInEnv({ H081_SOLANA_KEY: 'x' })).toBe(true);
+  });
+
+  it('expands a leading ~, defaults to <H081_HOME>/agent.json and reports only where the key came from', () => {
+    expect(expandHome('~')).toBe(homedir());
+    expect(expandHome('~/x/agent.json')).toBe(join(homedir(), 'x', 'agent.json'));
+    expect(expandHome('/abs/agent.json')).toBe('/abs/agent.json');
+    expect(h081Home({})).toBe(join(homedir(), '.h081'));
+    expect(defaultKeyPath({})).toBe(join(homedir(), '.h081', 'agent.json'));
+    const home = mkdtempSync(join(tmpdir(), 'h081-home-'));
+    const env = { H081_HOME: home };
+    expect(keySource(env)).toBeUndefined();
+    expect(describeKeySource(keySource(env))).toBe('none');
+    const kp = Keypair.generate();
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'agent.json'), JSON.stringify(Array.from(kp.secretKey)));
+    expect(keySource(env)).toEqual({ kind: 'default', path: join(home, 'agent.json') });
+    expect(loadKeypair(env).publicKey.equals(kp.publicKey)).toBe(true);
+    const src = describeKeySource(keySource(env));
+    expect(src).toBe(`file ${join(home, 'agent.json')}`);
+    expect(src).not.toContain(bs58.encode(kp.secretKey));
+    expect(describeKeySource(keySource({ ...env, H081_SOLANA_KEY: bs58.encode(kp.secretKey) }))).toBe('H081_SOLANA_KEY');
+    // H081_SOLANA_KEYPAIR with a leading ~ is expanded
+    expect(keySource({ H081_SOLANA_KEYPAIR: '~/.h081/agent.json' })).toEqual({ kind: 'H081_SOLANA_KEYPAIR', path: join(homedir(), '.h081', 'agent.json') });
+    expect(() => loadKeypair({ H081_SOLANA_KEYPAIR: '~/h081-surely-missing-dir/agent.json' })).toThrow(`no file at ${join(homedir(), 'h081-surely-missing-dir', 'agent.json')}`);
   });
 
   it('H081_ACCOUNT_SK overrides the derived secret (decimal or hex) and is validated', () => {

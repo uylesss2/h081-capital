@@ -3,6 +3,7 @@
 //   h081-loan-terms:  loanRef, pledgeBps, the lender's viewing key              (lender -> borrower)   (kind 1)
 //   h081-loan-proof:  { ref, payout, proof: {a, b, c}, args: StreamArgs }       (borrower -> lender)   (kind 2)
 //   h081-address:     a shielded H081 address (spending pk + viewing key) that others pay privately   (kind 5)
+//   h081-key:         the agent key backup: the 32-byte Solana secret seed (CLI only, never sent anywhere)   (kind 6)
 // Loan codes in the first (v1) format still decode: JSON with bigints, keys and bytes tagged, base64url, prefixed
 // (stipend-site/src/lib/live/bank.ts). encodeTerms / encodeProofCode make them only to test that compatibility.
 import bs58 from 'bs58';
@@ -91,8 +92,8 @@ export function decodeProofCode(code: string): LoanProofCode {
 // 4 (practice proof) are the site's; 5 is the shielded address below.
 
 export const FRAME_VERSION = 2;
-export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5 } as const;
-const KIND_NAME: Record<number, string> = { 1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code' };
+export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6 } as const;
+const KIND_NAME: Record<number, string> = { 1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code' };
 
 /** Which network, program and asset a code belongs to. */
 export interface CodeContext { cluster: string; program: string; mint: string }
@@ -256,3 +257,26 @@ export function decodeLoanProof(ctx: CodeContext, input: string): LoanProof {
     return { ctx: { cluster: p.cluster, program: p.program }, value: checkLoanProof(p) };
   });
 }
+
+// ---- agent key backup: the one code that restores the agent key, and with it the shielded account and its sub-accounts
+
+export const KEY_PREFIX = 'h081-key:';
+
+/** "h081-key:<base58>": kind 6, body = the 32-byte Solana secret seed. Whoever holds it controls the agent's funds. */
+export function encodeKeyCode(ctx: CodeContext, seed: Uint8Array): string {
+  if (seed.length !== 32) throw new Error('the agent key seed must be 32 bytes');
+  return frameV2(KEY_PREFIX, CODE_KIND.key, ctx, seed);
+}
+
+/** The 32-byte seed in an "h081-key:" code made for `ctx` (checksum, kind and network checked). */
+export function decodeKeyCode(ctx: CodeContext, code: string): Uint8Array {
+  const body = unframeV2(KEY_PREFIX, CODE_KIND.key, ctx, code);
+  if (body.length !== 32) throw new CodeError('That agent key code is incomplete (32 bytes expected); copy it again.');
+  return body;
+}
+
+/** The kind of an "h081-*:" code from its prefix, or undefined. */
+export const PREFIX_KIND: Record<string, number> = {
+  [TERMS_PREFIX]: CODE_KIND.terms, [PROOF_PREFIX]: CODE_KIND.proof, [ADDRESS_PREFIX]: CODE_KIND.address, [KEY_PREFIX]: CODE_KIND.key,
+};
+export const KIND_NAMES: Readonly<Record<number, string>> = KIND_NAME;
