@@ -84,8 +84,8 @@ for (const f of seeds) {
 if (seeds.length === 0) console.log('no seed snapshot bundled (RELAYER_SEED_DIR): the seed cron needs a stored snapshot or EVENTS_SEED_RPC');
 writeFileSync(join(out, 'vercel.json'), JSON.stringify({
   functions: { 'api/index.mjs': fn, 'api/events-seed.mjs': { maxDuration: 300, ...(seeds.length ? { includeFiles: 'seed/**' } : {}) } },
-  // the seed snapshot's cron, hourly (a Hobby plan allows only daily crons: there, use '7 6 * * *')
-  crons: [{ path: '/api/events-seed', schedule: '7 * * * *' }],
+  // the seed snapshot's cron, every 15 minutes: a fresher snapshot leaves a new install less to fetch (a Hobby plan allows only daily crons: there, use '7 6 * * *')
+  crons: [{ path: '/api/events-seed', schedule: '7,22,37,52 * * * *' }],
   rewrites: [
     { source: '/api/events-seed', destination: '/api/events-seed' },
     { source: '/events/:file', destination: '/api/events-seed' },
