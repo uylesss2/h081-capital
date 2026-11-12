@@ -7,11 +7,19 @@
 // a stored snapshot when it keeps just the last days), RELAYER_SOLANA_PROGRAM_ID (default the
 // mainnet pool), EVENTS_SEED_CLUSTER (default mainnet-beta), CRON_SECRET (Vercel sends it to the cron), and
 // BLOB_READ_WRITE_TOKEN (set by connecting a public Vercel Blob store to the project).
+//
+// A full snapshot can ship with the deployment as seed/<cluster>-<pool>.events.json next to api/ (vercel.json
+// includeFiles; scripts/relayer-vercel.mjs copies it from RELAYER_SEED_DIR): the cron starts from it when the
+// stored snapshot is missing or unusable, which needs no secret and no RPC with the whole history. It only
+// helps while the RPC still has the transaction it ends at, so ship a recent one.
+import { existsSync, readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BlobNotFoundError, head, put } from '@vercel/blob';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { MAINNET } from '../integrations/core/constants.js';
-import { createSeedHandler, type SeedStore } from './events-seed.js';
+import { createSeedHandler, seedFileName, type SeedStore } from './events-seed.js';
 
 const store: SeedStore = {
   async url(path) {
@@ -45,13 +53,17 @@ export default async function events(req: IncomingMessage, res: ServerResponse) 
       res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(JSON.stringify({ error: { code: 'service_disabled', message: 'RELAYER_SOLANA_RPC is not set' } }));
     }
+    const programId = new PublicKey(process.env.RELAYER_SOLANA_PROGRAM_ID || MAINNET.programs.pool);
+    const cluster = process.env.EVENTS_SEED_CLUSTER || 'mainnet-beta';
+    const shipped = join(dirname(fileURLToPath(import.meta.url)), '..', 'seed', seedFileName(cluster, programId));
     handler = createSeedHandler({
       store,
       connection: new Connection(rpc, 'confirmed'),
-      programId: new PublicKey(process.env.RELAYER_SOLANA_PROGRAM_ID || MAINNET.programs.pool),
-      cluster: process.env.EVENTS_SEED_CLUSTER || 'mainnet-beta',
+      programId,
+      cluster,
       cronSecret: process.env.CRON_SECRET || undefined,
       log: (l) => console.log(l),
+      bootstrap: async () => (existsSync(shipped) ? readFileSync(shipped, 'utf8') : undefined),
     });
   }
   return handler(req, res);

@@ -18,7 +18,7 @@
 // Every vkey's sha256 is printed so the owner can pin RELAYER_VKEY_SHA256_<NAME> (and
 // RELAYER_X402_DISCLOSE_VKEY_SHA256) in the Vercel environment.
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { build } from 'esbuild';
 
@@ -70,8 +70,20 @@ if (discloseFiles.every((f) => existsSync(join(circuitsDir, 'disclose', f)))) {
   console.log(`no complete disclose prover artifacts in ${join(circuitsDir, 'disclose')}: x402 prove-disclose will answer 503 service_disabled`);
 }
 writeFileSync(join(out, 'package.json'), JSON.stringify({ name: 'h081-relayer', private: true, type: 'module', engines: { node: '24.x' } }, null, 2) + '\n');
+// A full event-log snapshot to start the seed cron from (RELAYER_SEED_DIR names the folder scripts/events-seed.mts
+// wrote): the relayer's RPC keeps only the last days, so without it (or EVENTS_SEED_RPC, or a stored snapshot) the
+// cron cannot build the pool's whole history. Optional; ship a recent one.
+rmSync(join(out, 'seed'), { recursive: true, force: true });
+const seedDir = process.env.RELAYER_SEED_DIR ? resolve(root, process.env.RELAYER_SEED_DIR) : undefined;
+const seeds = seedDir && existsSync(seedDir) ? readdirSync(seedDir).filter((f) => f.endsWith('.events.json')) : [];
+for (const f of seeds) {
+  mkdirSync(join(out, 'seed'), { recursive: true });
+  copyFileSync(join(seedDir, f), join(out, 'seed', f));
+  console.log(`bundled seed snapshot ${f} (${(readFileSync(join(seedDir, f)).length / 1e6).toFixed(2)} MB)`);
+}
+if (seeds.length === 0) console.log('no seed snapshot bundled (RELAYER_SEED_DIR): the seed cron needs a stored snapshot or EVENTS_SEED_RPC');
 writeFileSync(join(out, 'vercel.json'), JSON.stringify({
-  functions: { 'api/index.mjs': fn, 'api/events-seed.mjs': { maxDuration: 300 } },
+  functions: { 'api/index.mjs': fn, 'api/events-seed.mjs': { maxDuration: 300, ...(seeds.length ? { includeFiles: 'seed/**' } : {}) } },
   // the seed snapshot's cron, hourly (a Hobby plan allows only daily crons: there, use '7 6 * * *')
   crons: [{ path: '/api/events-seed', schedule: '7 * * * *' }],
   rewrites: [

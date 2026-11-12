@@ -57,6 +57,12 @@ export interface SeedOptions {
   log?: (line: string) => void;
   /** wait between the two reads of the pool account when the first does not match, in ms. Default 1500. */
   recheckDelayMs?: number;
+  /**
+   * A full snapshot shipped with the deployment (its text, or undefined when there is none). Used only when
+   * there is no usable stored snapshot, so a run whose RPC keeps just the last days starts from it instead of
+   * from nothing. It goes through the same checks as any other log before anything is stored.
+   */
+  bootstrap?: () => Promise<string | undefined>;
 }
 
 /** The file name the clients ask for (integrations/core/constants.ts eventsSeedUrl). */
@@ -126,9 +132,11 @@ export async function chainMismatch(connection: Connection, programId: PublicKey
 }
 
 /**
- * Extends the stored snapshot (or builds one when there is none, or the stored one is not this pool's) with the
- * pool's newer transactions, and stores it when anything changed. Stops scanning at the time budget and stores
- * what it has (`partial`).
+ * Extends the stored snapshot with the pool's newer transactions and stores it when anything changed. When there
+ * is none, or the stored one is not this pool's or does not hold its history from the start, it starts from the
+ * snapshot shipped with the deployment (`bootstrap`), else from nothing. Stops scanning at the time budget and
+ * stores what it has (`partial`). Throws, storing nothing, when the result is not the pool's history
+ * (historyGap, chainMismatch).
  */
 export async function refreshSeed(o: SeedOptions): Promise<SeedRefresh> {
   const now = o.now ?? Date.now;
@@ -148,6 +156,18 @@ export async function refreshSeed(o: SeedOptions): Promise<SeedRefresh> {
       if (!gap) prevNewest = snap.newest;
       else {
         o.log?.(`events-seed: the stored snapshot is not the pool's whole history (${gap}); rebuilding it`);
+        log = newLog();
+      }
+    }
+  }
+  if (prevNewest === undefined && log.events.length === 0 && o.bootstrap) {
+    let snap: PoolEventLogSnapshot | undefined;
+    try { const text = await o.bootstrap(); snap = text === undefined ? undefined : JSON.parse(text); } catch { /* none */ }
+    if (snap && log.restore(snap)) {
+      const gap = historyGap(log.events);
+      if (!gap) o.log?.(`events-seed: starting from the snapshot shipped with this deployment (${log.events.length} events)`);
+      else {
+        o.log?.(`events-seed: the snapshot shipped with this deployment is not the pool's whole history (${gap}); ignored`);
         log = newLog();
       }
     }

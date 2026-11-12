@@ -166,6 +166,44 @@ describe('only the pool\'s whole history is stored', () => {
     expect(JSON.parse(store.files.get(file())!).events).toHaveLength(6);
   });
 
+  it('with no usable stored snapshot the run starts from the one shipped with the deployment', async () => {
+    const rpc = full(6);
+    // the shipped snapshot: the pool's first 4 commitments
+    const early = new FakeRpc();
+    early.txs = rpc.txs.slice(0, 4);
+    const built = new PoolEventLog(early as unknown as Connection, programId);
+    await built.refresh();
+    const shipped = JSON.stringify(built.snapshot());
+    rpc.forgotten = 3; // the RPC alone could not build the history
+    const fetchedBefore = rpc.fetched;
+    // nothing stored yet
+    const store = new MemStore();
+    const lines: string[] = [];
+    expect(await refreshSeed(opts(rpc, store, { bootstrap: async () => shipped, log: (l) => lines.push(l) }))).toMatchObject({ stored: true, added: 2, events: 6, newest: 'C5' });
+    expect(rpc.fetched - fetchedBefore).toBe(2);
+    expect(lines.join('\n')).toMatch(/starting from the snapshot shipped with this deployment \(4 events\)/);
+    // a stored snapshot that starts late (the 2026-11-12 one) is replaced through it too
+    const late = new FakeRpc();
+    late.txs = rpc.txs.slice(3, 5);
+    const lateLog = new PoolEventLog(late as unknown as Connection, programId);
+    await lateLog.refresh();
+    const store2 = new MemStore();
+    store2.files.set(file(), JSON.stringify(lateLog.snapshot()));
+    expect(await refreshSeed(opts(rpc, store2, { bootstrap: async () => shipped }))).toMatchObject({ stored: true, events: 6 });
+    expect(JSON.parse(store2.files.get(file())!).events[0].index).toBe(0);
+    // a good stored snapshot is used as it is: the shipped one is not read
+    let asked = 0;
+    expect(await refreshSeed(opts(rpc, store2, { bootstrap: async () => { asked++; return shipped; } }))).toMatchObject({ stored: false, added: 0, events: 6 });
+    expect(asked).toBe(0);
+    // a shipped snapshot that itself starts late, or is broken, is ignored: the run fails as without it
+    for (const bad of [JSON.stringify(lateLog.snapshot()), '{broken']) {
+      await expect(refreshSeed(opts(rpc, new MemStore(), { bootstrap: async () => bad }))).rejects.toThrow(/only part of the pool's history/);
+    }
+    // too old for the RPC (it no longer has the transaction the shipped snapshot ends at): the hole is seen
+    rpc.forgotten = 5;
+    await expect(refreshSeed(opts(rpc, new MemStore(), { bootstrap: async () => shipped }))).rejects.toThrow(/commitment 4 is missing/);
+  });
+
   it('a log whose tree the pool never committed is not stored; a pool read that is behind is read again', async () => {
     const rpc = full(3);
     const store = new MemStore();
