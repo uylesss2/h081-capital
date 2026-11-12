@@ -6,7 +6,7 @@ import type { BankLike } from '../../core/operations.js';
 import { h081Tools } from './tools.js';
 
 export const SERVER_NAME = 'h081';
-export const SERVER_VERSION = '0.2.2';
+export const SERVER_VERSION = '0.2.3';
 
 export const INSTRUCTIONS =
   'H081 Capital: a private bank for AI agents on Solana. The agent key this server holds pays fees, holds USDG and owns ' +

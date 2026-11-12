@@ -28,7 +28,7 @@ import { type HomePaths, effectiveEnv, ensureHome, homePaths } from './home.js';
 import { IDEMPOTENCY_KEY, OpStore, bodyHash } from './idempotency.js';
 import { SendLimiter } from './auth.js';
 
-export const VERSION = '0.1.1';
+export const VERSION = '0.1.2';
 
 /** SOL to keep in the agent wallet for each kind of use (fees, buffer rent that is mostly refunded, slot rent). */
 export const FUNDING_NEEDED = { deposit: '0.05', withdraw: '0.05', allow: '0.15', lend: '0.15' } as const;

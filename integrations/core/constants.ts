@@ -47,6 +47,13 @@ export const NOTICE = 'H081 Capital is live on Solana mainnet; it is not audited
 export const CIRCUITS_URL = 'https://www.h081.xyz/circuits/';
 
 /**
+ * Where a fresh install gets the pool's public event log so it does not scan every transaction since launch
+ * (`<base><cluster>-<pool program>.events.json`, a PoolEventLog snapshot). It is checked before use: the
+ * commitments against the on-chain root history, the account's own spends against the nullifier accounts.
+ */
+export const EVENTS_SEED_URL = 'https://api.h081.xyz/events/';
+
+/**
  * sha256 of every artifact. zkey and vkey hashes are the ceremony's (docs/CEREMONY.md, 2026-10-31); the wasm
  * hashes were computed from the files the site ships (stipend-site/public/circuits) when this package was
  * written. A download whose hash differs is refused.
@@ -102,6 +109,8 @@ export interface H081Config {
   relayerUrl?: string;
   circuitsDir: string;
   circuitsUrl: string;
+  /** the pool event-log snapshot a fresh install starts from (checked against the chain); undefined = scan from the start */
+  eventsSeedUrl?: string;
   poolProgramId: PublicKey;
   loanProgramId: PublicKey;
   capacityProgramId: PublicKey;
@@ -145,7 +154,8 @@ export const ENV_VARS = {
   H081_SOLANA_KEY: 'the same key as a base58 secret (or a JSON byte array); H081_SOLANA_KEYPAIR wins when both are set',
   H081_ACCOUNT_SK: 'optional shielded account secret (decimal or 0x hex field element); default: derived from the Solana key\'s secret seed',
   H081_DERIVE_ACCOUNT: 'optional; 1 = derive the account from the key\'s signature over the label instead (one such signature then equals the key)',
-  H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com; the public RPC rate-limits history scans); only its host is ever reported',
+  H081_RPC_URL: 'Solana RPC (default https://api.mainnet-beta.solana.com, which rate-limits each IP; a private mainnet RPC from Helius, Alchemy, QuickNode or Triton is recommended); only its host is ever reported',
+  H081_EVENTS_SEED_URL: 'pool event-log snapshot a fresh install starts from, checked against the chain before use (default https://api.h081.xyz/events/<cluster>-<pool>.events.json on mainnet, refreshed hourly; "off" = scan every pool transaction from the RPC)',
   H081_RELAYER_URL: 'relayer for withdrawals (default https://api.h081.xyz; empty = the signer sends directly, relayed withdrawals are not attempted)',
   H081_CIRCUITS_DIR: 'where proving artifacts are stored (default $H081_HOME/circuits, i.e. ~/.h081/circuits)',
   H081_CIRCUITS_URL: 'where they are downloaded from (default https://www.h081.xyz/circuits/)',
@@ -171,6 +181,18 @@ const key = (env: NodeJS.ProcessEnv, name: string, fallback: string): PublicKey 
   const v = env[name]?.trim();
   try { return new PublicKey(v || fallback); } catch { throw new Error(`${name}: ${v} is not a Solana public key`); }
 };
+
+/** H081_EVENTS_SEED_URL: unset = the hosted mainnet snapshot (none on localnet); "off"/"0"/"none"/empty = none. */
+function eventsSeedUrl(env: NodeJS.ProcessEnv, cluster: string, pool: PublicKey): string | undefined {
+  const raw = env.H081_EVENTS_SEED_URL;
+  if (raw !== undefined) {
+    const v = raw.trim();
+    if (v === '' || /^(off|0|none|false)$/i.test(v)) return undefined;
+    if (!/^https?:\/\//i.test(v)) throw new Error('H081_EVENTS_SEED_URL must be an http(s) URL or "off"');
+    return v;
+  }
+  return cluster === MAINNET.cluster ? `${EVENTS_SEED_URL}${cluster}-${pool.toBase58()}.events.json` : undefined;
+}
 
 /** Configuration from the environment; every value has a mainnet default except the agent key. */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config {
@@ -199,6 +221,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
     relayerUrl,
     circuitsDir: env.H081_CIRCUITS_DIR?.trim() ? expandHome(env.H081_CIRCUITS_DIR) : join(h081Home(env), 'circuits'),
     circuitsUrl: env.H081_CIRCUITS_URL?.trim() || CIRCUITS_URL,
+    eventsSeedUrl: eventsSeedUrl(env, cluster, key(env, 'H081_POOL_PROGRAM_ID', ids.pool)),
     poolProgramId: key(env, 'H081_POOL_PROGRAM_ID', ids.pool),
     loanProgramId: key(env, 'H081_LOAN_PROGRAM_ID', ids.loan),
     capacityProgramId: key(env, 'H081_CAPACITY_PROGRAM_ID', ids.capacity),

@@ -113,7 +113,8 @@ export function fakeConnection(signer: Keypair, chain: FakeChain = {}) {
 /** The mainnet config with a throwaway circuits directory and no relayer unless `relayerUrl` is set. */
 export function testConfig(over: Partial<H081Config> = {}): H081Config {
   const cfg = configFromEnv({ H081_CIRCUITS_DIR: 'C:/nonexistent/h081-test-circuits', H081_RELAYER_URL: '' });
-  return { ...cfg, ...over };
+  // no hosted seed snapshot: tests never reach the network
+  return { ...cfg, eventsSeedUrl: undefined, ...over };
 }
 
 /** A bank whose every method is a vi.fn() returning canned, JSON-friendly results (bigints included). */

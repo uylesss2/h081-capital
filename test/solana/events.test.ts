@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { EVENT_IX_TAG_LE, PoolEventLog } from '../../src/solana/events.js';
+import { EVENT_IX_TAG_LE, PoolEventLog, isRateLimited } from '../../src/solana/events.js';
 import { be32, concatBytes } from '../../src/solana/field.js';
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -122,6 +122,62 @@ describe('PoolEventLog.refresh', () => {
     const bad = new PoolEventLog(rpc as unknown as Connection, programId);
     expect(bad.restore({ ...snap, events: [{ name: 'Nope', signature: 'x', slot: 1, seq: 0 }] })).toBe(false);
     expect(bad.events).toHaveLength(0);
+  });
+
+  it('waits out HTTP 429s, keeps at most `concurrency` calls in flight, and drops to one at a time once limited', async () => {
+    const rpc = new FakeRpc();
+    for (let i = 1; i <= 60; i++) rpc.add(`S${i}`, BigInt(i));
+    let inflight = 0;
+    const peaks: number[] = [];
+    let limited = 3;
+    const orig = rpc.getTransaction.bind(rpc);
+    rpc.getTransaction = async (s: string) => {
+      inflight++;
+      peaks.push(inflight);
+      try {
+        if (s === 'S10' && limited-- > 0) throw new Error('failed to get transaction: 429 Too Many Requests: {"code": 429, "message":"Too many requests for a specific RPC call"}');
+        return await orig(s);
+      } finally { inflight--; }
+    };
+    const progress: Array<[number, number]> = [];
+    const log = new PoolEventLog(rpc as unknown as Connection, programId, { concurrency: 4, rateLimitDelayMs: 1, onProgress: (d, t) => progress.push([d, t]) });
+    expect(await log.refresh()).toBe(60);
+    expect(nullifiers(log)).toEqual(Array.from({ length: 60 }, (_, i) => BigInt(i + 1)));
+    expect(Math.max(...peaks)).toBeLessThanOrEqual(4);
+    // S10 is in the first chunk of 25; the chunks after it run one call at a time
+    expect(Math.max(...peaks.slice(-35))).toBe(1);
+    expect(progress).toEqual([[25, 60], [50, 60], [60, 60]]);
+  });
+
+  it('a 429 that does not clear fails the refresh after `rateLimitAttempts`, keeping whole chunks fetched before it', async () => {
+    const rpc = new FakeRpc();
+    for (let i = 1; i <= 30; i++) rpc.add(`S${i}`, BigInt(i));
+    const orig = rpc.getTransaction.bind(rpc);
+    let calls = 0;
+    rpc.getTransaction = async (s: string) => { if (s === 'S27') { calls++; throw new Error('429 Too Many Requests'); } return orig(s); };
+    const log = new PoolEventLog(rpc as unknown as Connection, programId, { rateLimitAttempts: 3, rateLimitDelayMs: 1 });
+    await expect(log.refresh()).rejects.toThrow(/429/);
+    expect(calls).toBe(3);
+    expect(log.events).toHaveLength(25);
+    rpc.getTransaction = orig;
+    expect(await log.refresh()).toBe(5);
+  });
+
+  it('a 429 on the signature scan is waited out too', async () => {
+    const rpc = new FakeRpc();
+    rpc.add('A', 1n);
+    const orig = rpc.getSignaturesForAddress.bind(rpc);
+    let n = 0;
+    rpc.getSignaturesForAddress = async (a: PublicKey, o: { until?: string }) => { if (n++ < 2) throw new Error('Server responded with 429 Too Many Requests'); return orig(a, o); };
+    const log = new PoolEventLog(rpc as unknown as Connection, programId, { rateLimitDelayMs: 1 });
+    expect(await log.refresh()).toBe(1);
+  });
+
+  it('isRateLimited reads web3.js and fetch wordings, and nothing else', () => {
+    expect(isRateLimited(new Error('failed to get signatures for address: 429 Too Many Requests'))).toBe(true);
+    expect(isRateLimited(new Error('outer', { cause: new Error('Too many requests for a specific RPC call') }))).toBe(true);
+    expect(isRateLimited(new Error('transaction 4290abc not found'))).toBe(false);
+    expect(isRateLimited(new Error('rpc down'))).toBe(false);
   });
 
   it('concurrent refreshes do not duplicate events', async () => {

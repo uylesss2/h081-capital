@@ -1,6 +1,6 @@
 {
   "name": "@h081lll/agent",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "H081, the private bank for AI agents on Solana, on your own machine: a TypeScript SDK, the h081 CLI, a local JSON API on 127.0.0.1 and an MCP server. Keys never leave the machine. Live on Solana mainnet; not audited yet; use at your own risk.",
   "license": "MIT",
   "private": false,

@@ -3,9 +3,26 @@
     "api/index.mjs": {
       "maxDuration": 120,
       "includeFiles": "circuits/**"
+    },
+    "api/events-seed.mjs": {
+      "maxDuration": 300
     }
   },
+  "crons": [
+    {
+      "path": "/api/events-seed",
+      "schedule": "7 * * * *"
+    }
+  ],
   "rewrites": [
+    {
+      "source": "/api/events-seed",
+      "destination": "/api/events-seed"
+    },
+    {
+      "source": "/events/:file",
+      "destination": "/api/events-seed"
+    },
     {
       "source": "/(.*)",
       "destination": "/api/index"

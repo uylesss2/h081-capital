@@ -41,7 +41,7 @@ import {
   DepositGuard, DiscloseArgs, LOCALNET_POOL_PROGRAM_ID, StreamArgs, decodePool, encodeDiscloseArgs, encodeStreamArgs, growPoolIx, initializePoolIxs, isPoolComplete,
   poolGrowsNeeded, verifyDisclosureIx, verifyStreamIx,
 } from './program.js';
-import { poolPda } from './pda.js';
+import { nullifierPda, poolPda } from './pda.js';
 
 /** Compute-unit limit for initialize + grow_pool (one transaction). */
 export const POOL_INIT_CU_LIMIT = 400_000;
@@ -592,6 +592,23 @@ export class SolanaWallet extends Scanner {
 
   balance(mint: PublicKey | bigint): bigint {
     return this.unspentNotes(mint).reduce((s, n) => s + n.note.amount, 0n);
+  }
+
+  /**
+   * Whether every note this wallet owns is marked spent exactly when its nullifier account ["nf", n] exists on
+   * chain (the pool creates it on spend and never closes it). With `matchesChain` this checks an event log that
+   * came from someone else (a seed snapshot): the commitments against the on-chain root, this wallet's spends
+   * against the nullifier accounts. Read only; one getMultipleAccountsInfo per 100 notes.
+   */
+  async notesMatchChain(): Promise<boolean> {
+    const notes = [...this.notes.values()].filter((n) => n.note.amount > 0n);
+    for (let i = 0; i < notes.length; i += 100) {
+      const batch = notes.slice(i, i + 100);
+      const keys = batch.map((n) => nullifierPda(this.pool.programId, noteNullifier(this.account.keys.nk, n.commitment)));
+      const infos = await this.pool.connection.getMultipleAccountsInfo(keys, 'confirmed');
+      if (batch.some((n, j) => (infos[j] !== null) !== n.spent)) return false;
+    }
+    return true;
   }
 
   agentAllowances(mint?: PublicKey): SolOwnedAllowance[] {
