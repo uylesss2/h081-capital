@@ -16,10 +16,22 @@
 // A run that cannot finish in its time budget (a slow or rate-limited RPC, the first build) stores what it has:
 // a snapshot that ends earlier is still a valid seed, and the next run continues from it. A run never fails
 // for being slow, so the snapshot cannot stay stuck behind one long scan.
+//
+// Nothing is stored unchecked. The relayer's RPC may keep only the last days of history (it did on 2026-11-12:
+// the first build silently started 7,113 commitments late, a snapshot every client would have rejected). So a run
+// stores a log only when its commitments are numbered from 0 without a gap and, once it has caught up, when the
+// tree they build is one the pool has committed (the same test the clients apply). A stored snapshot that fails is
+// rebuilt; a rebuild that fails is reported in /events/status and leaves the stored copy alone. To build from
+// nothing the function needs an RPC with the pool's whole history: EVENTS_SEED_RPC (events-seed-vercel.ts), or
+// upload a snapshot built by scripts/events-seed.mts once and let the cron extend it.
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Connection, PublicKey } from '@solana/web3.js';
-import { PoolEventLog, type PoolEventLogSnapshot } from '../src/solana/events.js';
+import { initCrypto } from '../src/crypto.js';
+import { MerkleTree } from '../src/merkle.js';
+import { PoolEventLog, type LocatedEvent, type PoolEventLogSnapshot } from '../src/solana/events.js';
+import { poolPda } from '../src/solana/pda.js';
+import { decodePool, LEVELS } from '../src/solana/program.js';
 import { header, json } from './http.js';
 
 export interface SeedStore {
@@ -43,6 +55,8 @@ export interface SeedOptions {
   /** the clock, for tests */
   now?: () => number;
   log?: (line: string) => void;
+  /** wait between the two reads of the pool account when the first does not match, in ms. Default 1500. */
+  recheckDelayMs?: number;
 }
 
 /** The file name the clients ask for (integrations/core/constants.ts eventsSeedUrl). */
@@ -62,12 +76,54 @@ export interface SeedStatus {
   events?: number;
   bytes?: number;
   partial?: boolean;
+  /** the stored snapshot passed historyGap / chainMismatch in that run (always true from a build that has them) */
+  verified?: boolean;
   /** the last failed run, when it is more recent than okAt */
   errorAt?: string;
   error?: string;
 }
 
 class OutOfTime extends Error {}
+
+/**
+ * Why `events` cannot be the pool's history from its first transaction on, or undefined when it can: the pool
+ * numbers its commitments 0, 1, 2, ... in the order it emits them, so a log that starts late (an RPC that keeps
+ * only recent history) or has a hole shows it here. No RPC call.
+ */
+export function historyGap(events: readonly LocatedEvent[]): string | undefined {
+  let next = 0;
+  for (const e of events) {
+    if (e.name !== 'NewCommitment') continue;
+    if (e.index !== next) return next === 0 ? `its first commitment is number ${e.index}, not 0` : `commitment ${next} is missing (number ${e.index} follows number ${next - 1})`;
+    next++;
+  }
+  return undefined;
+}
+
+/**
+ * Why the tree built from `events` is not one the pool has committed, or undefined when it is: the clients' own
+ * test (SolanaWallet.matchesChain), so a snapshot that passes here is one they accept. Only for a log that has
+ * caught up: the pool keeps its last 1,024 roots. Reads the pool account (twice when the first read is behind).
+ */
+export async function chainMismatch(connection: Connection, programId: PublicKey, events: readonly LocatedEvent[], recheckDelayMs = 1500): Promise<string | undefined> {
+  await initCrypto();
+  const tree = new MerkleTree(LEVELS);
+  for (const e of events) if (e.name === 'NewCommitment') tree.insert(e.commitment);
+  let why: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, recheckDelayMs));
+    const info = await connection.getAccountInfo(poolPda(programId), 'confirmed');
+    if (!info) why = tree.size === 0 ? undefined : 'the pool account does not exist';
+    else {
+      const st = decodePool(info.data);
+      why = tree.size > st.nextIndex ? `it has ${tree.size} commitments, the pool ${st.nextIndex}`
+        : st.roots.includes(tree.root) ? undefined
+        : `the root of its ${tree.size} commitments is not in the pool's root history (the pool has ${st.nextIndex})`;
+    }
+    if (!why) return undefined;
+  }
+  return why;
+}
 
 /**
  * Extends the stored snapshot (or builds one when there is none, or the stored one is not this pool's) with the
@@ -79,14 +135,22 @@ export async function refreshSeed(o: SeedOptions): Promise<SeedRefresh> {
   const started = now();
   const budget = o.budgetMs ?? 200_000;
   // progress is reported after each committed chunk: stopping there loses nothing
-  const log = new PoolEventLog(o.connection, o.programId, { onProgress: () => { if (now() - started > budget) throw new OutOfTime(); } });
+  const newLog = () => new PoolEventLog(o.connection, o.programId, { onProgress: () => { if (now() - started > budget) throw new OutOfTime(); } });
+  let log = newLog();
   const prev = await o.store.read(seedPath(o));
   let prevNewest: string | undefined;
   if (prev !== undefined) {
     let snap: PoolEventLogSnapshot | undefined;
     try { snap = JSON.parse(prev); } catch { /* rebuilt below */ }
-    if (snap && log.restore(snap)) prevNewest = snap.newest;
-    else o.log?.('events-seed: the stored snapshot is unreadable or another pool\'s; rebuilding it');
+    if (!snap || !log.restore(snap)) o.log?.('events-seed: the stored snapshot is unreadable or another pool\'s; rebuilding it');
+    else {
+      const gap = historyGap(log.events);
+      if (!gap) prevNewest = snap.newest;
+      else {
+        o.log?.(`events-seed: the stored snapshot is not the pool's whole history (${gap}); rebuilding it`);
+        log = newLog();
+      }
+    }
   }
   const before = log.events.length;
   let partial = false;
@@ -97,6 +161,13 @@ export async function refreshSeed(o: SeedOptions): Promise<SeedRefresh> {
     partial = true;
   }
   const added = log.events.length - before;
+  const gap = historyGap(log.events);
+  if (gap) throw new Error(`not stored: the RPC returned only part of the pool's history (${gap}). Set EVENTS_SEED_RPC to an RPC that has every pool transaction, or upload a full snapshot once`);
+  // a log that stopped early may end before the pool's last 1,024 roots: its tree is checked once it has caught up
+  if (!partial) {
+    const bad = await chainMismatch(o.connection, o.programId, log.events, o.recheckDelayMs);
+    if (bad) throw new Error(`not stored: the snapshot does not match the pool on chain (${bad})`);
+  }
   const snap = log.snapshot();
   const body = JSON.stringify(snap);
   const result: SeedRefresh = { stored: false, added, events: log.events.length, bytes: body.length, newest: snap.newest, partial };
@@ -123,7 +194,7 @@ export async function runSeedCron(o: SeedOptions): Promise<SeedRefresh> {
   const file = seedFileName(o.cluster, o.programId);
   try {
     const r = await refreshSeed(o);
-    await o.store.write(statusPath(o), JSON.stringify({ v: 1, file, okAt: at, newest: r.newest, events: r.events, bytes: r.bytes, partial: r.partial } satisfies SeedStatus));
+    await o.store.write(statusPath(o), JSON.stringify({ v: 1, file, okAt: at, newest: r.newest, events: r.events, bytes: r.bytes, partial: r.partial, verified: true } satisfies SeedStatus));
     return r;
   } catch (e) {
     const prev = await readStatus(o);

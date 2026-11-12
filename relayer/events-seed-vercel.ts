@@ -2,7 +2,9 @@
 // relayer's hot key and setup. Bundled by scripts/relayer-vercel.mjs into deploy/relayer-vercel/api/events-seed.mjs;
 // the hourly cron is declared in that project's vercel.json.
 //
-// Environment (the relayer project's): RELAYER_SOLANA_RPC (read only here), RELAYER_SOLANA_PROGRAM_ID (default the
+// Environment (the relayer project's): EVENTS_SEED_RPC (optional: an RPC that has the pool's whole history, so the
+// cron can build the snapshot from nothing; without it RELAYER_SOLANA_RPC, read only here, which can only extend
+// a stored snapshot when it keeps just the last days), RELAYER_SOLANA_PROGRAM_ID (default the
 // mainnet pool), EVENTS_SEED_CLUSTER (default mainnet-beta), CRON_SECRET (Vercel sends it to the cron), and
 // BLOB_READ_WRITE_TOKEN (set by connecting a public Vercel Blob store to the project).
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -38,7 +40,7 @@ let handler: ReturnType<typeof createSeedHandler> | undefined;
 
 export default async function events(req: IncomingMessage, res: ServerResponse) {
   if (!handler) {
-    const rpc = process.env.RELAYER_SOLANA_RPC;
+    const rpc = process.env.EVENTS_SEED_RPC || process.env.RELAYER_SOLANA_RPC;
     if (!rpc) {
       res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       return res.end(JSON.stringify({ error: { code: 'service_disabled', message: 'RELAYER_SOLANA_RPC is not set' } }));

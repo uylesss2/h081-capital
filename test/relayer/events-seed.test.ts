@@ -1,12 +1,16 @@
 // The relayer's seed snapshot (relayer/events-seed.ts): the cron extends the stored snapshot incrementally and
 // stores it only when it changed, only with the cron secret; GET /events/<file> redirects to the stored copy.
+// Nothing is stored that is not the pool's history from its first commitment, matching the pool's root history.
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { sha256 } from '@noble/hashes/sha2';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { EVENT_IX_TAG_LE } from '../../src/solana/events.js';
+import { initCrypto } from '../../src/crypto.js';
+import { MerkleTree } from '../../src/merkle.js';
+import { EVENT_IX_TAG_LE, PoolEventLog } from '../../src/solana/events.js';
 import { be32, concatBytes } from '../../src/solana/field.js';
+import { LEVELS, POOL_DISCRIMINATOR, POOL_SIZE } from '../../src/solana/program.js';
 import { createSeedHandler, refreshSeed, runSeedCron, seedFileName, type SeedOptions, type SeedStore } from '../../relayer/events-seed.js';
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -21,12 +25,41 @@ function base58(bytes: Uint8Array): string {
 const programId = Keypair.generate().publicKey;
 const nullifierEvent = (n: bigint) => concatBytes(EVENT_IX_TAG_LE, sha256(new TextEncoder().encode('event:NewNullifier')).subarray(0, 8), be32(n));
 
+beforeAll(() => initCrypto());
+
+const u32le = (n: number) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
+const commitmentEvent = (c: bigint, index: number) => concatBytes(EVENT_IX_TAG_LE, sha256(new TextEncoder().encode('event:NewCommitment')).subarray(0, 8), be32(c), u32le(index), u32le(0));
+/** A Pool account holding `leaves`, its current root at slot 3 of the root history. */
+function poolAccount(leaves: bigint[]) {
+  const tree = new MerkleTree(LEVELS);
+  for (const l of leaves) tree.insert(l);
+  const data = new Uint8Array(POOL_SIZE);
+  data.set(POOL_DISCRIMINATOR, 0);
+  data.set(u32le(leaves.length), 8);
+  data.set(u32le(3), 12);
+  data.set(be32(tree.root), 16 + 32 * LEVELS + 32 * 3);
+  return { data };
+}
+
 class FakeRpc {
-  txs: Array<{ signature: string; nullifier: bigint }> = [];
+  txs: Array<{ signature: string; nullifier: bigint; commitment?: number }> = [];
   fetched = 0;
+  /** the oldest transactions the RPC no longer has (a node that keeps only recent history) */
+  forgotten = 0;
+  /** the Pool account; unset = derived from the commitments added so far */
+  pool?: { data: Uint8Array } | null;
+  accountReads = 0;
   add(signature: string, nullifier: bigint) { this.txs.push({ signature, nullifier }); }
+  /** a transaction that inserts commitment number `index` (its value is 1000 + index) */
+  addCommitment(signature: string, index: number) { this.txs.push({ signature, nullifier: 0n, commitment: index }); }
+  leaves(upTo = Infinity) { return this.txs.filter((t) => t.commitment !== undefined && t.commitment < upTo).map((t) => 1000n + BigInt(t.commitment!)); }
+  async getAccountInfo() {
+    this.accountReads++;
+    if (this.pool !== undefined) return this.pool;
+    return this.leaves().length ? poolAccount(this.leaves()) : null;
+  }
   async getSignaturesForAddress(_a: PublicKey, o: { until?: string }) {
-    const newestFirst = [...this.txs].reverse();
+    const newestFirst = this.txs.slice(this.forgotten).reverse();
     const stop = o.until ? newestFirst.findIndex((t) => t.signature === o.until) : -1;
     return (stop >= 0 ? newestFirst.slice(0, stop) : newestFirst).map((t) => ({ signature: t.signature, err: null, slot: 1, blockTime: null, memo: null }));
   }
@@ -36,7 +69,7 @@ class FakeRpc {
     return {
       slot: 1,
       transaction: { message: { staticAccountKeys: [programId] } },
-      meta: { err: null, innerInstructions: [{ index: 0, instructions: [{ programIdIndex: 0, accounts: [], data: base58(nullifierEvent(t.nullifier)) }] }] },
+      meta: { err: null, innerInstructions: [{ index: 0, instructions: [{ programIdIndex: 0, accounts: [], data: base58(t.commitment === undefined ? nullifierEvent(t.nullifier) : commitmentEvent(1000n + BigInt(t.commitment), t.commitment)) }] }] },
     };
   }
 }
@@ -50,7 +83,7 @@ class MemStore implements SeedStore {
 }
 
 const opts = (rpc: FakeRpc, store: MemStore, over: Partial<SeedOptions> = {}): SeedOptions => ({
-  store, connection: rpc as unknown as Connection, programId, cluster: 'mainnet-beta', cronSecret: 's3cret', ...over,
+  store, connection: rpc as unknown as Connection, programId, cluster: 'mainnet-beta', cronSecret: 's3cret', recheckDelayMs: 0, ...over,
 });
 const file = () => `events/${seedFileName('mainnet-beta', programId)}`;
 
@@ -80,6 +113,89 @@ describe('refreshSeed', () => {
   });
 });
 
+describe('only the pool\'s whole history is stored', () => {
+  const full = (n: number) => { const rpc = new FakeRpc(); for (let i = 0; i < n; i++) rpc.addCommitment(`C${i}`, i); return rpc; };
+
+  it('an RPC that keeps only recent history: nothing is stored and the status says why', async () => {
+    const rpc = full(6);
+    rpc.forgotten = 2; // its oldest transaction is commitment 2
+    const store = new MemStore();
+    await expect(refreshSeed(opts(rpc, store))).rejects.toThrow(/only part of the pool's history \(its first commitment is number 2, not 0\).*EVENTS_SEED_RPC/);
+    expect(store.files.has(file())).toBe(false);
+    await expect(runSeedCron(opts(rpc, store))).rejects.toThrow(/only part/);
+    const status = JSON.parse(store.files.get(`${file()}.status.json`)!);
+    expect(status.error).toMatch(/first commitment is number 2/);
+    expect(status.okAt).toBeUndefined();
+    expect(status.verified).toBeUndefined();
+  });
+
+  it('a stored snapshot that starts late is rebuilt from the start, not extended', async () => {
+    const rpc = full(6);
+    const store = new MemStore();
+    rpc.forgotten = 2;
+    // what the cron of 2026-11-12 stored: a log that begins at the RPC's oldest transaction
+    const late = new FakeRpc();
+    late.txs = rpc.txs.slice(2, 4);
+    const log = new PoolEventLog(late as unknown as Connection, programId);
+    await log.refresh();
+    store.files.set(file(), JSON.stringify(log.snapshot()));
+    // still no full history: reported, the stored copy untouched
+    await expect(refreshSeed(opts(rpc, store))).rejects.toThrow(/only part/);
+    expect(JSON.parse(store.files.get(file())!).events).toHaveLength(2);
+    // an RPC with the whole history: rebuilt from commitment 0
+    rpc.forgotten = 0;
+    const lines: string[] = [];
+    expect(await refreshSeed(opts(rpc, store, { log: (l) => lines.push(l) }))).toMatchObject({ stored: true, events: 6, added: 6, newest: 'C5' });
+    expect(lines.join('\n')).toMatch(/not the pool's whole history \(its first commitment is number 2, not 0\); rebuilding/);
+    expect(JSON.parse(store.files.get(file())!).events[0].index).toBe(0);
+  });
+
+  it('a full snapshot uploaded once is extended by an RPC that keeps only recent history', async () => {
+    const rpc = full(4);
+    const store = new MemStore();
+    await runSeedCron(opts(rpc, store));
+    rpc.addCommitment('C4', 4);
+    rpc.addCommitment('C5', 5);
+    rpc.forgotten = 3; // it still has the stored snapshot's newest transaction and what follows
+    expect(await runSeedCron(opts(rpc, store))).toMatchObject({ stored: true, added: 2, events: 6 });
+    expect(JSON.parse(store.files.get(`${file()}.status.json`)!)).toMatchObject({ events: 6, verified: true });
+    // once it has lost the transaction the snapshot ends at, the hole is seen and nothing is stored
+    for (let i = 6; i < 10; i++) rpc.addCommitment(`C${i}`, i);
+    rpc.forgotten = 8;
+    await expect(runSeedCron(opts(rpc, store))).rejects.toThrow(/only part of the pool's history \(commitment 6 is missing/);
+    expect(JSON.parse(store.files.get(file())!).events).toHaveLength(6);
+  });
+
+  it('a log whose tree the pool never committed is not stored; a pool read that is behind is read again', async () => {
+    const rpc = full(3);
+    const store = new MemStore();
+    rpc.pool = poolAccount([1n, 2n, 3n]); // another pool's leaves
+    await expect(refreshSeed(opts(rpc, store))).rejects.toThrow(/does not match the pool on chain \(the root of its 3 commitments is not in the pool's root history/);
+    rpc.pool = poolAccount(rpc.leaves(2)); // the pool as it was one commitment ago
+    await expect(refreshSeed(opts(rpc, store))).rejects.toThrow(/it has 3 commitments, the pool 2/);
+    expect(store.writes).toBe(0);
+    // the account read lags the transaction list once, then catches up
+    const behind = poolAccount(rpc.leaves(2));
+    rpc.pool = undefined;
+    const read = rpc.getAccountInfo.bind(rpc);
+    let reads = 0;
+    rpc.getAccountInfo = async () => (reads++ === 0 ? behind : read());
+    expect(await refreshSeed(opts(rpc, store))).toMatchObject({ stored: true, events: 3 });
+    expect(reads).toBe(2);
+  });
+
+  it('a run that is out of time is checked for holes only: its tree may be older than the pool\'s root history', async () => {
+    const rpc = full(60);
+    const store = new MemStore();
+    rpc.pool = poolAccount([9n]); // would fail the root check
+    let t = 0;
+    expect(await refreshSeed(opts(rpc, store, { budgetMs: 10, now: () => (t += 20) }))).toMatchObject({ stored: true, partial: true, events: 25 });
+    expect(rpc.accountReads).toBe(0);
+    rpc.pool = undefined;
+    expect(await refreshSeed(opts(rpc, store))).toMatchObject({ stored: true, partial: false, events: 60 });
+  });
+});
+
 describe('time budget and status', () => {
   it('a run that is out of time stores what it has; the next run continues and finishes', async () => {
     const rpc = new FakeRpc();
@@ -104,7 +220,7 @@ describe('time budget and status', () => {
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     try {
       now += 90 * 60_000;
-      expect(await (await fetch(`${base}/events/status`)).json()).toMatchObject({ okAt: '2026-11-12T00:00:00.000Z', newest: 'S1', events: 1, partial: false, ageSeconds: 5400, failing: false });
+      expect(await (await fetch(`${base}/events/status`)).json()).toMatchObject({ okAt: '2026-11-12T00:00:00.000Z', newest: 'S1', events: 1, partial: false, verified: true, ageSeconds: 5400, failing: false });
       rpc.getSignaturesForAddress = async () => { throw new Error('rpc down'); };
       await expect(runSeedCron(o)).rejects.toThrow(/rpc down/);
       expect(await (await fetch(`${base}/events/status`)).json()).toMatchObject({ okAt: '2026-11-12T00:00:00.000Z', error: 'rpc down', failing: true });

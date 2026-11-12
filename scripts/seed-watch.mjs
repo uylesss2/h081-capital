@@ -15,9 +15,22 @@ if (status) {
   if (status.ageSeconds === null || status.ageSeconds === undefined) problems.push('the cron has never succeeded');
   else if (status.ageSeconds > MAX_AGE_S) problems.push(`the last successful run was ${(status.ageSeconds / 3600).toFixed(1)} h ago (limit 3 h)`);
   if (status.failing) problems.push(`the last run failed: ${status.error}`);
+  if (status.verified !== true) problems.push('the cron stored the snapshot without checking it against the chain (a build from before the check)');
   try {
     const snap = await fetch(`${base}/events/${status.file}`, { redirect: 'manual', signal: AbortSignal.timeout(30_000) });
     if (snap.status !== 307) problems.push(`GET /events/${status.file} answered ${snap.status}, expected a 307 to the snapshot`);
+    else {
+      // the snapshot itself, as a client gets it: its commitments must be numbered from 0 without a gap. On
+      // 2026-11-12 the cron reported success on one that started 7,113 late (an RPC with only recent history),
+      // which every client rejects, so fresh installs scanned from the start and got 429 again.
+      const body = await (await fetch(snap.headers.get('location'), { signal: AbortSignal.timeout(120_000) })).json();
+      let next = 0;
+      for (const e of body.events) {
+        if (e.name !== 'NewCommitment') continue;
+        if (e.index !== next) { problems.push(next === 0 ? `the snapshot starts at commitment ${e.index}, not 0: clients reject it and scan from the start` : `the snapshot has a hole: commitment ${next} is missing`); break; }
+        next++;
+      }
+    }
   } catch (e) { problems.push(`GET /events/${status.file} failed: ${e.message}`); }
 }
 if (problems.length) { console.error(`seed snapshot NOT healthy at ${base}:\n- ${problems.join('\n- ')}`); process.exit(1); }

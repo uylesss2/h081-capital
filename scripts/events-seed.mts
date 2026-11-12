@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path';
 import { Connection } from '@solana/web3.js';
 import { PoolEventLog } from '../src/solana/events.js';
+import { chainMismatch, historyGap } from '../relayer/events-seed.js';
 import { configFromEnv, rpcHost } from '../integrations/core/constants.js';
 
 const arg = (name: string): string | undefined => {
@@ -34,6 +35,9 @@ if (from) {
 const t0 = Date.now();
 console.error(`scanning ${config.poolProgramId.toBase58()} on ${config.cluster} via ${rpcHost(config.rpcUrl)}`);
 const added = await log.refresh();
+// the same checks as the relayer's cron: a snapshot the clients would reject is never written
+const bad = historyGap(log.events) ?? (await chainMismatch(log.connection, config.poolProgramId, log.events));
+if (bad) { console.error(`NOT written: this is not the pool's whole history (${bad}). Use an RPC that has every pool transaction.`); process.exit(1); }
 mkdirSync(out, { recursive: true });
 const json = JSON.stringify(log.snapshot());
 writeFileSync(file + '.tmp', json);
