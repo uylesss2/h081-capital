@@ -2,7 +2,8 @@
 # Builds every program with cargo build-sbf and copies the .so files into solana/target-so/ (gitignored):
 #   stipend_pool.so (feature no-log-ix-name, as on mainnet), stipend_pool_probe.so (feature merkle-probe, localnet only),
 #   stream_loan.so (feature localnet-treasury: placeholder fee treasury, localnet only),
-#   capacity_stake.so, capacity_stake_fast.so, safety_pool.so, safety_pool_fast.so (feature fast, localnet only).
+#   capacity_stake.so, capacity_stake_fast.so, safety_pool.so, safety_pool_fast.so (feature fast, localnet only),
+#   rep_registry.so (localnet: localnet stream_loan id, dev reputation verifying key).
 # Build artifacts live in $CARGO_TARGET_DIR (WSL home, for speed).
 # NO_COPY=1 compiles only (leaves solana/target-so untouched).
 set -euo pipefail
@@ -32,5 +33,6 @@ build capacity_stake capacity_stake
 build capacity_stake capacity_stake_fast fast
 build safety_pool safety_pool
 build safety_pool safety_pool_fast fast
+build rep_registry rep_registry                  # localnet build (trusts the localnet stream_loan; dev reputation vk)
 echo "all programs built"
 [ "${NO_COPY:-}" = "1" ] || ls -l target-so/*.so

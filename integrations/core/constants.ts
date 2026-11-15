@@ -90,6 +90,13 @@ export const CIRCUIT_HASHES: Record<CircuitName, { wasm: string; zkey: string; v
     zkey: '466363f8ff528443d6fe73122d26df3689a8409af3cf0ba7238ae366e6911deb',
     vkey: 'a84b8f8c6395cf62b19c8df12aeba5b349175609fed64ccab3be33c5bfd8aea2',
   },
+  reputation: {
+    // NOT RELEASED: no ceremony has run for reputation yet. Empty hashes mean the packages refuse to download or use
+    // reputation artifacts; the owner pins them here after the multi-party ceremony (docs/REPUTATION-SPEC.md section 10).
+    wasm: '',
+    zkey: '',
+    vkey: '',
+  },
 };
 
 /** Circuits an agent needs: deposit/withdraw (transact); pledge + lender proof (grant, stream); paying from an allowance (spend). */

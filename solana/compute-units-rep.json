@@ -1,0 +1,6 @@
+{
+  "note": "rep_registry, measured on solana-test-validator 4.3.2 by test/solana/reputation.test.ts (dev reputation setup; the pairing cost does not depend on the key). 2026-11-16.",
+  "initialize": 14435,
+  "attest": { "min": 41655, "max": 45158, "note": "max includes creating a new bitmap page" },
+  "verify_reputation": 146541
+}

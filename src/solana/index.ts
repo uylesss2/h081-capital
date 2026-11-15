@@ -15,3 +15,5 @@ export * as loan from './lender.js';
 export * as staking from './token.js';
 // Read-only comparison of a local build with a deployed program (verifiable builds; no signing).
 export * as verify from './verify.js';
+// rep_registry (private reputation): its own program id, PDAs, events and error table.
+export * as rep from './reputation.js';

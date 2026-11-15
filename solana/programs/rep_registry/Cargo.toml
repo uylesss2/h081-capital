@@ -1,0 +1,38 @@
+[package]
+name = "rep_registry"
+version = "0.1.0"
+description = "H081 private reputation: a Poseidon tree of attested, fully repaid stream_loan loans and a Groth16 verifier for reputation proofs"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "rep_registry"
+
+[features]
+default = []
+# Mainnet build: trusts the mainnet stream_loan (8JBd7epQ...), refuses to compile while declare_id is the localnet
+# key or while the verifying key is a dev (single-party) setup.
+mainnet = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.1", features = ["init-if-needed"] }
+solana-bn254 = "=3.2.1"
+solana-poseidon = "=5.0.1"
+solana-sha256-hasher = "=3.1.0"
+bytemuck = { version = "1", features = ["min_const_generics", "derive"] }
+
+[dev-dependencies]
+# Only for the layout test: rep_registry reads Slot by fixed offsets and must agree with stream_loan's struct.
+stream_loan = { path = "../stream_loan", features = ["no-entrypoint", "localnet-treasury"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -12,6 +12,7 @@ import { randomBytes } from 'node:crypto';
 const root = resolve(import.meta.dirname, '..');
 const ptau = process.env.PTAU || join(root, 'circuits', 'ptau', 'pot17.ptau');
 const names = process.argv.slice(2).length ? process.argv.slice(2) : ['transact', 'grant', 'spend', 'disclose', 'delegate', 'stream'];
+const SOLANA_ONLY = new Set(['reputation']);
 const template = readFileSync(join(root, 'node_modules', 'snarkjs', 'templates', 'verifier_groth16.sol.ejs'), 'utf8');
 mkdirSync(join(root, 'contracts', 'verifiers'), { recursive: true });
 
@@ -27,6 +28,8 @@ for (const name of names) {
   await snarkjs.zKey.contribute(zkey0, zkey, 'stipend dev contribution', randomBytes(32).toString('hex'));
   const vkey = await snarkjs.zKey.exportVerificationKey(zkey);
   writeFileSync(join(dir, `${name}.vkey.json`), JSON.stringify(vkey, null, 1));
+  // reputation is verified only on Solana (rep_registry, scripts/gen-rep-vk.mjs): no Solidity verifier for it
+  if (SOLANA_ONLY.has(name)) { console.log(`ok (${vkey.nPublic} public signals, ${((Date.now() - t0) / 1000).toFixed(0)}s)`); continue; }
   const Name = name[0].toUpperCase() + name.slice(1);
   const sol = (await snarkjs.zKey.exportSolidityVerifier(zkey, { groth16: template }))
     .replace('contract Groth16Verifier', `contract ${Name}Verifier`)
