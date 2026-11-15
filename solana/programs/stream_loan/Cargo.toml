@@ -24,6 +24,9 @@ custom-panic = []
 localnet-treasury = []
 # Mainnet build: talks to the mainnet stipend_pool (E16DK...) and refuses the localnet program id.
 mainnet = []
+# Localnet-only test build: its own program id (solana/keys/stream_loan_fast-keypair.json) and short GRACE, MIN_TERM,
+# CLAIM_WINDOW and RECOVERY_HORIZON so the backed-line default paths run in seconds. Never deployed; refuses `mainnet`.
+fast = []
 
 [dependencies]
 # Same anchor-lang as stipend_pool. No anchor-spl: token accounts are read and transfer_checked is

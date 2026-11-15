@@ -7,7 +7,11 @@ pub const CLOSED_SEED: &[u8] = b"closed";
 pub const SUBROGATION_SEED: &[u8] = b"subrogation";
 
 /// Time after the allowance's expiry before an unpaid loan counts as a shortfall.
+#[cfg(not(feature = "fast"))]
 pub const GRACE: u64 = 7 * 24 * 60 * 60;
+/// Localnet `fast` test build only (separate program id).
+#[cfg(feature = "fast")]
+pub const GRACE: u64 = 2;
 
 /// Sequential loan refs. PDA ["registry"]. No admin field.
 #[account]

@@ -83,4 +83,41 @@ pub enum LoanError {
     LegacyReceiptNoPayout,
     #[msg("the closed-loan receipt must be writable: the lender is still owed on this loan")]
     ReceiptNotWritable,
+    // ---- backed lines (docs/BACKER-SPEC.md). Appended at the end: the codes above never shift.
+    #[msg("backing terms out of range (cover, fee, line expiry, draw key or per-line limits)")]
+    BackingTerms,
+    #[msg("signer is not this line's backer")]
+    NotTheBacker,
+    #[msg("signer is not this line's draw key")]
+    NotTheDrawKey,
+    #[msg("the draw is not in the state this instruction needs")]
+    DrawState,
+    #[msg("not enough free stake in the line's vault")]
+    StakeShort,
+    #[msg("the loan term is too short or would end after the line expires")]
+    LineExpired,
+    #[msg("the line already has the maximum number of open draws")]
+    TooManyDraws,
+    #[msg("advance below the minimum or above the line's or the program's limit")]
+    DrawTooLarge,
+    #[msg("no backed default to claim: the loan is not past expiry + grace, is settled, or the lender is already paid")]
+    NoBackedDefault,
+    #[msg("the draw cannot be released or cancelled yet")]
+    NotReleasable,
+    #[msg("the line still has open draws or a reserve")]
+    BackingBusy,
+    #[msg("this line is pinned to another lender")]
+    LenderNotAllowed,
+    #[msg("this asset cannot back a line (not on the list, or it has a transfer fee)")]
+    AssetNotBackable,
+    #[msg("the draw's terms differ from what the lender expected")]
+    TermsMismatch,
+    #[msg("the line's cover is below the lender's minimum")]
+    CoverTooLow,
+    #[msg("the request expired before it was funded")]
+    RequestExpired,
+    #[msg("routed shares are waiting in the inbox or the pool escrow: sync (pull_lender_share) them before claiming")]
+    ReceiptsPending,
+    #[msg("vault is not the line's associated token account of the asset")]
+    BadVault,
 }

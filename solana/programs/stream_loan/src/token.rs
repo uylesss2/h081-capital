@@ -184,3 +184,29 @@ pub fn close_account<'info>(
     invoke_signed(&ix, &[account.clone(), destination.clone(), owner.clone(), token_program.clone()], signer_seeds)?;
     Ok(())
 }
+
+/// Token-2022 mint extension TLV: base mint (82 B) padded to 165, the account-type byte, then (type, length, value)
+/// entries. ExtensionType::TransferFeeConfig = 1.
+const EXT_TRANSFER_FEE_CONFIG: u16 = 1;
+
+/// True when a Token-2022 mint carries a TransferFeeConfig extension (any rate: its authority can raise the rate
+/// later). False for SPL Token mints and Token-2022 mints without it.
+pub fn mint_has_transfer_fee(mint: &AccountInfo) -> bool {
+    if *mint.owner != TOKEN_2022_ID {
+        return false;
+    }
+    let Ok(data) = mint.try_borrow_data() else { return false };
+    let mut o = ACCOUNT_LEN + 1;
+    while o + 4 <= data.len() {
+        let t = u16::from_le_bytes([data[o], data[o + 1]]);
+        let len = u16::from_le_bytes([data[o + 2], data[o + 3]]) as usize;
+        if t == 0 {
+            break;
+        }
+        if t == EXT_TRANSFER_FEE_CONFIG {
+            return true;
+        }
+        o += 4 + len;
+    }
+    false
+}

@@ -47,6 +47,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::bpf_loader_upgradeable;
 use anchor_lang::solana_program::program::set_return_data;
 
+pub mod backer;
 pub mod error;
 pub mod fee;
 pub mod pool;
@@ -54,6 +55,7 @@ pub mod safety;
 pub mod state;
 pub mod token;
 
+pub use backer::*;
 use error::LoanError;
 use state::{
     closed_payout, closed_room, collectable, legacy_release, shortfall_of, split_receipt, subrogation_blocks_close, sweep_split, ClosedSlot, Ledger,
@@ -62,11 +64,24 @@ use state::{
 };
 pub use state::GRACE;
 
+#[cfg(not(feature = "fast"))]
 declare_id!("FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc");
+// Localnet-only `fast` test build (short GRACE, MIN_TERM, CLAIM_WINDOW and RECOVERY_HORIZON; separate program id,
+// solana/keys/stream_loan_fast-keypair.json). Never deployed anywhere but a local test validator.
+#[cfg(feature = "fast")]
+declare_id!("Dbb9qZhHanDqz4zAFWhyw35PiziKEWiZ9vZ876q6a2yG");
 
 /// The localnet program id (solana/keys/stream_loan-keypair.json). A mainnet build patches declare_id to the
 /// mainnet program key (scripts/build-phase2-mainnet.sh) and refuses to compile if it is still this one.
 pub const LOCALNET_ID: Pubkey = pubkey!("FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc");
+/// The `fast` test build's program id.
+pub const LOCALNET_FAST_ID: Pubkey = pubkey!("Dbb9qZhHanDqz4zAFWhyw35PiziKEWiZ9vZ876q6a2yG");
+/// The stream_loan deployed on mainnet-beta.
+pub const MAINNET_ID: Pubkey = pubkey!("8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4");
+#[cfg(all(feature = "mainnet", feature = "fast"))]
+compile_error!("the mainnet build cannot use the fast (test) feature");
+#[cfg(feature = "fast")]
+const _: () = assert!(!fee::same(&ID, &MAINNET_ID) && !fee::same(&ID, &LOCALNET_ID), "fast build: declare_id must be its own test key");
 #[cfg(feature = "mainnet")]
 const _: () = assert!(!fee::same(&ID, &LOCALNET_ID), "mainnet build: declare_id is still the localnet stream_loan key");
 #[cfg(all(feature = "mainnet", feature = "localnet-treasury"))]
@@ -920,6 +935,39 @@ pub mod stream_loan {
         Ok(())
     }
 
+    // ---- backed lines (docs/BACKER-SPEC.md, backer.rs). Additive: no existing instruction or account changes.
+
+    /// A backer opens a line: the Backing PDA and its vault (the stake is the vault balance).
+    pub fn back_open(ctx: Context<BackOpen>, args: BackOpenArgs) -> Result<()> {
+        backer::handle_back_open(ctx, args)
+    }
+
+    /// The line's draw key asks for an advance from the lender of an open, unfunded slot; reserves the cover.
+    pub fn back_request(ctx: Context<BackRequest>, loan_ref: u64, advance: u64, lender_fee_bps: u16, term: u64, fund_by: i64) -> Result<()> {
+        backer::handle_back_request(ctx, loan_ref, advance, lender_fee_bps, term, fund_by)
+    }
+
+    /// The slot's lender funds a requested draw at exactly the terms it read.
+    pub fn fund_backed(ctx: Context<FundBacked>, loan_ref: u64, expect: BackedTermsArgs) -> Result<()> {
+        backer::handle_fund_backed(ctx, loan_ref, expect)
+    }
+
+    /// Permissionless: pays a defaulted backed loan's lender out of the vault.
+    pub fn back_claim(ctx: Context<BackClaim>, loan_ref: u64) -> Result<()> {
+        backer::handle_back_claim(ctx, loan_ref)
+    }
+
+    /// Ends a draw: cancels a request, frees a finished loan's reserve, closes the Draw once nothing more is owed to the
+    /// vault; `forgive` (backer only) gives up an unrecovered fee or payout. See backer::handle_back_settle.
+    pub fn back_settle(ctx: Context<BackSettle>, loan_ref: u64, forgive: bool) -> Result<()> {
+        backer::handle_back_settle(ctx, loan_ref, forgive)
+    }
+
+    /// The backer takes free stake out of the vault, or (`close`) empties and closes the line.
+    pub fn back_withdraw(ctx: Context<BackWithdraw>, amount: u64, close: bool) -> Result<()> {
+        backer::handle_back_withdraw(ctx, amount, close)
+    }
+
     /// View (use simulateTransaction): unpaid principal once expiry + GRACE has passed, 0 otherwise,
     /// 0 when expiry == 0. Routed shares still unsynced in the inbox, and shares the pool holds in its
     /// escrow for (fieldOf(slot), loan_ref) in the loan asset, count as paid. Return data: u64 LE.
@@ -1280,6 +1328,16 @@ mod tests {
         assert_eq!(LoanError::PayoutCannotReceive as u32, 37);
         assert_eq!(LoanError::LegacyReceiptNoPayout as u32, 38);
         assert_eq!(LoanError::ReceiptNotWritable as u32, 39);
+        // backed lines: appended after ReceiptNotWritable
+        assert_eq!(LoanError::BackingTerms as u32, 40);
+        assert_eq!(LoanError::BadVault as u32, 57);
+    }
+
+    #[test]
+    fn the_fast_test_id_is_never_a_deployed_id() {
+        assert_ne!(LOCALNET_FAST_ID, MAINNET_ID);
+        assert_ne!(LOCALNET_FAST_ID, LOCALNET_ID);
+        assert_eq!(MAINNET_ID.to_string(), "8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4");
     }
 
     #[test]
