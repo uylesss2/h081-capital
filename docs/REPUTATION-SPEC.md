@@ -1,462 +1,379 @@
-# H081 private reputation (ZK credit score): implementation spec
+# H081 private reputation (ZK credit score)
 
-Status: DESIGN. Nothing in this document is built, deployed or published. Branch `feat/zk-reputation`.
+Status: BUILT ON BRANCH `feat/zk-reputation`, tested on a local validator only. Nothing is deployed, published or
+pushed. The verifying key committed in `solana/programs/rep_registry/src/generated/vk.rs` comes from a throwaway
+single-party DEV setup; the mainnet build refuses to compile with it (section 11).
 
-## 0. The claim
+## 0. What a reputation proof says
 
-An agent proves, to one named audience, for one challenge:
+An agent proves, to one named audience and for one challenge:
 
-> "I repaid at least **N** loans totalling at least **X** USDG, from at least **L** different lenders, spanning
-> at least **D** days. I do not reveal which loans, when, to whom, or under which keys."
+> "One account controls the loan keys of at least **N** fully repaid stream_loan loans in USDG, totalling at least
+> **X**, from at least **L** distinct lender wallets, whose first and last funding are at least **D** days apart, and
+> which fall in at least **M** distinct 30-day periods counting only loans of at least **F**."
 
-One SDK call makes the proof and one call checks it:
+It reveals nothing else: not which loans, when, which lenders, which keys, or the exact totals.
 
 ```ts
-const { code } = await agent.proveReputation({ minLoans: 3, minVolume: '500', audience: 'acme-desk' });
-const r = await agent.verifyReputation(code, { audience: 'acme-desk' });   // anyone; off-chain, or on-chain
+const ask = await desk.reputationRequest({ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 });
+const { code, presentation } = await agent.proveReputation({ request: ask.code });
+const r = await desk.verifyReputation(code, { request: ask.code, presentation });   // r.ok, r.lowerBoundOnly === true
 ```
 
-### Soundness goals (and what enforces each)
+### What it guarantees (and what enforces it)
 
-| Goal | Enforced by |
+| Guarantee | Enforced by |
 |---|---|
-| A repayment can't be faked | Leaves enter the reputation tree ONLY through `attest`. `attest` reads the live stream_loan `Slot` account, checks the account owner and PDA, and requires `funded && repaid >= principal` and no Subrogation. |
-| A loan can't be counted twice (across proofs) | A marker PDA `["rep", loan_ref]` means one leaf per loan, ever. |
-| A loan can't be counted twice (within one proof) | The circuit requires the keys `(lenderF << 64) + loanRef` to be strictly increasing across the enabled slots. |
-| A loan can't be borrowed from another agent | Each counted leaf's `agentPk` must equal `PublicKey(Poseidon(15, masterSk, k))` for the prover's ONE `masterSk`. Leaves from two masters can't be mixed. Handing over `masterSk` hands over every shielded dollar of that account. |
-| A proof can't be replayed or resold | Public `audience`, `nonce`, `expiry` and `bindTo`. The verifier checks the audience is itself, the nonce is its own fresh challenge, the expiry hasn't passed, and (when it sets `bindTo`) that the presenter controls that key. |
-| One reputation can't back many accounts at one audience | A public `presNullifier = Poseidon(14, masterSk, audience)`. It is stable per audience, so the audience sees the same reputation coming back. |
-| Asset honesty | The leaf commits `fieldOf(mint)`, and the circuit makes every counted leaf use the public `asset`. |
+| A loan counts only if it was funded, fully repaid and never slashed | `attest` reads the live stream_loan `Slot` (owner, PDA, size, discriminator), needs `funded`, `repaid >= principal`, `principal >= 1 USDG`, and no `Subrogation` at stream_loan's PDA for the loan |
+| A loan counts once across all proofs | one bit per loan ref in a bitmap page: `attest` refuses a second time |
+| A loan counts once within a proof | the circuit needs strictly increasing loan refs over the enabled slots |
+| Only the holder of the account secret can present it | every counted leaf's agent key must be `Poseidon(1, Poseidon(15, masterSk, k))` for the prover's one `masterSk` |
+| A proof cannot be replayed to another verifier or challenge | public audience, nonce and expiry; the verifier checks its own request; `presNullifier` is per audience |
+| A captured code is not a bearer token | bound by default: to the request's key, to a key the prover names, or to a fresh session key whose signature (`h081-rep-sig:`) is handed over separately at presentation; unbound codes are refused unless the verifier opts in |
+| All counted loans are in the stated asset | the leaf commits `fieldOf(mint)`, the circuit uses the public `asset` |
+| A raw-field caller cannot slip a wrapped threshold through | the circuit range-checks every threshold and the expiry; `verify_reputation` checks widths again and `now <= expiry <= now + 1 day` |
 
-## 1. Why a new circuit and a new program (and not disclose)
+### What it does NOT show (every verifier-facing surface says this)
 
-`disclose.circom` (circuit 3) can't carry this claim:
+1. **Defaults.** Unpaid loans never enter the tree. A proof is a lower bound on good loans; a perfect record and one
+   that hides ten defaults under other loan keys or other accounts look the same. A borrower can build a record,
+   borrow big, default, and start a new account.
+2. **Who supplied the money.** Anyone can repay a loan (a direct transfer to the inbox counts: it is real money).
+3. **Whose loan it was.** stream_loan accepts a stream proof from the note's owner OR its agent, and the owner picks the
+   agent key freely. So a third party can run loans under *your* public loan keys (you hand it `loanPk(k)` values, which
+   costs you nothing) and the leaves then verify under your `masterSk`. Reputation can be **gifted or bought** without
+   handing over any key. Closing this needs the stream proof to bind the agent key's holder (a stream_loan change, owner
+   decision, section 13); until then the claim is "presentable only by the masterSk holder", not "earned by them".
+4. **Independent lenders.** A lender can be the borrower's own second wallet; `minLenders` costs one wallet each.
 
-- **(i)** It has no key check. A lender holding the LenderMemo can prove facts about the agent's note.
-- **(ii)** `agentPk` is public, so a proof links straight to every Slot that carries that pk.
-- **(iii)** It covers one note: it can't count or sum.
-- **(iv)** Pledged notes don't hold the principal, and `pledgePaid` counts in-flight shares and borrower excess. The note route can't prove that a loan was funded or repaid.
-- **(v)** Its only replay binding is the audience.
+So the score measures **capital throughput and calendar presence on loans bound to keys one account controls**. It is
+not creditworthiness. Its cost to fake (section 9.2) is low. Never size credit from it alone; the backer feature must cap
+a line at the backer's own shielded stake and use reputation only as a pricing input.
 
-The facts that matter (funded, principal, repaid, no slash) are public in the stream_loan `Slot` and nowhere else. So the design:
+## 1. Why a new circuit and program (not disclose, not a stream_loan change)
 
-1. **New program `rep_registry`** (no change to the four live programs). It reads `Slot` and `Subrogation` the way safety_pool's `stream_loan_view.rs` does (owner check plus fixed offsets), appends one leaf per repaid loan to its own Poseidon Merkle tree, and verifies reputation proofs with its own verifying key.
-2. **New circuit `reputation.circom`.** It reuses `PublicKey`, `MerkleCheck(enabled)`, `Leq`/`Lt` and `NonZero` from `circuits/lib/*`, plus the audience-squaring pattern from disclose and stream.
-3. **New loan-key derivation** for borrowing, `loanSk_k = Poseidon(15, accountSk, k)`. Today `bank.borrow` pledges to HMAC-derived sub-accounts (`integrations/core/keys.ts` `deriveAgentSk`). A circuit can't link those keys to one identity cheaply, and spent sub-keys could be sold as "reputation". Only loans taken under Poseidon-derived loan keys (or the root account key) count.
+`disclose.circom` has no key check (a lender holding the memo could prove), makes `agentPk` public, covers one note,
+cannot count or sum, and the note holds neither the principal nor a clean "repaid" fact. The facts that matter live
+only in the public `Slot`. So:
 
-Alternative B is the cheaper option on byte budget: put `attest` and the tree into stream_loan, and add circuit id 6 plus `verify_reputation` to stipend_pool. It is rejected as the default because both programs have zero ProgramData slack and are the money path. Both would need `solana program extend` and an upgrade. The owner's decision is listed in section 12.
+1. **New program `rep_registry`**: reads `Slot`/`Subrogation` by fixed offsets (no change to the four live programs),
+   keeps its own Poseidon tree and verifying key. Alternative B (attest inside stream_loan, verifier inside
+   stipend_pool) stays an owner option; it would touch two money programs with no ProgramData slack.
+2. **New circuit `reputation.circom`.**
+3. **Loan keys** `loanSk_k = Poseidon(15, accountSk, k)`: `bank.borrow` now pledges each loan to a fresh loan key
+   instead of an HMAC sub-account (those cannot be tied to one account inside a circuit).
 
 ## 2. Data model
 
-### 2.1 Domain tags (`circuits/lib/hashes.circom`, `src/crypto.ts` DOM)
-
 | Tag | Name | Use |
 |---|---|---|
-| 13 | `DOM_REP` | reputation leaf |
+| 13 | `DOM_REP` | leaf |
 | 14 | `DOM_REPNF` | presentation nullifier |
-| 15 | `DOM_LOANKEY` | loan-key derivation from the account secret |
+| 15 | `DOM_LOANKEY` | loan-key derivation |
 
-Tags 1-12 are unchanged.
+- `loanSk(k) = Poseidon(15, accountSk, k)`, `k < 2^32`; `loanPk(k) = Poseidon(1, loanSk(k))` = the note's `agentPk` =
+  `Slot.agent_pk`. The root account key is never used for a loan (it may already sit in shared addresses), and the
+  circuit has no root-key path.
+- Leaf: `R = Poseidon(13, agentPk, loanRef, principal, fieldOf(asset), fieldOf(lender wallet), floor(funded_at/86400), outcome)`
+  with `outcome = 1` (repaid). The outcome input is there so a later version can attest defaults (outcome 0) into the
+  same tree format; today only repaid loans are attested and the circuit forces outcome 1. No attest time (it could be
+  delayed to inflate it); the funding day is fixed at funding.
+- Tree: depth 20, the same `hash_left_right`, zeros and frontier as stipend_pool (`zeros.rs` is byte-identical; a test
+  checks). One leaf and one committed root per attest; a ring of 256 roots.
 
-### 2.2 Loan keys
+## 3. Program `rep_registry` (`solana/programs/rep_registry`)
 
-```
-loanSk(k)  = Poseidon(15, accountSk, k)        k in [0, 2^32)
-loanPk(k)  = Poseidon(1, loanSk(k))            (= the note's agentPk, = Slot.agent_pk)
-```
-
-- `bank.borrow` uses the next unused `k` for each loan instead of `freeAgentIndex()`. The owner grants the pledged allowance to `Account(loanSk(k)).address`, and the loan-key account makes the stream proof (unchanged circuit).
-- The used `k` values are stored in the bank cache.
-- Recovery: fetch every Slot (as `relayer/x402/loans.ts` already does), compute `loanPk(k)` for k = 0.. and match locally until 20 consecutive misses (gap limit). No per-agent RPC query (it would leak the pk to the RPC).
-- The existing HMAC sub-accounts 0..15 are kept for allowances, and still scanned, so nothing held today moves.
-
-### 2.3 Reputation leaf
-
-```
-R = Poseidon(13, agentPk, loanRef, principal, assetF, lenderF, fundedDay)        (7 inputs)
-  agentPk   = Slot.agent_pk (32 B big-endian field)
-  loanRef   = Slot.loan_ref (u64)
-  principal = Slot.principal (u64, base units)
-  assetF    = fieldOf(Slot.asset)  = sha256(mint)[0..20] big-endian (160 bits)
-  lenderF   = fieldOf(Slot.lender) (the lender WALLET, not the slot PDA)
-  fundedDay = floor(Slot.funded_at / 86400) (u32)
-```
-
-The leaf records no repaid amount, because `attest` only admits fully repaid loans. It records no attest time, because a borrower could wait before attesting and inflate it. `fundedDay` is fixed at funding, so it can't be stretched.
-
-### 2.4 Reputation tree
-
-The tree is an append-only Poseidon Merkle tree with depth `LEVELS = 20` (1,048,576 loans). It uses the same `hash_left_right`, the same ZEROS and the same frontier algorithm as `stipend_pool/src/merkle.rs` and `circuits/lib/merkle.circom`. The zeros are copied into `rep_registry/src/generated/zeros.rs`, and a test asserts they are byte-equal to stipend_pool's. Each `attest` inserts one leaf and commits one root.
-
-## 3. Program `rep_registry` (new, Anchor, `solana/programs/rep_registry`)
-
-The program id is a new keypair; the localnet id comes from `solana/scripts/keygen.sh`. The mainnet id is patched the way the stream_loan build does it, with a compile-time assert. The stream_loan id it trusts is a compile-time constant per feature (`localnet` FvM9Xcza…, `mainnet` 8JBd7epQ…). The upgrade authority stays with the deployer or Squads. **Never `--final`.**
+Localnet id `8w59GKraS4JrmDqYnqXcvjHTubnj7udMsuLXnscd3KEL` (from `solana/scripts/rep-keygen.sh`; the keypair lives in the
+gitignored `solana/keys/`). It trusts stream_loan `FvM9Xcza…` on localnet and `8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4`
+with `--features mainnet`. The mainnet build refuses to compile while `declare_id` is the localnet key or while
+`REPUTATION_VK_IS_DEV` is true (checked: both guards fire). Upgradeable; the upgrade authority is kept. **Never `--final`.**
+Built size: 168,672 bytes.
 
 ### 3.1 Accounts
 
-| Account | Seeds | Layout | Size (bytes) |
+| Account | Seeds | Layout | Size |
 |---|---|---|---|
-| `RepTree` (zero-copy) | `["reptree"]` | disc 8 \| next_index u32 \| current_root_index u32 \| filled_subtrees [20][32] \| roots [ROOT_HISTORY=256][32] | 8+4+4+640+8192 = **8,848** |
-| `RepMarker` | `["rep", loan_ref u64 LE]` | disc 8 \| loan_ref u64 \| index u32 \| leaf [32] \| bump u8 | 8+8+4+32+1 = **53** |
+| `RepTree` (zero-copy) | `["reptree", version u16 LE]` | disc 8, next_index u32, current_root_index u32, version u16, bump u8, pad 5, filled_subtrees 20x32, roots 256x32 | 8,856 |
+| `RepBits` | `["repbits", page u32 LE]` | disc 8, page u32, bump u8, bits 1,024 B (loan refs `page*8192 .. +8191`) | 1,037 |
 
-- `RepTree` is under the 10,240 B CPI-create limit, so it is created in one `initialize`.
-- 256 roots is plenty, because attests are rare (one per repaid loan). A proof stays valid for 255 later attests, and its own `expiry` bounds it anyway.
-- `RepMarker` stores the leaf, so the full leaf list stays readable after the Slot is closed: `getProgramAccounts(rep_registry, dataSize 53)`, sorted by `index`.
-- Both sizes are pinned by an `account_sizes_are_unchanged` test.
+- No per-loan marker account. Loan refs are sequential (stream_loan `Registry`), so one 1 KiB page marks 8,192 loans;
+  the per-loan rent drops from about 0.0013 SOL (a 53-byte account) to about 0.000001 SOL.
+- The leaf list is public in the `RepAttested` events (which carry the leaf preimage: all of it was public in the
+  Slot) and in the relayer snapshot; every client rebuilds the tree and checks it against the on-chain root.
+- Versioned trees: version `v > 0` can be opened (upgrade authority) only when `v-1` is full. A loan lives in one tree;
+  a proof uses one tree.
 
 ### 3.2 Instructions
 
-**`initialize()`**
-- Signer: upgrade authority only, through the ProgramData check, as in stream_loan `initialize`.
-- Creates `RepTree` and calls `init_tree`.
+**`initialize(version)`**: upgrade authority only (ProgramData check, as stream_loan); creates `RepTree[version]`.
+14,435 CU.
 
-**`attest(loan_ref: u64)`**
-- Permissionless; anyone pays rent.
-- Accounts: `payer` (signer, mut); `slot` (read); `subrogation` (read, may be empty); `marker` (init, PDA `["rep", loan_ref]`); `rep_tree` (mut); `system_program`.
-- Checks, in order:
-  1. `slot.owner == STREAM_LOAN_ID`.
-  2. `slot.key == PDA(["slot", loan_ref LE], STREAM_LOAN_ID)`.
-  3. `slot.data.len() == 253` and the discriminator equals `sha256("account:Slot")[0..8]`.
-  4. `funded == 1`.
-  5. `repaid >= principal`.
-  6. `principal >= MIN_PRINCIPAL` (1 USDG = 1_000_000 base units; stops dust filling the tree).
-  7. `agent_pk < r` and `agent_pk != 0`.
-  8. `funded_at > 0`.
-  9. `subrogation.key == PDA(["subrogation", loan_ref], STREAM_LOAN_ID)` and `subrogation.data_is_empty()`: a "clean" repayment, never slashed.
-- Slot byte offsets, verified by the Rust test against `stream_loan::state::Slot` through a dev-dependency:
+**`attest(loan_ref)`**: permissionless. Accounts: payer, slot, subrogation, rep_tree (mut), rep_bits (init_if_needed),
+system_program. Checks, in order: slot owner is `STREAM_LOAN_ID`, its address is `["slot", ref]` under it, size 253,
+`Slot` discriminator, `loan_ref` field matches; the subrogation account is stream_loan's `["subrogation", ref]` PDA
+(checked BEFORE the emptiness test, so an empty look-alike is refused) and is empty; funded; `repaid >= principal`;
+`principal >= 1_000_000`; agent key nonzero and in the field; `funded_at > 0`; the loan's bit not set. Then the leaf
+(Poseidon syscall, 8 inputs), insert, commit, set the bit, emit `RepAttested{version, index, loan_ref, leaf, root,
+agent_pk, principal, asset_f, lender_f, funded_day}`. 41,655-45,158 CU (the top includes creating a bitmap page).
 
-  | Field | Bytes |
-  |---|---|
-  | loan_ref | 8..16 |
-  | lender | 16..48 |
-  | funded | 49 |
-  | asset | 51..83 |
-  | principal | 115..123 |
-  | repaid | 123..131 |
-  | agent_pk | 173..205 |
-  | funded_at | 205..213 |
+Slot offsets (tested against `stream_loan::state::Slot` through a dev-dependency; the test fails on any layout move):
+loan_ref 8, lender 16, funded 49, asset 51, principal 115, repaid 123, agent_pk 173, funded_at 205, size 253.
+**Release checklist:** any stream_loan upgrade must re-run `cargo test -p rep_registry` and re-check what `repaid`
+means (today it only grows, except `legacy_release`, which never takes it below the principal).
 
-- It then:
-  - computes `lenderF` and `assetF` with the sha256 syscall, and `R` with the `solana_poseidon` syscall (Bn254X5, 7 inputs);
-  - runs `insert`, then `commit_root`;
-  - writes the marker;
-  - emits `RepAttested { loan_ref, index, leaf, root }`.
-- Errors: `NotStreamLoanSlot`, `NotFunded`, `NotRepaid`, `Slashed`, `TooSmall`, `TreeFull`, plus Anchor `AccountAlreadyInUse` on a second attest.
-- Estimated CU: about 25k (21 Poseidon(2), 1 Poseidon(7), 2 sha256).
+**`verify_reputation(proof, inputs[13])`**: stateless, CPI-able, 8 + 256 + 416 = 680 B of data. Every input `< r`;
+`minLoans, minLenders, minMonths < 2^8`, `minSpanDays < 2^16`, `minVolume, monthFloor < 2^64`; `expiry < 2^63`,
+`expiry >= now`, `expiry <= now + 86,400`; the root in the tree's ring; Groth16 (`groth16.rs` byte-identical to
+stipend_pool's). Emits `ReputationVerified`. Does not consume the nonce: an on-chain caller keeps its own
+`["used", audience, nonce]` PDA. **146,541 CU.** Groth16 proofs are malleable: dedupe on `(audience, nonce)` or
+`presNullifier`, never on proof bytes.
 
-**`verify_reputation(proof: [u8;256], p: RepPublic)`**
-- Stateless and CPI-able. Instruction data is 8 + 256 + 352 = 616 B, which fits one transaction with no buffer.
-- `RepPublic` holds the 11 public inputs of section 4, each 32 B big-endian.
-- Checks:
-  1. Every input is `< r` (`is_field`).
-  2. `repRoot` is in the RepTree ring and is not zero.
-  3. `expiry >= Clock::unix_timestamp`.
-  4. Groth16 with `REPUTATION_VK` (alt_bn128 syscalls; the `groth16.rs` code is copied from stipend_pool with a test that it stays identical).
-- Emits `ReputationVerified { audience, nonce, pres_nullifier, min_loans, min_volume, min_lenders, min_span_days, asset }`.
-- It does NOT consume the nonce. An on-chain caller (for example a future backer program) that needs one-time use creates its own `["used", audience, nonce]` PDA.
-- Estimated CU: about 130k (stream with root check was measured at 137k with 13 inputs). Recorded in `solana/compute-units.json`.
+### 3.3 Who attests, and the close race
 
-There is no admin key, no pause and no fee. `MIN_PRINCIPAL` is a constant.
+`close_slot` erases the agent key, and a close can follow the final repaying sync in the same transaction, so a loan
+must be attested while its slot is open. Callers:
 
-### 3.3 Who calls `attest` (closing the race with `close_slot`)
+1. **Lender:** `bank.lendClose` attests a repaid, unattested loan before `close_slot` (the lender is already public on
+   the slot; it links nothing new).
+2. **Relayer:** `POST /v1/rep/attest {loanRef}` (the borrower's bank calls it) and `RepRelayer.sweep()` for a cron. The
+   relayer's hot wallet signs and pays.
+3. **Never the borrower's wallet** by default: as signer and fee payer it would link the loan to the borrower on chain.
+   `reputationAttest({ selfSign: true })` exists and says what it links.
 
-`close_slot` deletes the Slot, and `ClosedSlot` has no `agent_pk`. A loan closed before it is attested can never be attested. Three callers prevent that, and none of them needs a stream_loan change:
-
-1. **Borrower:** `H081Bank` puts `sync(loan_ref)` and `attest(loan_ref)` in one transaction as soon as `repaid >= principal` (polled by `lendStatus` and `borrowStatus`). The borrower pays about 0.0009 SOL rent.
-2. **Lender:** `bank.lendClose` adds the `attest` instruction ahead of `close_slot` when the marker is missing.
-3. **Relayer cron** (`relayer/rep-attest.ts`, every 15 min with the seed snapshot): attest every live Slot with `funded && repaid >= principal` and no marker. It is paid from the relayer hot wallet (owner decision, section 12).
+Accepted and documented: a hostile lender, or any client older than this branch (agent 0.1.x / mcp-plugin 0.2.x
+`lendClose`, the current site bundle, the house fleet's own close flow), can close a repaid loan without attesting it,
+and a cron cannot catch a close in the same transaction as the repayment. The borrower loses that leaf. Fixing it for
+good needs stream_loan to keep `agent_pk` and `funded_at` in `ClosedSlot` (an upgrade of a live money program; owner
+decision). The house fleet's lend/close flows need the attest-before-close change too (they are kept out of git and
+were not touched here).
 
 ## 4. Circuit `circuits/main/reputation.circom`, `Reputation(levels = 20, N = 16)`
 
-### Private inputs
+Public inputs (13, in this order): `repRoot, asset, minLoans, minVolume, minLenders, minSpanDays, minMonths, monthFloor,
+audience, nonce, expiry, bindTo, presNullifier`.
 
-- `masterSk`
-- Per slot `j < N`:
-  - `enabled[j]`, `isRoot[j]`, `keyIndex[j]`;
-  - `loanRef[j]`, `principal[j]`, `lenderF[j]`, `fundedDay[j]`;
-  - `pathElements[j][20]`, `pathIndices[j][20]`.
-- `selLo[N]` and `selHi[N]`: one-hot selectors for the span.
+Private: `masterSk`; per slot `enabled, keyIndex, loanRef, principal, lenderF, fundedDay, pathElements[20],
+pathIndices[20]`; one-hot `selLo`, `selHi`.
 
-### Public inputs (11, in this order)
+Constraints:
+1. Range checks on the public thresholds and expiry (`minLoans, minLenders, minMonths < 2^8`, `minSpanDays < 2^16`,
+   `minVolume, monthFloor, expiry < 2^64`); `masterSk != 0`.
+2. Per slot: `enabled` boolean; `keyIndex < 2^32`, `loanRef, principal < 2^64`, `lenderF < 2^160`, `fundedDay < 2^32`;
+   `sk = Poseidon(15, masterSk, keyIndex)`, `pk = Poseidon(1, sk)`; leaf with the PUBLIC asset and outcome 1;
+   `MerkleCheck(enabled)`; `fundedDay = 30*month + rem`, `rem < 30`.
+3. Enabled slots first: `enabled[j+1] * (1 - enabled[j]) = 0`.
+4. `loanRef[j] < loanRef[j+1]` whenever `enabled[j+1]`.
+5. `count >= 1`, `minLoans <= count`; `minVolume <= Σ enabled*principal`.
+6. Distinct lenders: slot `j` counts when enabled and no earlier ENABLED slot has its lender (pairwise, every term gated
+   by `enabled`, so zero padding adds nothing; tested with padding between enabled slots).
+7. Distinct periods: the same over slots with `enabled` and `principal >= monthFloor`.
+8. Span: `Σ selLo = Σ selHi = 1`, both select ENABLED slots, `lo + minSpanDays <= hi`.
+9. `presNullifier = Poseidon(14, masterSk, audience)`.
+10. `nonce`, `bindTo` bound by squaring (Groth16 binds every public input anyway).
 
-`repRoot, asset, minLoans, minVolume, minLenders, minSpanDays, audience, nonce, expiry, bindTo, presNullifier`
+**Measured:** 102,129 constraints with circom `--O2` (214,206 with the default `--O1`, which keeps linear constraints).
+`build-circuits.mjs` passes `--O2` for reputation only, so the six ceremony circuits' r1cs never change. That fits pot17
+(131,072) with 22% headroom. Dev zkey 64.9 MB, wasm 4.3 MB. Proving in Node: about 2.5-3 s on this machine (measured in
+the tests); a browser will be several times slower and the 65 MB download is heavy on mobile: for a LiveBank panel,
+consider an N = 8 variant (about 51k constraints, pot16) as a second verifying key in the same program.
 
-### Constraints
+There is no remote proving: the witness contains `masterSk`. No x402 service may prove reputation.
 
-1. `NonZero(masterSk)`.
-2. For each `j`:
-   - `isRoot[j]`, `enabled[j]` and the selectors are boolean.
-   - `keyIndex[j] < 2^32`.
-   - `sk_j = isRoot ? masterSk : Poseidon(15, masterSk, keyIndex)`.
-   - `pk_j = Poseidon(1, sk_j)`.
-   - `leaf_j = Poseidon(13, pk_j, loanRef, principal, asset, lenderF, fundedDay)`. The public `asset` is used, so every counted loan is in that asset.
-   - `MerkleCheck(enabled[j])(leaf_j, path_j) == repRoot`.
-   - Ranges: `loanRef < 2^64`, `principal < 2^64`, `lenderF < 2^160`, `fundedDay < 2^32`.
-3. Enabled slots come first: `enabled[j+1] * (1 - enabled[j]) === 0`.
-4. Distinctness: `key_j = lenderF_j * 2^64 + loanRef_j` (< 2^224), and `LessThan(224)(key_j, key_{j+1})` is enforced when `enabled[j+1]`. Every loan_ref has exactly one leaf (the marker), so this means no loan appears twice. Sorting by lender first lets the lender count be read off adjacent pairs.
-5. `count = Σ enabled[j]`; `count >= 1`; `minLoans <= count` (8-bit compare).
-6. `volume = Σ enabled[j]*principal[j]` (< 2^68); `minVolume < 2^72`; `minVolume <= volume`.
-7. `lenders = enabled[0] + Σ enabled[j+1]*(1 - IsEqual(lenderF[j], lenderF[j+1]))`; `minLenders <= lenders`.
-8. Span:
-   - `Σ selLo = Σ selHi = 1`;
-   - `Σ selLo*enabled = Σ selHi*enabled = 1`;
-   - `lo = Σ selLo*fundedDay` and `hi = Σ selHi*fundedDay`;
-   - `minSpanDays < 2^16`;
-   - `Leq(33)(lo + minSpanDays, hi)`.
-9. `presNullifier === Poseidon(14, masterSk, audience)`.
-10. `nonce`, `expiry` and `bindTo` are bound by squaring them. Nothing further is needed, because Groth16 public inputs are already bound; this matches the existing pattern.
+## 5. SDK and bank
 
-### Size
+Core: `src/crypto.ts` (`DOM.REP/REPNF/LOANKEY`, `loanSk`, `loanPk`, `repLeaf`, `presNullifier`); `src/reputation.ts`
+(`reputationInput`, `selectLoans` with `ReputationUnreachable` naming what is short, the ladder, `snapRequirement` (down,
+for proving) and `snapRequirementUp` (up, for asking), `audienceOf`); `src/solana/reputation.ts` (PDAs, `attestIx`,
+`verifyReputationIx`, `repInitializeIx`, decoders, the event log with per-program log attribution so another program in
+the same transaction cannot pass off a fake event, `rebuildRepTree` that checks every leaf hash and the final root
+against the chain, `fetchRepLeaves` (snapshot, topped up from the chain when behind), `myRepLoans` with a gap limit).
 
-The estimate is about 6.4k constraints per slot:
-- 3 Poseidon calls (derivation, pk, leaf), about 880;
-- Merkle 20 x Poseidon(2), about 4.9k;
-- ranges, about 350;
-- LessThan(224), about 225.
+`audienceOf` is domain separated: a key is `sha256(0x01 || key)[0..20]`, a name `sha256(0x02 || "h081-rep-audience|" || name)[0..20]`.
 
-That gives about 104k in total, under pot17's 131,072. **Measure with `build-circuits.mjs`.** If it comes out over:
-- fall back to N = 12, or
-- move to pot18 (an owner decision, because the ceremony used pot17).
+Bank (`integrations/core/reputation.ts`, delegated from `H081Bank`):
 
-More than 16 loans: the prover picks 16. A claim is bounded by `minLoans <= 16` and by the sum of its 16 largest loans.
+- `borrow` pledges to a fresh loan key (virtual sub-account index `1000 + k`, so pay, reclaim and balance see it)
+  unless `agentIndex` names a legacy sub-account; used keys are cached (`<cache>/...loankeys-<signer>.json`) before the
+  grant, and recovery scans slots and events with a gap limit of 20.
+- `reputationRequest` → `h081-rep-ask:` (thresholds rounded UP to the ladder; optional `bindTo`).
+- `proveReputation({request} | {audience, thresholds})` → `h081-rep:` and, when the request binds no key, an
+  `h081-rep-sig:` presentation from a fresh session key. Thresholds snap DOWN when given directly. The prover refuses a
+  fifth distinct threshold set per audience per UTC day (probing). Local proof only, verified locally before it is
+  handed out.
+- `verifyReputation(code, {request} | {audience, nonce}, presentation?, allowBearer?, onChain?)` checks, in order:
+  frame, kind, network tag; audience, nonce and thresholds against the request; the binding (request key, or the
+  presentation's key and signature, or refused as bearer); `now <= expiry <= now + 1 day`; the root in the on-chain
+  ring; Groth16 against the vkey whose sha256 is pinned in `CIRCUIT_HASHES.reputation` (empty today: unreleased, so
+  only a localnet dev setup with `H081_REP_DEV_SETUP=1` passes); optionally a read-only simulation of
+  `verify_reputation`. Every result carries `lowerBoundOnly: true`, `statement` and `setup`.
+- `reputationStatus` (attested count, volume, lenders, span, periods; pending repaid-but-unattested loans; legacy loans
+  under HMAC sub-accounts that can never count, with warnings) and `reputationAttest` (plan unless confirm; via the
+  relayer).
 
-Proving time is roughly 6-12 s in Node and 15-30 s in a browser. The zkey is roughly 50-60 MB (to be measured). There is **no remote proving**: the witness contains `masterSk`. Unlike `prove-disclose`, no x402 service may prove reputation.
+Ladder: loans 1, 2, 3, 5, 8, 12, 16; volume 0 and 1 / 2.5 / 5 × 10^k USDG; lenders 0, 1, 2, 3, 5, 8; span 0, 7, 30, 90,
+180, 365, 730 days; periods 0, 1, 2, 3, 6, 9, 12, 16.
 
-## 5. SDK
+## 6. Integrations (built)
 
-### 5.1 Core (`src/`)
-
-- `src/crypto.ts`:
-  - `DOM.REP = 13n`, `DOM.REPNF = 14n`, `DOM.LOANKEY = 15n`;
-  - `loanSk(accountSk, k)`;
-  - `repLeaf({agentPk, loanRef, principal, assetF, lenderF, fundedDay})`;
-  - `presNullifier(masterSk, audience)`.
-- `src/reputation.ts`:
-  - `type RepLoan = { loanRef; principal; assetF; lenderF; fundedDay; key: { root: true } | { k: number }; index: number }`;
-  - `selectLoans(loans, req)`: greedy by principal, then repairs for `minLenders` and span; throws `ReputationUnreachable` with what is short;
-  - `reputationInput({ masterSk, loans, tree, req })` returns `{ input, publicSignals }`;
-  - `REPUTATION_PUBLIC`.
-- `src/prover.ts`: add `'reputation'` to `CircuitName`.
-- `src/solana/reputation.ts`:
-  - `REP_PROGRAM_ID`, `MAINNET_REP_PROGRAM_ID`;
-  - PDAs `repTreePda()` and `repMarkerPda(ref)`;
-  - `attestIx(ref, payer)` and `verifyReputationIx(proof, pub)`;
-  - `decodeRepTree` and `decodeRepMarker`;
-  - `fetchRepLeaves(conn)` (getProgramAccounts dataSize 53, sorted by index, root rebuilt and checked against the ring);
-  - `isKnownRepRoot(conn, root)`;
-  - `RepTreeMirror` (a `MerkleTree(20)` fed from markers).
-- `audienceOf(x: string | PublicKey): bigint`:
-  - a PublicKey gives `fieldOf(pk)`;
-  - a string gives `sha256("h081-rep-audience|" + x)[0..20]`.
-
-### 5.2 Bank (`integrations/core/bank.ts`)
-
-```ts
-proveReputation(req: {
-  minLoans: number; minVolume: string | bigint; minLenders?: number; minSpanDays?: number;
-  audience?: string; request?: string /* h081-rep-ask: code */; bindTo?: string /* base58 pubkey */;
-  expiresInSec?: number /* default 600 */;
-}): Promise<{ code: string; presNullifier: string; expiresAt: number; counted: { loans: number } }>;
-
-verifyReputation(code: string, opts: { audience?: string; request?: string; nonce?: string; now?: number;
-  onChain?: boolean /* simulate verify_reputation */ }): Promise<{
-  ok: boolean; reason?: string; minLoans: number; minVolume: string; minLenders: number; minSpanDays: number;
-  asset: string; presNullifier: string; audience: string; expiresAt: number; bindTo?: string }>;
-
-reputationRequest(req: { audience: string; minLoans: number; minVolume: string; minLenders?: number;
-  minSpanDays?: number; ttlSec?: number; bindTo?: string }): { code: string; nonce: string; expiresAt: number };
-
-reputationAttest(opts?: { confirm?: boolean }): Promise<Plan | { attested: number[]; signatures: string[] }>;
-reputationStatus(): Promise<{ attested: { count: number; volume: string; lenders: number; spanDays: number };
-  pending: number /* repaid, not yet attested */; legacy: number /* repaid under HMAC sub-accounts: not countable */ }>;
-```
-
-- `verifyReputation` checks, in order:
-  1. frame and checksum;
-  2. kind 7 and network tag;
-  3. that the code matches the request (audience, nonce, thresholds ≥ the asked ones, bindTo);
-  4. `now <= expiry`;
-  5. that `repRoot` is known (one RPC read of RepTree);
-  6. Groth16 with the bundled `reputation.vkey.json`, whose hash is pinned in `scripts/circuit-hashes.json`.
-- Without a request code, the verifier must remember the nonces it has seen until their expiry.
-- `reputationStatus` is local and private. It reads markers and Slots, and matches against the cached loan keys.
-- The SDK snaps thresholds to a public ladder before proving (section 9, threshold probing):
-  - loans: 1, 2, 3, 5, 8, 12, 16;
-  - volume: 1-2.5-5 x 10^k USDG;
-  - span: 7, 30, 90, 180, 365 days.
-
-  A request for an off-ladder value is rounded down, and the code states the snapped value.
-
-### 5.3 `@h081lll/agent` (`integrations/agent/src/h081.ts`)
-
-- `agent.proveReputation({ minLoans, minVolume, audience, ... })` and `agent.verifyReputation(code, { audience | request })`.
-- `agent.reputationRequest(...)`, `agent.reputation()` (status), and `agent.reputationAttest({ confirm })`. Like other writes, attest returns a plan unless it is confirmed.
-- Add `reputation` (and `disclose`, which is missing today) to `CIRCUIT_MB`.
-
-## 6. Integrations
-
-| Surface | Additions |
+| Surface | Added |
 |---|---|
-| `integrations/core/schemas.ts` | OPS, DESCRIPTIONS, ZOD, JSON_SCHEMA and EXAMPLE_INPUTS for `h081_prove_reputation`, `h081_verify_reputation`, `h081_reputation_request`, `h081_reputation_attest` (write: plan/confirm) and `h081_reputation_status` |
-| `operations.ts` | OPERATIONS entries calling the bank methods |
-| MCP (`integrations/mcp`) | tools come from OPS automatically: `h081_prove_reputation`, `h081_verify_reputation`, … |
-| agent-kit plugin | `actions/proveReputation.ts`, `verifyReputation.ts`, `reputationRequest.ts`, `reputationAttest.ts`, `reputationStatus.ts`; register in `index.ts` |
-| CLI `h081` | `rep ask --audience A --min-loans 3 --min-volume 500 [--min-lenders 2] [--span 30] [--bind <pubkey>]`; `rep prove <ask-code> \| --min-loans … --audience A`; `rep verify <code> [--ask <ask-code>] [--on-chain]`; `rep attest [--yes]`; `rep status` |
-| local API (`server.ts`) | `POST /v1/reputation/request`, `POST /v1/reputation/prove`, `POST /v1/reputation/verify`, `POST /v1/reputation/attest`, `GET /v1/reputation`; regenerate `openapi.json` |
-| relayer | `GET /v1/rep/leaves?from=<index>` (public marker cache) and `GET /v1/rep/roots`; cron attest sweep (section 3.3); **no proving endpoint**; optional free `POST /v1/rep/verify` (off-chain verify for clients without snarkjs) |
-| site (`stipend-site`) | mirror kinds 7/8 in `src/lib/live/codes.ts` with Copy buttons and a live check under the paste box; a "Reputation" panel in LiveBank (status, Prove for a request code, Verify a code); a /docs page; a `drive-live-localnet.mjs` check (AGENTS.md rule) |
-| backer (later feature) | can gate a backed line on `verify_reputation` by CPI, plus its own nonce PDA |
+| operations (`schemas.ts`, `operations.ts`) | `h081_reputation_request`, `h081_prove_reputation`, `h081_verify_reputation`, `h081_reputation_attest` (plan/confirm), `h081_reputation_status`; descriptions state the limits (section 0) and the beta setup |
+| MCP | the five tools, from the operation table |
+| Agent Kit plugin | five actions and methods |
+| `@h081lll/agent` | `reputationRequest`, `proveReputation`, `verifyReputation`, `reputation`, `reputationAttest`; `checkCode` reads kinds 7-9; `CIRCUIT_MB` gains `disclose` and `reputation` |
+| CLI | `h081 rep ask \| prove \| verify \| attest \| status` |
+| local API | `POST /v1/reputation/{request,prove,verify,attest}`, `GET /v1/reputation`; `openapi.json` regenerated |
+| relayer | `GET /v1/rep/leaves`, `GET /v1/rep/roots`, `POST /v1/rep/attest`, `RepRelayer.sweep()`; `RELAYER_REP_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` (default 10 USDG). No proving route. No free verify route (owner decision) |
 
-## 7. Code framing (v2 frame, `integrations/core/codes.ts`, mirrored on the site)
+Not built here (other repo or deploy config): the site (code kinds in `src/lib/live/codes.ts`, a LiveBank panel, a
+docs page, a `drive-live-localnet.mjs` check), and the Vercel cron entry that calls `sweep()`.
 
-Both codes use the v2 frame `version 2 | kind | 4-byte tag | body | 4-byte checksum`, in base58 (letters and digits only). The network tag is `sha256("h081-handover|<cluster>|<rep_registry id>|<USDG mint>")[0..4]`. A code for another cluster, program or asset is refused with its own message.
+## 7. Codes (v2 frame, base58)
 
-| Kind | Name | Prefix | Body |
-|---|---|---|---|
-| 7 | reputation proof code | `h081-rep:` | ver u8=1 \| proof 256 \| repRoot 32 \| presNullifier 32 \| audience 32 \| nonce 32 \| expiry u64 \| bindTo 32 \| minLoans u8 \| minVolume u64 \| minLenders u8 \| minSpanDays u16 = 486 B (about 670 chars) |
-| 8 | reputation request code | `h081-rep-ask:` | ver u8=1 \| audience 32 \| nonce 32 \| expiry u64 \| bindTo 32 (0 = unbound) \| minLoans u8 \| minVolume u64 \| minLenders u8 \| minSpanDays u16 \| label len u8 + UTF-8 ≤ 32 |
+Network tag over `(cluster, rep_registry id, USDG mint)`; the asset is implicit (the tag's mint).
 
-- `asset` is not in the body. It is the context tag's mint, and the verifier rebuilds it as `fieldOf(USDG)`.
-- Add to `CODE_KIND` `{ reputation: 7, repRequest: 8 }`, to `KIND_NAME`, and to `PREFIX_KIND`. A pasted code of the wrong kind gets the existing "this is a … code" message.
+| Kind | Prefix | Body |
+|---|---|---|
+| 7 | `h081-rep:` | ver 1, treeVersion u16, proof 256, repRoot, presNullifier, audience, nonce (32 each), expiry u64, bindTo 32, minLoans u8, minVolume u64, minLenders u8, minSpanDays u16, minMonths u8, monthFloor u64: 448 B |
+| 8 | `h081-rep-ask:` | ver 1, audience, nonce, expiry u64, bindTo (0 = none), thresholds (21 B), label len u8 + UTF-8 ≤ 32 |
+| 9 | `h081-rep-sig:` | session pub 32, ed25519 signature 64 over `sha256("h081-rep-present|" ‖ audience ‖ nonce ‖ presNullifier)` |
 
-## 8. Test plan
+All three are in `CODE_KIND`, `KIND_NAME` and `PREFIX_KIND`; a pasted code of the wrong kind gets the existing "this is a
+… code" message.
 
-### Unit (no validator)
+## 8. Tests (what ran on this branch)
 
-- **`test/circuits/reputation.test.ts`** (witness only, `Prover.witness`, `fresh()`/`pledged()`-style helpers).
-  - Must accept: 1, 3 and 16 loans; a root-key leaf; mixed k values; thresholds exactly at the bound.
-  - Must reject:
-    - the same leaf twice;
-    - an unsorted pair;
-    - a leaf from another master;
-    - a leaf not in the tree, or a wrong path;
-    - an asset mismatch;
-    - count, volume, lender or span below the bound;
-    - a selector on a disabled slot;
-    - an enabled gap (1, 0, 1);
-    - a wrong presNullifier;
-    - principal ≥ 2^64, keyIndex ≥ 2^32, lenderF ≥ 2^160;
-    - zero enabled slots;
-    - `masterSk = 0`.
-- **`test/reputation.test.ts`**:
-  - TS `repLeaf` and `loanSk` equal the circuit outputs (fixture);
-  - `selectLoans` edge cases;
-  - ladder snapping;
-  - kind 7/8 round trip, a flipped checksum character, the wrong network tag, a wrong-kind message;
-  - verifier rejects: expired, wrong audience, wrong nonce, bindTo mismatch, unknown root, tampered public input, tampered proof, thresholds below the request.
-- **Integrations:** schemas, EXAMPLE_INPUTS validate, MCP tool list, agent-kit action registry, server routes, CLI parsing, openapi snapshot.
-- **Rust (WSL, `cargo test`):**
-  - Slot offsets equal `stream_loan::state::Slot` (dev-dependency);
-  - Rust leaf hash equals the TS fixture;
-  - zeros equal stipend_pool's;
-  - account sizes are 8,848 and 53;
-  - `groth16.rs` is identical to stipend_pool's.
+- Circuit, witness only (`test/circuits/reputation.test.ts`, 18): accepts 1, 3 and 16 loans, mixed keys, every bound
+  exactly met; rejects one over each bound, a duplicate, an unsorted pair, another master's leaf, a bad leaf or path,
+  an asset mismatch, a selector on a disabled slot, an enabled gap, padding that tries to add lenders or volume, zero
+  slots, a wrong or other-audience nullifier, every out-of-range private and public value, `masterSk = 0`.
+- Rust (`cargo test -p rep_registry`, 9): Slot offsets against stream_loan's struct, ids and seeds against
+  stream_loan's, leaf equals the SDK fixture, zeros and `groth16.rs` identical to stipend_pool's, account sizes, tree
+  vs a naive rebuild, public-input range checks, bitmap pages.
+- Bank level with real dev-setup proofs over a mocked chain (`test/integrations/reputation.test.ts`, 12): ladder,
+  selection, audiences, codes 7/8/9 (round trip, pasted noise, checksum, network, wrong kind), request → prove → verify,
+  request-bound and session-bound presentation, and refusals: no presentation, wrong signer, other audience, other nonce,
+  weaker claim, bearer, expired, too long-lived, unknown root, tampered input, tampered proof, the probing cap, another
+  account. A test found and fixed a real bug (a decoded request spread into the code overwrote the session binding).
+- Localnet (`npm run test:solana:rep`, rpc 8899, 14): initialize (authority only, once; version 1 needs version 0
+  full); attests from a third-party payer, bitmap pages, double attest; refuses unfunded, partly repaid, slashed, tiny,
+  fake owner, zero key, mismatched ref, closed slot, a look-alike Subrogation and a wrong slot; leaf list rebuild,
+  snapshot round trip, doctored snapshot refused; own-loan discovery per master and asset; on-chain verify (CU above),
+  tampered inputs and proof, out-of-width thresholds, expired, more than a day, unknown root; master B cannot use A's
+  leaf; the relayer attests with only its hot wallet as signer, refuses below its floor, twice, unfunded, closed and
+  malformed, its sweep attests the rest, and its leaf list is accepted by a client.
+  Slots are fixture accounts loaded with `--account-dir` at their real PDAs: real stream proofs would need the pool's
+  ceremony proving keys, which this work does not use. So the "bank borrower auto-attests / lendClose attests first"
+  flow is covered by unit tests with a mocked chain, not end to end.
+- Integrations: schemas, MCP, plugin, agent CLI, OpenAPI route list, relayer routes and config, a drift test between
+  the Rust source and the SDK (ids, error table, sizes, public-input order).
 
-### Localnet (new suite `rep`, private validator on rpc 9299; never 8899/8900)
+## 9. Soundness and economics (review findings and how each was resolved)
 
-The suite deploys localnet stipend_pool, stream_loan, the `fast` safety_pool and rep_registry, then:
+### 9.1 Blocking findings
 
-1. Lends three loans with two lenders under loan keys k = 0, 1, 2. Each is funded, repaid through pledged spends, then sync, then attest. Check the marker, the leaf and that the root is in the ring.
-2. Second attest of the same loan fails. Attest of an unfunded slot, a partly repaid slot, or a fake account owned by another program fails. After a fast-pool slash (Subrogation exists), attest fails. After `close_slot`, attest fails.
-3. Prove `minLoans 3, minVolume = sum, minLenders 2, span 0`. Verify off-chain and on-chain (`verify_reputation`, CU recorded). Expired, unknown root and tampered inputs fail.
-4. Attack: master B tries to include master A's leaf. The witness fails.
-5. `bank.lendClose` on a repaid, unattested loan attests first. The bank borrower auto-attests on repayment.
+| Finding | Resolution |
+|---|---|
+| Reputation can be gifted or bought without handing over a key (stream proof accepted from the owner, agent key chosen freely) | **Claim dropped** (section 0, item 3). Per-loan keys make this inherent: even binding the stream prover to the agent key would not help, since `loanSk(k)` can be handed over without revealing `masterSk`. A real fix needs the stream proof to show the agent key derives from the pledging account (circuit + stream_loan change; owner decision). |
+| "Can't be faked" means "can be bought for 0.25%" | Stated plainly (section 0, 9.2). Added a time-and-money signal: distinct 30-day funding periods with a per-loan floor. Duration-weighted volume is not possible without a repayment time in the Slot (stream_loan change; owner decision). |
+| The score only goes up; bust-out is free | Every verifier surface says the proof is a lower bound and says nothing about defaults. The leaf has an outcome input so a later version can attest defaults (outcome 0) and add a "keys 0..K-1 all present and repaid" mode without a new tree format. Not built. |
+| Borrower-signed attests link loans to the borrower | Attest never borrower-signed by default (relayer or lender); tested that the relayed attest's only signer is the hot wallet. Per-loan payout addresses are NOT built (section 10, item 2): a launch gate. |
+| The lender alone decides whether a loan ever counts | Accepted and documented (section 3.3); new lender code attests first; the ClosedSlot fix is an owner decision. |
+| Relayer drain | Bitmap instead of rent-bearing markers; relayer floor 10 USDG (config refuses < 1 USDG) and a rate-limit token per attest. |
+| Threshold range checks | In the circuit and again in `verify_reputation`; expiry capped at one day past the clock. Tested at both layers. |
+| Trusted setup | Labelled "beta: single-party trusted setup" in every result and description; mainnet build refuses a dev key; ceremony steps in section 11. |
 
-### Site
+### 9.2 What faking costs (honest)
 
-- `npm run test:full`.
-- New checks in `scripts/qa/drive-live-localnet.mjs`: a kind 7/8 paste check, and a reputation panel flow on the private validator.
+The only per-loan costs of a wash loan are the 0.25% origination fee, transaction fees and slot rent (refunded on
+close); capital can be recycled. 1M USDG of volume costs about 2.5k USDG. Two 1-USDG loans a year apart give a 365-day
+span for about 0.005 USDG, so span alone is weak. `minMonths` with a meaningful `monthFloor` (for example 12 periods of
+at least 1,000 USDG) costs 12 × 2.5 USDG and, unlike the rest, a year of calendar time that cannot be compressed; it can
+still be prepared in advance. `minLenders` costs one wallet per lender. Verifiers should ask for periods with a floor
+plus volume, and treat the result as a pricing input.
 
-## 9. Privacy analysis (honest)
+### 9.3 Improvements taken
 
-### Hidden from the verifier
+Claims fixed (section 0); Subrogation PDA derived under `STREAM_LOAN_ID` and checked before emptiness; bound by default
+with a session-key signature, bearer codes refused; domain-separated `audienceOf`; no root-key loans; the probing cap
+enforced by the prover; versioned tree seeds; leaves from a snapshot checked against the chain, full-set fetch; measured
+constraints (with an N = 8 browser option); padding cannot add lenders or periods (tested); the backer interaction
+(cap a line at the backer's stake); `reputationStatus` warns about legacy-key loans; release-checklist line and offset
+test for stream_loan upgrades; rent model in section 14.
 
-- which loans;
-- the loan count and volume beyond the stated thresholds;
-- the lenders' identities;
-- the dates (beyond the stated span);
-- the agent's keys (`agentPk` is private);
-- the shielded account.
+## 10. Privacy (honest)
 
-The anonymity set is every attested loan in the asset.
+Hidden from the verifier: which loans, the exact count and volume, the lenders, the dates beyond the span and periods,
+the loan keys, the account.
 
-### What leaks, and the mitigations
+The anonymity set is **not** "all attested loans". It is the set of account-sized clusters of loans that meet the
+stated thresholds, and clustering is possible:
 
-1. **Public loan data.** Every Slot is public: lender, principal, `payout_to`, `agent_pk`, `funded_at`. The RepMarker publishes `loan_ref` and its leaf. The proof hides which leaves are used, but the set of repaid loans is public, as it is today.
-2. **`payout_to` links loans.** `bank.borrow` pays the principal to the agent wallet's public ATA, so all of an agent's loans are linked through `payout_to` whatever the agent keys are.
-   - If the presenter's wallet (or `bindTo`) is that wallet, a verifier can list its Slots and estimate the score without the proof.
-   - **Mitigations:**
-     - `bindTo` should be a fresh session key;
-     - the owner decides on per-loan payout addresses (section 12);
-     - per-loan loan keys already stop `agent_pk` linking.
-3. **Per-audience linkability.** `presNullifier` is stable per audience, so the same audience recognises the same reputation each time; this is intended. Different audiences can't link two presentations through it. Audiences that collude can still link presentations by timing or by the thresholds asked.
-4. **Threshold probing.** One audience asking for many thresholds can binary-search the volume. The SDK ladder (section 5.2) caps this at a handful of buckets. The SDK can also refuse more than M proofs per audience per day (owner decision).
-5. **Root timing.** `repRoot` dates the proof to after a given attest. It is minor.
-6. **Lender view.** A lender knows the `agent_pk` of its own loan, but the proof never shows `agentPk`, so the lender can't tell its loan was counted.
-7. **Wash lending.** The proof is sound about funded and repaid loans, but it can't tell an independent lender from a second wallet of the agent.
-   - The cost of faking volume X is the 0.25% origination fee (0.0025·X to the treasury), plus the capital tied up, plus about 0.0009 SOL rent per loan.
-   - `minLenders` raises the cost only slightly, because wallets are free.
-   - **`minSpanDays` is the strong signal**: real calendar time can't be bought. Verifiers should ask for span plus volume, not count alone. Docs must say this plainly.
-8. **Direct-transfer repayment.** Anyone can send USDG to the slot inbox and `sync` will credit it. That is still real money repaid, so it counts.
-9. **Proof rental.** An agent can prove on behalf of a buyer (with the buyer's `bindTo`) without giving up `masterSk`. Cryptography can't stop this. The nullifier lets each audience enforce "one reputation, one account".
-10. **Legacy loans don't count.** Loans under the HMAC sub-accounts, or closed before `rep_registry` exists, have no attestable leaf. `reputationStatus.legacy` reports them, and reputation starts at launch.
+1. **Public data.** Slots (lender, principal, payout account, agent key, funding time) and the attested leaves are
+   public. The proof hides which leaves it uses; the set of repaid loans is public, as it is today.
+2. **`payout_to` links all of an agent's loans** (the principal goes to the agent wallet's public token account). A
+   verifier that knows the thresholds can list the clusters that meet them, often just one at high thresholds:
+   deanonymisation without breaking the proof. **Launch gate (not built):** per-loan payout addresses (a fresh owner per
+   loan, swept into the pool through a relayed deposit) for every loan that counts. Until then `reputationStatus`
+   warns, and `bindTo` must never be the agent wallet.
+3. **Signer and fee payer** of the attest: solved for H081 clients (relayer or lender), not for third-party attesters.
+4. **Per-audience linkability** by `presNullifier`, by design. Colluding audiences can still intersect results by
+   timing and thresholds.
+5. **Threshold probing**: the ladder plus at most 4 distinct sets per audience per day (prover side).
+6. **Root timing**: the root dates the proof to after a given attest. Minor.
+7. **Proof rental**: an agent can prove for a buyer with the buyer's `bindTo`. Cryptography cannot stop it; the
+   nullifier gives each audience "one reputation per account".
+8. **Legacy loans** (HMAC sub-accounts, or closed before rep_registry exists) never count.
 
-## 10. Trusted setup
+## 11. Trusted setup
 
-- **Dev and test:**
-  - `node scripts/build-circuits.mjs reputation`;
-  - `node scripts/setup-circuits.mjs reputation` (one throwaway contribution on a dev pot17, as CI does);
-  - add `reputation` to the CI build and setup steps.
-- **VK for the program:** a NEW `scripts/gen-rep-vk.mjs` writes `solana/programs/rep_registry/src/generated/vk.rs` only, with `--check` as a deploy pre-flight. `scripts/gen-solana-vk.mjs` and `stipend_pool/src/generated/vk.rs` are untouched. Never run `npm run solana:vk` after a dev setup.
-- **Production (owner):**
-  - `scripts/ceremony.mjs init/contribute/beacon/verify/export reputation`, per docs/CEREMONY.md: 3 team contributions plus a Solana-blockhash beacon on the Hermez pot17 (or pot18, if N needs it);
-  - add `reputation` to the ceremony's PRODUCTION list;
-  - publish `docs/ceremony/reputation/{ceremony.json, attestation.json, reputation.vkey.json}`.
+- **Dev / CI:** `node scripts/build-circuits.mjs reputation` then `node scripts/setup-circuits.mjs reputation` (one
+  throwaway contribution on a throwaway pot17, generated as CI does). `setup-circuits` writes no Solidity verifier for
+  reputation. `node scripts/gen-rep-vk.mjs` writes only `rep_registry/src/generated/vk.rs` (with `REPUTATION_VK_IS_DEV
+  = true` and the vkey sha256); `--check` compares. **Never run `npm run solana:vk` after a dev setup** (it would
+  overwrite the pool's ceremony keys).
+- **Production (owner):** a separate ceremony run for reputation only:
+  `node scripts/ceremony.mjs init --dir <D> --ptau <pot17> --circuits reputation`, contributions (including outside
+  contributors, not only machines of the team), `beacon`, `verify`, `export` (without `--install`, which is for the six
+  pool circuits), then `node scripts/gen-rep-vk.mjs --ceremony <D>/.../reputation.vkey.json` (sets `IS_DEV = false`),
+  pin the wasm/zkey/vkey sha256 in `integrations/core/constants.ts CIRCUIT_HASHES.reputation`, and publish the
+  transcript hash next to the vkey hash. Until a multi-party ceremony with outside contributors and a public
+  transcript, whoever ran the setup can forge any reputation; keep the "beta, single-party" label.
 
-## 11. Rollout and upgrade notes
+## 12. Rollout (owner order; nothing here was done)
 
-1. The four live programs are not changed: stipend_pool, stream_loan, safety_pool and capacity_stake keep every layout and instruction.
-2. **New program deploy** (owner):
-   - keypair;
-   - build with `--features mainnet`;
-   - `solana program deploy` with about 25% max-len headroom;
-   - upgrade authority = deployer/Squads;
-   - never `--final`;
-   - `initialize` creates RepTree.
-3. **SDK:** core, agent 0.3.0, mcp/plugin 0.4.0.
-   - Borrowing switches to Poseidon loan keys (minor bump).
-   - HMAC sub-accounts are still scanned.
-   - Bank cache gains `loanKeys: number[]`.
-   - Recovery uses the gap-limit scan.
-4. Relayer gets the attest cron and the leaves/roots endpoints. Stage first with `--skip-domain`, probe, then promote (see the relayer deploy notes).
-5. The site mirrors codes 7/8 and the panel. The circuit hashes are pinned.
-6. Order:
-   1. ceremony;
-   2. program deploy and initialize;
-   3. relayer cron;
-   4. npm packages;
-   5. site.
+No existing program changes. Launch gates first: ceremony (section 11), per-loan payout addresses (section 10.2), site
+and house-fleet lenders attesting before close.
 
-   Loans repaid between steps 3 and 4 get attested by the cron. Loans taken before step 4 under HMAC keys never count.
+1. Ceremony; pin hashes; regenerate `vk.rs`.
+2. Program: build with `--features mainnet` (patch `declare_id`), deploy with headroom, keep the upgrade authority
+   (never `--final`), `initialize(0)`.
+3. Relayer: `RELAYER_REP_PROGRAM_ID`, the sweep cron; stage with `--skip-domain`, probe, promote.
+4. npm: agent 0.3.0, mcp/plugin 0.4.0 (borrow switches to loan keys; HMAC sub-accounts still scanned; old packages keep
+   borrowing under keys that never count and `reputationStatus` in the new ones says so).
+5. Site: code kinds, panel, docs, `drive-live-localnet` check.
 
-## 12. Owner decisions
+## 13. Owner decisions
 
-1. Architecture: a new `rep_registry` program (recommended; about 1 SOL locked) or Alternative B (stream_loan plus stipend_pool upgrades; about 0.2 SOL extend, but it touches two zero-slack money programs).
-2. Whether loans that were slashed and later fully recovered count. The default is no: attest requires that no Subrogation exists.
-3. Who pays attest rent for the cron sweep: the relayer hot wallet (platform fees only; creator fees never touched) or the borrower only.
-4. N = 16 on pot17 (if the measurement fits) or a larger N on pot18.
-5. `MIN_PRINCIPAL` (proposed 1 USDG).
-6. Threshold ladder values and a per-audience daily proof cap.
-7. Per-loan payout addresses in `bank.borrow` for privacy. Today the principal lands in the agent wallet's public ATA and links all its loans.
-8. The production ceremony round for `reputation`, and its contributors.
-9. Whether to run a free relayer `POST /v1/rep/verify`. Remote proving is never offered.
+1. Architecture: `rep_registry` (built) or Alternative B.
+2. Whether slashed-then-recovered loans count (default no).
+3. Relayer floor and who pays attests (hot wallet, platform fees only; creator fees never touched).
+4. N = 16 only, or also an N = 8 browser key.
+5. Ladder values and the per-audience cap.
+6. Per-loan payout addresses (a launch gate here, not an option).
+7. The ceremony and its contributors.
+8. A free relayer verify route.
+9. stream_loan changes that would close the remaining gaps: keep `agent_pk`/`funded_at` in `ClosedSlot` (close race);
+   record a repayment time (duration-weighted volume); bind the stream prover to the pledging account (gifting).
+10. Default attests (outcome 0) and the contiguous-key "no hidden defaults on this account" mode.
 
-## 13. Cost (mainnet, estimates)
+## 14. Cost (mainnet, estimates at 6,960 lamports per byte)
 
 | Item | Estimate |
 |---|---|
-| `rep_registry` ProgramData | about 140 KB code + 25% headroom ≈ 175 KB × ~5,080 lamports/B ≈ **0.9 SOL** (locked; back only through `solana program close`) |
-| RepTree | 8,848 B → **≈ 0.045 SOL** |
-| Per attested loan | marker 53 B → about 0.0009 SOL rent + ~5,000 lamports fee (payer: attester) |
-| `verify_reputation` | ~130k CU, the base fee only; it creates no account |
-| Total one-time | **≈ 1.0 SOL** (+ ≈ 0.001 SOL per attested loan) |
+| ProgramData, 168,672 B as built | ≈ 1.17 SOL; ≈ 1.47 SOL with 25% headroom (locked; back only through program close) |
+| RepTree (8,856 B) | ≈ 0.062 SOL, once per tree version |
+| RepBits page (1,037 B) | ≈ 0.008 SOL per 8,192 loan refs |
+| Per attested loan | one transaction fee (≈ 5,000 lamports + priority), paid by the attester; no per-loan rent |
+| `verify_reputation` | 146.5k CU, base fee only (simulation is free) |
+| Total one-time | ≈ 1.25-1.55 SOL |
