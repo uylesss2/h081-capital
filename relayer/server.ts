@@ -6,6 +6,7 @@
 //   GET  /v1/x402/catalog      the paid services (free)
 //   POST /v1/x402/solana/relay-priority, POST /v1/x402/solana/preflight, GET /v1/x402/loans/market,
 //   POST /v1/x402/prove/disclose   paid (x402): 402 + PAYMENT-REQUIRED without a PAYMENT-SIGNATURE header
+//   GET  /v1/rep/leaves, GET /v1/rep/roots, POST /v1/rep/attest { loanRef }   private reputation (rep.ts); 503 rep_disabled when off
 // Errors: { error: { code, message } } with 400 (malformed), 402 (fee not acceptable, or payment required /
 // invalid / not settled), 404, 405, 409 (stale or already spent, payment replayed), 413 (body too large),
 // 422 (simulation failed), 429 (rate limited, Retry-After), 503 (chain disabled, busy, x402_disabled,
@@ -17,6 +18,7 @@ import { fail, json, readBody } from './http.js';
 import { RateLimiter } from './ratelimit.js';
 import { X402_CATALOG_PATH, X402_ROUTES, type X402ServiceId, catalogView } from './x402/catalog.js';
 import type { X402Seller } from './x402/seller.js';
+import type { RepRelayer } from './rep.js';
 import { SOLANA_MAINNET_NETWORK } from './x402/types.js';
 
 export interface ChainBackend {
@@ -40,6 +42,8 @@ export interface RelayerServerOptions {
   x402?: X402Seller;
   /** the public origin of this relayer (catalog URLs when x402 is disabled); default https://api.h081.xyz */
   publicBase?: string;
+  /** private reputation (rep_registry); undefined = the /v1/rep routes answer 503 rep_disabled */
+  rep?: Pick<RepRelayer, 'leaves' | 'roots' | 'attest' | 'info'>;
 }
 
 export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
@@ -80,6 +84,7 @@ export function createRelayerHandler(opts: RelayerServerOptions): RequestListene
         return json(res, 200, {
           ...(opts.evm ? { evm: opts.evm.info() } : {}), ...(opts.solana ? { solana: opts.solana.info() } : {}),
           x402: { enabled: !!opts.x402, catalog: `${opts.x402?.opts.resourceBase ?? publicBase}${X402_CATALOG_PATH}` },
+          rep: opts.rep ? { enabled: true, ...opts.rep.info() } : { enabled: false },
         });
       }
       if (path === X402_CATALOG_PATH) {
@@ -103,6 +108,25 @@ export function createRelayerHandler(opts: RelayerServerOptions): RequestListene
           if (wait > 0) return fail(res, new RelayError(429, 'rate_limited', `retry in ${Math.ceil(wait / 1000)} s`), { 'retry-after': String(Math.ceil(wait / 1000)) });
         }
         return opts.x402.handle(req, res, service, url, key);
+      }
+      if (path === '/v1/rep/leaves' || path === '/v1/rep/roots' || path === '/v1/rep/attest') {
+        const want = path === '/v1/rep/attest' ? 'POST' : 'GET';
+        if (req.method !== want) return fail(res, new RelayError(405, 'method', `${want} only`), { allow: want });
+        if (!opts.rep) return fail(res, new RelayError(503, 'rep_disabled', 'private reputation is not enabled on this relayer'));
+        if (path === '/v1/rep/leaves') return json(res, 200, await opts.rep.leaves());
+        if (path === '/v1/rep/roots') return json(res, 200, await opts.rep.roots());
+        const wait = opts.limiter.take(clientKey(req, !!opts.trustProxy));
+        if (wait > 0) return fail(res, new RelayError(429, 'rate_limited', `retry in ${Math.ceil(wait / 1000)} s`), { 'retry-after': String(Math.ceil(wait / 1000)) });
+        const body = await readBody(req, 4096);
+        try {
+          const out = await opts.rep.attest(body);
+          opts.log?.(`rep attest ok ${JSON.stringify(out)}`);
+          return json(res, 200, out);
+        } catch (e) {
+          const err = toRelayError(e);
+          opts.log?.(`rep attest ${err.status} ${err.code} ${err.message.slice(0, 200)}`);
+          return fail(res, err);
+        }
       }
       const chain = path === '/v1/evm/relay' ? 'evm' : path === '/v1/solana/relay' ? 'solana' : undefined;
       if (!chain) return fail(res, new RelayError(404, 'not_found', `${req.method} ${path} is not a route`));

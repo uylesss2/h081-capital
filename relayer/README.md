@@ -46,6 +46,8 @@ Configuration comes from environment variables set by the operator (nothing read
 | `RELAYER_SOLANA_CAPACITY_MINT` | enables capacity_stake enforcement for this staked mint (H081) |
 | `RELAYER_SOLANA_CAPACITY_ASSETS` | required with the above: comma-separated 6-decimal (USDG) mints whose amounts count against capacity (other decimals are refused at startup) |
 | `RELAYER_SOLANA_CAPACITY_FREE_TIER`, `RELAYER_SOLANA_CAPACITY_PROGRAM_ID` | anonymous free tier in base units (default 100 USDG); capacity_stake program id (default: localnet id; required, and never the localnet id, when `RELAYER_SOLANA_PROGRAM_ID` is set) |
+| `RELAYER_REP_PROGRAM_ID` | enables private reputation (rep_registry): `GET /v1/rep/leaves` (the leaf list, rebuilt and checked against the on-chain root before it is served), `GET /v1/rep/roots`, `POST /v1/rep/attest {loanRef}` (the hot wallet signs and pays, so the borrower never appears next to its loan) and `RepRelayer.sweep()` for a cron. There is no proving route: a reputation witness holds the account secret. Not deployed on mainnet yet |
+| `RELAYER_REP_LOAN_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` | the stream_loan program whose slots are attested (default mainnet 8JBd7…); the smallest principal the hot wallet pays to attest, base units (default 10 USDG; at least 1 USDG). The floor keeps wash loans from draining the hot wallet: each attest costs it a fee it never gets back |
 | `RELAYER_EVM_RPC`, `RELAYER_EVM_POOL`, `RELAYER_EVM_KEY` | enables EVM relaying (key: 0x hex) |
 | `RELAYER_EVM_MIN_FEES` | `asset=amount,...` minimum fee per ERC-20 |
 | `RELAYER_EVM_MAX_GAS` | refuse calls estimated above this (default 8,000,000) |

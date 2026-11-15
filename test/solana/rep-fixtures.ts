@@ -26,7 +26,7 @@ export const MASTER_B = field('B');
 export const U = 1_000_000n;
 const DAY = 86_400n;
 
-export type FixtureKind = 'good' | 'unfunded' | 'partial' | 'slashed' | 'tiny' | 'fakeOwner' | 'zeroKey' | 'refMismatch';
+export type FixtureKind = 'good' | 'relayer' | 'sweep' | 'unfunded' | 'partial' | 'slashed' | 'tiny' | 'fakeOwner' | 'zeroKey' | 'refMismatch';
 export interface FixtureLoan {
   loanRef: bigint; kind: FixtureKind; master?: bigint; keyIndex?: number; principal: bigint; repaid: bigint; lender: PublicKey;
   asset: PublicKey; fundedAt: bigint;
@@ -53,6 +53,10 @@ export function fixtureLoans(nowSec: bigint): FixtureLoan[] {
     // a second bitmap page, and a loan in another asset under A
     L(8200n, 'good', { master: MASTER_A, keyIndex: 9, principal: 5n * U, repaid: 5n * U, lender: LENDER_3, fundedAt: d0 + 150n * DAY }),
     L(13n, 'good', { master: MASTER_A, keyIndex: 10, principal: 7n * U, repaid: 7n * U, asset: OTHER_MINT, fundedAt: d0 + 20n * DAY }),
+    // left for the relayer: one it attests on request, one its sweep finds, one below its 10 USDG floor
+    L(14n, 'relayer', { master: MASTER_A, keyIndex: 11, principal: 12n * U, repaid: 12n * U, lender: LENDER_2, fundedAt: d0 + 100n * DAY }),
+    L(15n, 'sweep', { master: MASTER_B, keyIndex: 1, principal: 20n * U, repaid: 20n * U, lender: LENDER_3, fundedAt: d0 + 110n * DAY }),
+    L(16n, 'sweep', { master: MASTER_B, keyIndex: 2, principal: 3n * U, repaid: 3n * U, lender: LENDER_3, fundedAt: d0 + 111n * DAY }),
   ];
 }
 

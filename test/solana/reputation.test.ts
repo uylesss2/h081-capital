@@ -20,6 +20,9 @@ import {
 } from '../../src/solana/reputation.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 import { CLOSED_REF, MASTER_A, MASTER_B, OTHER_MINT, U, USDG, fixtureLoans } from './rep-fixtures.js';
+import { RepRelayer } from '../../relayer/rep.js';
+import { RateLimiter } from '../../relayer/ratelimit.js';
+import { createRelayerServer } from '../../relayer/server.js';
 
 const RPC = process.env.STIPEND_REP_RPC ?? 'http://127.0.0.1:8899';
 const connection = new Connection(RPC, 'confirmed');
@@ -107,7 +110,7 @@ describe('rep_registry: attest', () => {
     const want: Record<string, RegExp> = {
       unfunded: /NotFunded/, partial: /NotRepaid/, slashed: /Slashed/, tiny: /TooSmall/, fakeOwner: /NotStreamLoanSlot/, zeroKey: /BadAgentKey/, refMismatch: /NotStreamLoanSlot/,
     };
-    for (const l of loans.filter((x) => x.kind !== 'good')) await expect(attest(l.loanRef)).rejects.toThrow(want[l.kind]);
+    for (const l of loans.filter((x) => want[x.kind])) await expect(attest(l.loanRef)).rejects.toThrow(want[l.kind]);
     // a slot closed before anyone attested it has no account: it can never count
     await expect(attest(CLOSED_REF)).rejects.toThrow(/NotStreamLoanSlot/);
     for (const r of [5n, 6n, 7n, 8n, 9n, 10n, 11n, 12n]) expect(await isAttested(connection, r)).toBe(false);
@@ -205,4 +208,46 @@ describe('rep_registry: verify_reputation (dev setup keys)', () => {
     expect(CU.verify_reputation).toBeLessThan(400_000);
   });
 });
+
+describe('relayer: attest for borrowers, the sweep, and the leaf snapshot (rpc 8899)', () => {
+  it('attests on request from its own wallet, refuses below its floor or twice, sweeps the rest, and serves a leaf list clients accept', async () => {
+    const hot = Keypair.generate();
+    await fund(hot.publicKey, 2);
+    const rep = new RepRelayer({ connection, payer: hot, repProgramId: LOCALNET_REP_PROGRAM_ID, loanProgramId: LOCALNET_LOAN_PROGRAM_ID, minPrincipal: 10n * U, cacheMs: 0 });
+    const server = createRelayerServer({ solana: { info: () => ({}), relay: async () => ({}) }, limiter: new RateLimiter({ perMinute: 60, burst: 10 }), rep });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+      const j = async (r: Response | Promise<Response>): Promise<any> => (await r).json();
+      const post = (loanRef: string) => fetch(`${url}/v1/rep/attest`, { method: 'POST', body: JSON.stringify({ loanRef }) });
+      const r14 = await post('14');
+      expect(r14.status).toBe(200);
+      const sig = (await j(r14)).signature as string;
+      // the borrower's wallet is nowhere in the transaction: only the relayer's hot wallet signs and pays
+      const tx = await connection.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      expect(tx!.transaction.message.staticAccountKeys[0].equals(hot.publicKey)).toBe(true);
+      expect(tx!.transaction.signatures).toHaveLength(1);
+      expect((await post('14')).status).toBe(409);
+      expect((await j(post('16'))).error.code).toBe('below_floor');
+      expect((await j(post('5'))).error.code).toBe('not_funded');
+      expect((await j(post('11'))).error.code).toBe('no_slot');
+      expect((await post('x')).status).toBe(400);
+      // the sweep finds 15 (20 USDG) and skips 16 (below the floor) and everything already attested
+      const swept = await rep.sweep();
+      expect(swept.attested).toEqual(['15']);
+      expect(await isAttested(connection, 16n)).toBe(false);
+      expect((await rep.sweep()).attested).toEqual([]);
+      // the served leaf list rebuilds the on-chain root, and a bank-side client accepts it as a snapshot
+      const snap = await j(fetch(`${url}/v1/rep/leaves`));
+      const checked = await fetchRepLeaves(connection, { snapshot: snap });
+      expect(checked.tree.root).toBe(checked.onChain.root);
+      expect(myRepLoans(checked.events, MASTER_A, { assetF }).map((l) => l.loanRef)).toContain(14n);
+      const roots = await j(fetch(`${url}/v1/rep/roots`));
+      expect(BigInt(roots.root)).toBe(checked.onChain.root);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }, 300_000);
+});
+
 

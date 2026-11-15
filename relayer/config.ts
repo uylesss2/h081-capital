@@ -82,6 +82,8 @@ export interface RelayerConfig {
     circuitsDir: string;
     /** pinned sha256 per relay circuit's verifying key (RELAYER_VKEY_SHA256_<NAME>) */
     vkeySha256: Partial<Record<RelayCircuit, string>>;
+    /** private reputation (rep_registry): leaves/roots routes, relayed attests and the sweep; absent = off */
+    rep?: { programId: string; loanProgramId: string; minPrincipal: bigint };
   };
   x402?: X402Config;
 }
@@ -216,11 +218,27 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       stagingLamports: int(env, 'RELAYER_SOLANA_STAGING_LAMPORTS', DEFAULT_STAGING_LAMPORTS, 0),
       circuitsDir: env.RELAYER_SOLANA_CIRCUITS_DIR || env.RELAYER_X402_CIRCUITS_DIR || DEFAULT_CIRCUITS_DIR,
       vkeySha256,
+      rep: repConfig(env),
     };
   }
   if (!cfg.evm && !cfg.solana) throw new ConfigError('configure at least one chain: RELAYER_EVM_RPC and/or RELAYER_SOLANA_RPC');
   cfg.x402 = loadX402Config(env, cfg);
   return cfg;
+}
+
+/** RELAYER_REP_PROGRAM_ID turns private reputation on; RELAYER_REP_LOAN_PROGRAM_ID (default: mainnet stream_loan) and
+ * RELAYER_REP_MIN_PRINCIPAL (default 10 USDG in base units: the floor below which the hot wallet does not pay to attest). */
+function repConfig(env: Record<string, string | undefined>): NonNullable<RelayerConfig['solana']>['rep'] {
+  const id = env.RELAYER_REP_PROGRAM_ID?.trim();
+  if (!id) return undefined;
+  if (!isKey(id)) throw new ConfigError('RELAYER_REP_PROGRAM_ID is not a public key');
+  const loan = env.RELAYER_REP_LOAN_PROGRAM_ID?.trim() || MAINNET_LOAN_PROGRAM_ID;
+  if (!isKey(loan)) throw new ConfigError('RELAYER_REP_LOAN_PROGRAM_ID is not a public key');
+  const floor = env.RELAYER_REP_MIN_PRINCIPAL?.trim();
+  if (floor && !/^\d+$/.test(floor)) throw new ConfigError('RELAYER_REP_MIN_PRINCIPAL must be an amount in base units');
+  const minPrincipal = floor ? BigInt(floor) : 10_000_000n;
+  if (minPrincipal < 1_000_000n) throw new ConfigError('RELAYER_REP_MIN_PRINCIPAL below 1 USDG: rep_registry refuses such loans anyway, and a low floor lets wash loans drain the hot wallet');
+  return { programId: new PublicKey(id).toBase58(), loanProgramId: new PublicKey(loan).toBase58(), minPrincipal };
 }
 
 const list = (v: string | undefined) => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);

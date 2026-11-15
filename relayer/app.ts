@@ -12,6 +12,7 @@ import { EvmRelayer } from './evm.js';
 import { RateLimiter } from './ratelimit.js';
 import type { RelayerServerOptions } from './server.js';
 import { SolanaRelayer, proofVerifierFromConfig, solanaRelayerOptions } from './solana.js';
+import { RepRelayer } from './rep.js';
 import type { X402Asset } from './x402/catalog.js';
 import { CdpFacilitator } from './x402/facilitator.js';
 import { LoanMarketReader } from './x402/loans.js';
@@ -24,6 +25,7 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
   let evm: EvmRelayer | undefined;
   let solana: SolanaRelayer | undefined;
   let x402: X402Seller | undefined;
+  let rep: RepRelayer | undefined;
   if (cfg.evm) {
     const signer = new EthersWallet(cfg.evm.key, new JsonRpcProvider(cfg.evm.rpc));
     evm = await new EvmRelayer({ signer, pool: cfg.evm.pool, minFees: cfg.evm.minFees, allowUnpaid: cfg.allowUnpaid, maxGas: cfg.evm.maxGas }).init();
@@ -51,6 +53,10 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
     log(`solana: relayer ${payer.publicKey.toBase58()} for program ${solana.programId.toBase58()}, `
       + `fee ${solana.feeBps} bps to treasury ${solana.feeOwner.toBase58()}, ${cap}${note}, create-account surcharge ${surcharges}`);
     log(`solana: verifying keys from ${s.circuitsDir}: ${Object.entries(verifier.vkeySha256).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+    if (s.rep) {
+      rep = new RepRelayer({ connection, payer, repProgramId: new PublicKey(s.rep.programId), loanProgramId: new PublicKey(s.rep.loanProgramId), minPrincipal: s.rep.minPrincipal, log });
+      log(`rep: rep_registry ${s.rep.programId}, attests repaid loans of at least ${s.rep.minPrincipal} base units from ${payer.publicKey.toBase58()}; no proving endpoint`);
+    }
     if (cfg.x402) {
       // an x402-only problem never takes the free relay API down: a deliberate refusal (ConfigError) still
       // stops the relayer, anything else (RPC failure, missing payment account) leaves the seller off
@@ -64,7 +70,7 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
   }
   return {
     evm, solana, limiter: new RateLimiter({ perMinute: cfg.perMinute, burst: cfg.burst }), trustProxy: cfg.trustProxy,
-    corsOrigins: cfg.corsOrigins, log: (line) => log(`${new Date().toISOString()} ${line}`), x402, publicBase: cfg.x402?.resourceBase,
+    corsOrigins: cfg.corsOrigins, log: (line) => log(`${new Date().toISOString()} ${line}`), x402, publicBase: cfg.x402?.resourceBase, rep,
   };
 }
 
