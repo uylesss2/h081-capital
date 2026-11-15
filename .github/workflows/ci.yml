@@ -1,4 +1,4 @@
-# Builds the six circuits, runs the dev Groth16 setup, compiles the contracts and runs every test.
+# Builds the circuits (the six production ones and reputation), runs the dev Groth16 setup, compiles the contracts and runs every test.
 # The powers-of-tau file is not committed: it is generated with snarkjs on a cache miss, exactly as
 # scripts/setup-circuits.mjs expects it (circuits/ptau/pot17.ptau, phase 2 prepared).
 name: ci
