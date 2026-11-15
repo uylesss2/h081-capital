@@ -14,6 +14,10 @@ const win = process.platform === 'win32';
 
 const circom = join(root, 'node_modules', '.bin', win ? 'circom2.cmd' : 'circom2');
 const snarkjs = join(root, 'node_modules', '.bin', win ? 'snarkjs.cmd' : 'snarkjs');
+// Extra circom flags per circuit. The six production circuits keep the default (--O1) so their r1cs, and so the
+// ceremony keys, never change. reputation uses --O2 (linear constraints folded away): about 102k constraints
+// instead of 214k, which is what lets N = 16 loans fit pot17 (2^17 = 131,072).
+const EXTRA_FLAGS = { reputation: ['--O2'] };
 const files = readdirSync(srcDir).filter((f) => f.endsWith('.circom') && (only.length === 0 || only.includes(f.replace('.circom', ''))));
 
 for (const file of files) {
@@ -27,7 +31,7 @@ for (const file of files) {
 
   const t0 = Date.now();
   process.stdout.write(`compiling ${name} ... `);
-  execFileSync(circom, [file, '--r1cs', '--wasm', '--sym', '-l', '.'], { cwd: out, stdio: ['ignore', 'pipe', 'inherit'], shell: win });
+  execFileSync(circom, [file, '--r1cs', '--wasm', '--sym', ...(EXTRA_FLAGS[name] ?? []), '-l', '.'], { cwd: out, stdio: ['ignore', 'pipe', 'inherit'], shell: win });
   rmSync(join(out, 'lib'), { recursive: true, force: true });
   rmSync(join(out, 'circomlib'), { recursive: true, force: true });
   rmSync(join(out, file), { force: true });

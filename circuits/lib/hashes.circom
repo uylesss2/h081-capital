@@ -16,6 +16,10 @@ function DOM_TOTAL()  { return 9; }
 function DOM_RCPT()   { return 10; }
 function DOM_ADDR()   { return 11; }
 function DOM_LENDER() { return 12; }
+// Private reputation (circuits/main/reputation.circom, docs/REPUTATION-SPEC.md).
+function DOM_REP()     { return 13; }
+function DOM_REPNF()   { return 14; }
+function DOM_LOANKEY() { return 15; }
 
 // pk = Poseidon(DOM_PK, sk)
 template PublicKey() {

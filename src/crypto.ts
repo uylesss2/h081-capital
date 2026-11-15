@@ -13,6 +13,8 @@ export const BPS = 10000n;
 
 export const DOM = {
   PK: 1n, NK: 2n, NOTE: 3n, ALLOW: 4n, POLICY: 5n, NF: 6n, NFA: 7n, RHO: 8n, TOTAL: 9n, RCPT: 10n, ADDR: 11n, LENDER: 12n,
+  /** private reputation: leaf, presentation nullifier, loan-key derivation (circuits/main/reputation.circom) */
+  REP: 13n, REPNF: 14n, LOANKEY: 15n,
 } as const;
 
 type PoseidonFn = ((inputs: bigint[]) => Uint8Array) & { F: { toObject(x: Uint8Array): bigint } };
@@ -235,4 +237,37 @@ export function spendAllowance(a: Allowance, amount: bigint, now: bigint, enforc
     rho: nextRho(a.rho),
     pledgePaid: a.pledgePaid + lenderAmount,
   };
+}
+
+// ---------- private reputation (docs/REPUTATION-SPEC.md) ----------
+
+/** Loan key k of an account: loanSk = Poseidon(15, accountSk, k). Its public key is the loan's Slot.agent_pk. */
+export function loanSk(accountSk: bigint, k: number | bigint): bigint {
+  const i = BigInt(k);
+  if (i < 0n || i >= 1n << 32n) throw new Error('loan key index must be 0..2^32-1');
+  return poseidon([DOM.LOANKEY, accountSk, i]);
+}
+
+export function loanPk(accountSk: bigint, k: number | bigint): bigint {
+  return poseidon([DOM.PK, loanSk(accountSk, k)]);
+}
+
+/** The leaf rep_registry appends for one attested, fully repaid loan (outcome 1 = repaid). */
+export interface RepLeafFields {
+  agentPk: bigint;
+  loanRef: bigint;
+  principal: bigint;
+  assetF: bigint;
+  lenderF: bigint;
+  fundedDay: bigint;
+  outcome?: bigint;
+}
+
+export function repLeaf(f: RepLeafFields): bigint {
+  return poseidon([DOM.REP, f.agentPk, f.loanRef, f.principal, f.assetF, f.lenderF, f.fundedDay, f.outcome ?? 1n]);
+}
+
+/** presNullifier = Poseidon(14, masterSk, audience): the same account shows the same value to one audience. */
+export function presNullifier(masterSk: bigint, audience: bigint): bigint {
+  return poseidon([DOM.REPNF, masterSk, audience]);
 }
