@@ -14,8 +14,7 @@ import { H081Bank, type BalanceView, type RelayTerms } from '../../core/bank.js'
 import { missingCircuits } from '../../core/circuits.js';
 import {
   ADDRESS_PREFIX, type CodeContext, KEY_PREFIX, PROOF_PREFIX, TERMS_PREFIX, decodeAddressCode, decodeKeyCode, decodeLoanProof,
-  decodeLoanTerms, encodeAddressCode,
-} from '../../core/codes.js';
+  decodeLoanTerms, encodeAddressCode, REP_ASK_PREFIX, REP_PREFIX, REP_SIG_PREFIX, decodeRepCode, decodeRepRequest, decodeRepSig } from '../../core/codes.js';
 import { AGENT_CIRCUITS, MAINNET, type H081Config, configFromEnv, rpcHost } from '../../core/constants.js';
 import { CodedError, classify, classifySend } from '../../core/errors.js';
 import { accountSkFromEnv, describeKeySource, keySource, loadKeypair } from '../../core/keys.js';
@@ -34,7 +33,7 @@ export const VERSION = '0.1.2';
 export const FUNDING_NEEDED = { deposit: '0.05', withdraw: '0.05', allow: '0.15', lend: '0.15' } as const;
 
 /** Download size of each circuit's files (MB, rounded). The agent set is about 98 MB in all. */
-export const CIRCUIT_MB: Partial<Record<CircuitName, number>> = { transact: 15, grant: 51, spend: 19, stream: 12 };
+export const CIRCUIT_MB: Partial<Record<CircuitName, number>> = { transact: 15, grant: 51, spend: 19, stream: 12, disclose: 11, reputation: 69 };
 
 /** The queue holds at most this many waiting writes; more get `busy`. */
 export const QUEUE_MAX = 8;
@@ -120,7 +119,7 @@ const NEXT = 'Nothing was sent. Send it again with confirm: true (CLI: --yes) to
 const SELF_LINK = 'Sending back to the wallet that deposited links the two.';
 const KINDS: Record<string, string> = {
   h081_bank_deposit: 'deposit', h081_bank_withdraw: 'withdraw', h081_pay: 'pay', h081_transfer: 'transfer', h081_allowance_grant: 'allow',
-  h081_allowance_reclaim: 'reclaim', h081_lend: 'lend', h081_loan_borrow: 'borrow', h081_stake: 'stake',
+  h081_allowance_reclaim: 'reclaim', h081_lend: 'lend', h081_loan_borrow: 'borrow', h081_stake: 'stake', h081_reputation_attest: 'reputation-attest',
 };
 
 const bad = (message: string) => new CodedError('bad_request', message);
@@ -140,12 +139,29 @@ export function poolContext(config: H081Config): CodeContext {
   return { cluster: config.cluster, program: config.poolProgramId.toBase58(), mint: config.usdgMint.toBase58() };
 }
 
+/** Where reputation codes belong: the cluster, the rep_registry program, USDG (undefined where it is not deployed). */
+export function repCodeContext(config: H081Config): CodeContext | undefined {
+  return config.repProgramId ? { cluster: config.cluster, program: config.repProgramId.toBase58(), mint: config.usdgMint.toBase58() } : undefined;
+}
+
 /** Where loan codes belong: the cluster, the loan program, USDG. */
 export function loanContext(config: H081Config): CodeContext {
   return { cluster: config.cluster, program: config.loanProgramId.toBase58(), mint: config.usdgMint.toBase58() };
 }
 
-const PREFIX_KIND_NAME: Record<string, string> = { [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof' };
+const PREFIX_KIND_NAME: Record<string, string> = {
+  [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof',
+  [REP_PREFIX]: 'reputation', [REP_ASK_PREFIX]: 'reputation-request', [REP_SIG_PREFIX]: 'reputation-presentation',
+};
+
+/** Reputation threshold options as operation args (USDG fields renamed, undefined dropped). */
+function repArgs(o: Record<string, unknown>, keep: string[]): Args {
+  const out: Args = {};
+  for (const k of [...keep, 'minLoans', 'minLenders', 'minSpanDays', 'minMonths']) if (o[k] !== undefined) out[k] = o[k];
+  if (o.minVolume !== undefined) out.minVolumeUsdg = String(o.minVolume);
+  if (o.monthFloor !== undefined) out.monthFloorUsdg = String(o.monthFloor);
+  return out;
+}
 
 /** Checks any "h081-*:" code against `config`: its kind, its network and whether it is valid there. Offline, no key needed. */
 export function checkCode(config: H081Config, code: string): CodeCheck {
@@ -160,6 +176,14 @@ export function checkCode(config: H081Config, code: string): CodeCheck {
     [TERMS_PREFIX]: { kind: 'loan-terms', ctx: loan, decode: decodeLoanTerms },
     [PROOF_PREFIX]: { kind: 'loan-proof', ctx: loan, decode: decodeLoanProof },
   };
+  const rep = repCodeContext(config);
+  if (rep) {
+    kinds[REP_PREFIX] = { kind: 'reputation', ctx: rep, decode: decodeRepCode };
+    kinds[REP_ASK_PREFIX] = { kind: 'reputation-request', ctx: rep, decode: decodeRepRequest };
+    kinds[REP_SIG_PREFIX] = { kind: 'reputation-presentation', ctx: rep, decode: decodeRepSig };
+  } else if (prefix === REP_PREFIX || prefix === REP_ASK_PREFIX || prefix === REP_SIG_PREFIX) {
+    return { kind: 'reputation', network: null, valid: false, reason: `private reputation is not deployed on ${config.cluster} yet` };
+  }
   const k = prefix ? kinds[prefix] : undefined;
   if (!k) return { kind: null, network: null, valid: false, reason: prefix ? `"${prefix}" is not a code this bank reads` : 'not an H081 code (it should start with "h081-")' };
   try {
@@ -728,6 +752,43 @@ export class H081 {
         warnings: action === 'request_unstake' ? ['Unstaking has a 30-day cooldown.'] : [], details: { action, ...(o.h081 !== undefined ? { h081: String(o.h081) } : {}) },
       }),
       run: (bank) => runOp(bank, 'h081_stake', args),
+    }, o);
+  }
+
+  // ---- private reputation (docs/REPUTATION-SPEC.md). Proving is local; only attest sends anything.
+
+  /** Verifier: an "h081-rep-ask:" request with a fresh challenge. Offline apart from nothing: no RPC call. */
+  async reputationRequest(o: { audience: string; minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string; ttlSec?: number; bindTo?: string; label?: string }): Promise<unknown> {
+    return plain(await runOp(await this.bank(), 'h081_reputation_request', repArgs(o, ['audience', 'ttlSec', 'bindTo', 'label'])));
+  }
+
+  /** Prover: an "h081-rep:" code (and a presenter signature unless the request binds a key). Local proof, 3-15 s. */
+  async proveReputation(o: { request?: string; audience?: string; minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string; bindTo?: string; expiresInSec?: number }): Promise<unknown> {
+    if (o.request !== undefined) this.requireCode(o.request, REP_ASK_PREFIX, 'request');
+    return plain(await runOp(await this.bank(), 'h081_prove_reputation', repArgs(o, ['request', 'audience', 'bindTo', 'expiresInSec'])));
+  }
+
+  /** Verifier: checks a code against its request (or audience + nonce); a lower bound on repaid loans only. */
+  async verifyReputation(code: string, o: { request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean } = {}): Promise<unknown> {
+    return plain(await runOp(await this.bank(), 'h081_verify_reputation', { code, ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) }));
+  }
+
+  /** Prover: what counts, what waits for an attest, what never counts. Read-only. */
+  async reputation(): Promise<unknown> {
+    return plain(await runOp(await this.bank(), 'h081_reputation_status', {}));
+  }
+
+  /** Prover: has the relayer attest this account's repaid loans (plan unless confirm). */
+  async reputationAttest(o: WriteOptions & { selfSign?: boolean } = {}): Promise<Outcome> {
+    const args: Args = o.selfSign ? { selfSign: true } : {};
+    return this.write({
+      route: 'reputation-attest', op: 'h081_reputation_attest', args,
+      plan: async () => this.planOf({
+        op: 'reputation attest', fee: '0', solNeeded: o.selfSign ? '0.01' : '0', circuit: null, publicOnChain: o.selfSign ? ['agent wallet as attester of each loan'] : ['the loans, already public in their slots'],
+        sentBy: o.selfSign ? 'agent key' : 'relayer', warnings: o.selfSign ? ['Attesting from the agent wallet links each loan to it on chain.'] : [],
+        details: plain(await runOp(await this.bank(), 'h081_reputation_attest', { ...args, confirm: false })),
+      }),
+      run: (bank) => runOp(bank, 'h081_reputation_attest', { ...args, confirm: true }),
     }, o);
   }
 

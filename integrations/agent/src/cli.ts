@@ -26,7 +26,7 @@ export const KEY_WARNING = 'Anyone with this code controls the agent\'s funds. S
 /** Every command, as the README lists them (the site's quickstart test checks its commands against this). */
 export const COMMANDS = [
   'init', 'address', 'info', 'fetch-circuits', 'balance', 'history', 'deposit', 'withdraw', 'fee', 'pay', 'transfer', 'allow', 'reclaim',
-  'loan', 'lend', 'stake', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
+  'loan', 'lend', 'stake', 'rep', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
 ] as const;
 
 const USAGE = `h081 ${VERSION}: the H081 private bank on this machine (SDK, CLI, local API, MCP)
@@ -51,6 +51,10 @@ usage: h081 <command> [options]
   lend open --pledge-bps N | fund <proofCode> [--principal X] | status [--loan-ref N]
        | collect <loanRef> | claim <loanRef> [--usdg X] | settle <loanRef>   [--yes]
   stake view | stake <h081> | request-unstake <h081> | unstake   [--yes]
+  rep ask --audience A [--min-loans N] [--min-volume X] [--min-lenders N] [--span DAYS] [--months N --month-floor X] [--bind <pubkey>]
+    | prove (<h081-rep-ask:...> | --audience A [thresholds]) [--bind <pubkey>]
+    | verify <h081-rep:...> (--ask <h081-rep-ask:...> | --audience A --nonce N) [--sig <h081-rep-sig:...>] [--on-chain]
+    | attest [--self-sign] [--yes] | status        private reputation (a lower bound on repaid loans; beta setup)
   check <code>                                  validate any h081-* code: kind, network, checksum
   serve [--port 8081] [--poll 20] [--allow-origin <url>]   the local API on 127.0.0.1
   token [--rotate]                              print or replace the API token
@@ -66,7 +70,7 @@ ${NOTICE}`;
 
 class UsageError extends Error {}
 
-const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged']);
+const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged', 'on-chain', 'self-sign', 'allow-bearer']);
 
 export interface ParsedArgs { pos: string[]; flags: Record<string, string | true> }
 
@@ -320,6 +324,33 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
         if (action === 'stake' || action === 'request_unstake') return outcome(await h.stake(action, { ...write, h081: arg(2, '<h081 amount>') }));
         if (action === 'unstake') return outcome(await h.stake('unstake', write));
         throw new UsageError('stake view | stake <h081> | request-unstake <h081> | unstake');
+      }
+
+      case 'rep': {
+        const action = arg(1, 'ask, prove, verify, attest or status');
+        const h = await open();
+        const t = { minLoans: num('min-loans'), minVolume: str('min-volume'), minLenders: num('min-lenders'), minSpanDays: num('span'), minMonths: num('months'), monthFloor: str('month-floor') };
+        const given = Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined));
+        switch (action) {
+          case 'ask': {
+            const audience = str('audience');
+            if (!audience) throw new UsageError('rep ask needs --audience <your name>');
+            return ok('done', await h.reputationRequest({ audience, ...given, bindTo: str('bind') }));
+          }
+          case 'prove': {
+            const request = pos[2];
+            if (!request && !str('audience')) throw new UsageError('rep prove <h081-rep-ask:...> | rep prove --audience A [thresholds]');
+            return ok('done', await h.proveReputation(request ? { request, bindTo: str('bind') } : { audience: str('audience'), ...given, bindTo: str('bind') }));
+          }
+          case 'verify': {
+            const r = await h.verifyReputation(arg(2, '<h081-rep:...>'), { request: str('ask'), audience: str('audience'), nonce: str('nonce'), presentation: str('sig'), onChain: flags['on-chain'] === true, allowBearer: flags['allow-bearer'] === true }) as { ok: boolean; reason?: string };
+            ok('done', r, () => out(r.ok ? `valid: ${JSON.stringify(r, null, 2)}` : `not valid: ${r.reason}`));
+            return r.ok ? 0 : 1;
+          }
+          case 'attest': return outcome(await h.reputationAttest({ ...write, selfSign: flags['self-sign'] === true }));
+          case 'status': return ok('done', await h.reputation());
+          default: throw new UsageError('rep ask | prove | verify | attest | status');
+        }
       }
 
       case 'check': {

@@ -11,7 +11,8 @@ import { parseAmount } from './units.js';
 
 /** What an operation needs from the bank (H081Bank satisfies it; tests pass a mock). */
 export type BankLike = Pick<H081Bank, 'deposit' | 'withdraw' | 'balance' | 'loanQuote' | 'borrow' | 'stakeView' | 'stake' | 'requestUnstake' | 'unstake' | 'protocolInfo' | 'pay' | 'codeContext'
-  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'> & { decimals: number };
+  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'
+  | 'reputationRequest' | 'proveReputation' | 'verifyReputation' | 'reputationAttest' | 'reputationStatus'> & { decimals: number };
 
 /** Input an operation refuses (a schema or argument check); nothing was sent. */
 export class InputError extends Error {
@@ -231,6 +232,36 @@ export async function opTransfer(bank: BankLike, args: Args) {
   return bank.transfer(amount, code);
 }
 
+// ---- private reputation
+
+const repThresholdArgs = (args: Args) => ({
+  minLoans: args.minLoans as number | undefined, minVolume: args.minVolumeUsdg as string | undefined, minLenders: args.minLenders as number | undefined,
+  minSpanDays: args.minSpanDays as number | undefined, minMonths: args.minMonths as number | undefined, monthFloor: args.monthFloorUsdg as string | undefined,
+});
+
+export async function opReputationRequest(bank: BankLike, args: Args) {
+  return bank.reputationRequest({ audience: String(args.audience), ...repThresholdArgs(args), ttlSec: args.ttlSec as number | undefined, bindTo: args.bindTo as string | undefined, label: args.label as string | undefined });
+}
+
+export async function opProveReputation(bank: BankLike, args: Args) {
+  return bank.proveReputation({ request: args.request as string | undefined, audience: args.audience as string | undefined, ...repThresholdArgs(args), bindTo: args.bindTo as string | undefined, expiresInSec: args.expiresInSec as number | undefined });
+}
+
+export async function opVerifyReputation(bank: BankLike, args: Args) {
+  return bank.verifyReputation(String(args.code), {
+    request: args.request as string | undefined, audience: args.audience as string | undefined, nonce: args.nonce as string | undefined,
+    presentation: args.presentation as string | undefined, allowBearer: args.allowBearer === true, onChain: args.onChain === true,
+  });
+}
+
+export async function opReputationAttest(bank: BankLike, args: Args) {
+  return bank.reputationAttest({ confirm: args.confirm === true, selfSign: args.selfSign === true });
+}
+
+export async function opReputationStatus(bank: BankLike, _args: Args) {
+  return bank.reputationStatus();
+}
+
 export async function opProtocolInfo(bank: BankLike, _args: Args) {
   return bank.protocolInfo();
 }
@@ -249,6 +280,11 @@ export const OPERATIONS: Record<OpName, (bank: BankLike, args: Args) => Promise<
   h081_stake: opStake,
   h081_protocol_info: opProtocolInfo,
   h081_transfer: opTransfer,
+  h081_reputation_request: opReputationRequest,
+  h081_prove_reputation: opProveReputation,
+  h081_verify_reputation: opVerifyReputation,
+  h081_reputation_attest: opReputationAttest,
+  h081_reputation_status: opReputationStatus,
 };
 
 /** Checks `args` against the operation's zod schema (strict: unknown or misplaced fields are refused). Both front ends

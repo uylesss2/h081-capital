@@ -111,6 +111,12 @@ const obj = (properties: Json, required: string[] = [], description?: string): J
   type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false, ...(description ? { description } : {}),
 });
 
+/** A reputation body as the agent methods take it (USDG fields by their short names). */
+const repBody = (b: Json): Json => {
+  const { minVolumeUsdg, monthFloorUsdg, ...rest } = b as Record<string, unknown>;
+  return { ...rest, ...(minVolumeUsdg !== undefined ? { minVolume: minVolumeUsdg } : {}), ...(monthFloorUsdg !== undefined ? { monthFloor: monthFloorUsdg } : {}) } as Json;
+};
+
 const fresh = (q: URLSearchParams) => { const f = q.get('fresh'); return f === '1' || f === 'true'; };
 
 export const ROUTES: RouteDef[] = [
@@ -304,6 +310,53 @@ export const ROUTES: RouteDef[] = [
       if (action === 'view') throw bad('view is a read: GET /v1/stake');
       return out(await c.h.stake(action, { ...wo(c), h081: optStr(c.body.h081, 'h081') }));
     },
+  },
+  {
+    method: 'POST', path: '/v1/reputation/request', auth: true, summary: 'Verifier: make an h081-rep-ask: request (fresh challenge, thresholds)',
+    description: 'Sends nothing. Thresholds are rounded UP to the public ladder. A reputation proof is a lower bound on repaid loans only: it says nothing about defaults.',
+    body: obj({ ...(JSON_SCHEMA.h081_reputation_request.properties as Json) }, ['audience']),
+    result: '{code, audience, nonce, expiresAt, thresholds, note}',
+    handle: async (c) => {
+      only(c.body, Object.keys(JSON_SCHEMA.h081_reputation_request.properties as Json));
+      return done(await c.h.reputationRequest(repBody(c.body) as never));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/reputation/prove', auth: true, summary: 'Prover: answer a request with an h081-rep: code (local proof)',
+    description: 'Proves locally (the account secret is in the witness; no service proves for you), 3-15 s. Sends nothing.',
+    body: obj({ ...(JSON_SCHEMA.h081_prove_reputation.properties as Json) }, [], 'exactly one of request, or audience with thresholds'),
+    result: '{code, presentation?, presNullifier, expiresAt, thresholds, counted, binding, setup, statement, next}',
+    handle: async (c) => {
+      only(c.body, Object.keys(JSON_SCHEMA.h081_prove_reputation.properties as Json));
+      return done(await c.h.proveReputation(repBody(c.body) as never));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/reputation/verify', auth: true, summary: 'Verifier: check an h081-rep: code',
+    description: 'Checks challenge, presenter binding, expiry, root and proof. ok means a lower bound on repaid loans; it says nothing about defaults.',
+    body: obj({ ...(JSON_SCHEMA.h081_verify_reputation.properties as Json) }, ['code']),
+    result: '{ok, reason?, thresholds, presNullifier, presenter, lowerBoundOnly, statement, setup}',
+    handle: async (c) => {
+      only(c.body, Object.keys(JSON_SCHEMA.h081_verify_reputation.properties as Json));
+      const code = optStr(c.body.code, 'code');
+      if (!code) throw bad('code is required');
+      const { code: _c, ...rest } = c.body;
+      return done(await c.h.verifyReputation(code, rest as never));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/reputation/attest', auth: true, write: true, summary: 'Prover: have the relayer attest repaid loans',
+    body: obj({ selfSign: prop('h081_reputation_attest', 'selfSign'), confirm: confirmJ }),
+    result: 'plan, or {attested, failed, via, signatures}',
+    handle: async (c) => {
+      only(c.body, ['selfSign', 'confirm']);
+      return out(await c.h.reputationAttest({ ...wo(c), selfSign: c.body.selfSign === true }));
+    },
+  },
+  {
+    method: 'GET', path: '/v1/reputation', auth: true, summary: 'Prover: what counts toward private reputation (read-only, local)',
+    result: '{attested, pending, legacy, loanKeys, warnings, statement, setup}',
+    handle: async (c) => done(await c.h.reputation()),
   },
   {
     method: 'POST', path: '/v1/codes/check', auth: true, summary: 'Check any h081-* code: kind, network, valid',

@@ -19,11 +19,13 @@ import { payAction } from './actions/pay.js';
 import { allowanceDelegateAction, allowanceGrantAction, allowanceReclaimAction } from './actions/allowance.js';
 import { lendAction } from './actions/lend.js';
 import { transferAction } from './actions/transfer.js';
+import { proveReputationAction, reputationAttestAction, reputationRequestAction, reputationStatusAction, verifyReputationAction } from './actions/reputation.js';
 import { METHODS } from './tools/index.js';
 
 export const H081_ACTIONS = [
   bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction,
   allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction, transferAction,
+  reputationRequestAction, proveReputationAction, verifyReputationAction, reputationAttestAction, reputationStatusAction,
 ];
 
 const H081Plugin = {
@@ -38,9 +40,11 @@ const H081Plugin = {
 
 export default H081Plugin;
 export { H081Plugin };
-export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction, allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction, transferAction };
+export { bankDepositAction, bankWithdrawAction, bankBalanceAction, loanQuoteAction, loanBorrowAction, stakeAction, protocolInfoAction, payAction, allowanceGrantAction, allowanceDelegateAction, allowanceReclaimAction, lendAction, transferAction,
+  reputationRequestAction, proveReputationAction, verifyReputationAction, reputationAttestAction, reputationStatusAction };
 export {
   h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer,
+  h081ReputationRequest, h081ProveReputation, h081VerifyReputation, h081ReputationAttest, h081ReputationStatus,
 } from './tools/index.js';
 export { signerFromAgent, keypairOfWallet, UNSUPPORTED_WALLET } from './signer.js';
 export { bankFor, setBankProvider, resetBank, type BankProvider, type AgentLike } from './bank.js';

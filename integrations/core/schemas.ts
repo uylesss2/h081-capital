@@ -8,10 +8,13 @@ const DECIMAL = /^\d+(\.\d+)?$/;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export const OPS = ['h081_bank_deposit', 'h081_bank_withdraw', 'h081_bank_balance', 'h081_loan_quote', 'h081_loan_borrow', 'h081_stake', 'h081_protocol_info', 'h081_pay',
-  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer'] as const;
+  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer',
+  'h081_reputation_request', 'h081_prove_reputation', 'h081_verify_reputation', 'h081_reputation_attest', 'h081_reputation_status'] as const;
 export type OpName = (typeof OPS)[number];
 
 const NOTICE_SHORT = 'H081 Capital is live on Solana mainnet, not audited yet; use at your own risk.';
+const REP_NOTE = "What it proves: a LOWER BOUND on fully repaid stream_loan loans under one account's loan keys. It says nothing about defaults (unpaid loans never enter the tree), cannot tell an independent lender from the borrower's own second wallet, and cannot tell who supplied the repaid money: it measures capital throughput and calendar time, not creditworthiness. Never size credit from it alone. Setup: beta, single-party trusted setup until a multi-party ceremony runs.";
+const REP_DEPLOY = 'Private reputation is not deployed on mainnet yet: until it is, these calls refuse there.';
 
 export const DESCRIPTIONS: Record<OpName, string> = {
   h081_bank_deposit:
@@ -145,6 +148,34 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'stay hidden on chain. The agent key sends it (there is no public leg a relayer could take a fee from), so the chain ' +
     'shows that the agent wallet used the bank. No relay fee. Sends when called (no plan step). Needs ~0.02 SOL and the ' +
     'transact circuit. Give `amount` (base units) or `usdg` (decimal). ' + NOTICE_SHORT,
+  h081_reputation_request:
+    'Verifier side of private reputation: make an "h081-rep-ask:" request code naming you (`audience`, any stable name), a fresh ' +
+    'challenge (nonce) and what you require: `minLoans`, `minVolumeUsdg`, `minLenders`, `minSpanDays` (days between the first and last ' +
+    'funding), `minMonths` with `monthFloorUsdg` (distinct 30-day periods holding a loan of at least that size). Thresholds are rounded UP ' +
+    'to a public ladder. `bindTo` (a Solana key you know the presenter by) binds the answer to that key. Hand the code to the agent, keep it, ' +
+    'and check the answer with h081_verify_reputation and this request; accept each nonce once. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
+  h081_prove_reputation:
+    'Prove this agent\'s repayment record to one verifier without revealing which loans, when, to whom, or under which keys: give the ' +
+    'verifier\'s "h081-rep-ask:" `request` code, or its `audience` name plus thresholds (rounded DOWN to the public ladder). Returns an ' +
+    '"h081-rep:" code and, unless the request binds a key, a separate "h081-rep-sig:" `presentation` to give the verifier only when you ' +
+    'present (whoever holds both can use the code until it expires, at most a day). Counts only loans repaid under this account\'s loan keys ' +
+    'and attested (h081_reputation_status, h081_reputation_attest). The proof is made locally (the account secret is in the witness; no ' +
+    'service proves for you) and takes 3-15 s; at most 4 different threshold sets per verifier per day. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
+  h081_verify_reputation:
+    'Check an "h081-rep:" code: against the `request` code you issued (or your `audience` name and the `nonce` you issued), the ' +
+    'presenter binding (the request\'s bindTo, or the `presentation` signature; unbound bearer codes are refused unless `allowBearer`), the ' +
+    'expiry, a recent on-chain root, and the Groth16 proof; `onChain: true` also simulates rep_registry verify_reputation (read-only). ' +
+    'Returns ok, the proven thresholds and the presentation nullifier (the same account shows you the same value each time). Remember ' +
+    'accepted nonces until they expire. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
+  h081_reputation_attest:
+    'Get this agent\'s repaid, not yet attested loans into the reputation tree (rep_registry attest, one leaf per loan, once). The relayer ' +
+    'sends and pays: attesting from the agent wallet would link each loan to it on chain, so that needs `selfSign: true` and says so. ' +
+    'A lender that closes a loan before it is attested erases it for good (H081 lenders attest before closing). WITHOUT `confirm: true` it ' +
+    'sends NOTHING and returns the plan. ' + REP_DEPLOY,
+  h081_reputation_status:
+    'What counts toward this agent\'s private reputation: attested loans (count, volume, lenders, span, periods), repaid loans waiting ' +
+    'for an attest, and loans under legacy sub-account keys that can never count, with warnings. Read-only and local (matched against ' +
+    'this account\'s loan keys; nothing about them is sent anywhere). ' + REP_NOTE + ' ' + REP_DEPLOY,
 };
 
 // ------------------------------------------------------------------ zod
@@ -292,15 +323,48 @@ export const TransferZ = z.object({
   toAddressCode: z.string({ required_error: 'must be given: the recipient\'s "h081-address:" code' }).min(1),
 }).strict().refine(exactlyOne('amount', 'usdg'), oneOfMsg('amount', 'usdg'));
 
+const nameZ = z.string().trim().min(1, 'must be a non-empty name').max(128);
+const repThresholds = {
+  minLoans: z.number().int().min(1).max(16).optional(),
+  minVolumeUsdg: decimalZ.optional(),
+  minLenders: z.number().int().min(0).max(255).optional(),
+  minSpanDays: z.number().int().min(0).max(65535).optional(),
+  minMonths: z.number().int().min(0).max(255).optional(),
+  monthFloorUsdg: decimalZ.optional(),
+};
+const ttlZ = z.number().int().min(1).max(86_400);
+export const RepRequestZ = z.object({ audience: nameZ, ...repThresholds, ttlSec: ttlZ.optional(), bindTo: b58Z.optional(), label: z.string().max(32).optional() }).strict();
+export const ProveRepZ = z.object({ request: z.string().min(1).optional(), audience: nameZ.optional(), ...repThresholds, bindTo: b58Z.optional(), expiresInSec: ttlZ.optional() }).strict()
+  .refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the verifier\'s "h081-rep-ask:" code) or audience (its name)' })
+  .refine((o) => o.request === undefined || Object.keys(repThresholds).every((k) => (o as Record<string, unknown>)[k] === undefined), { message: 'a request code carries its own thresholds; do not add any' });
+export const VerifyRepZ = z.object({
+  code: z.string({ required_error: 'must be given: the "h081-rep:" code' }).min(1), request: z.string().min(1).optional(), audience: nameZ.optional(),
+  nonce: z.string().regex(/^(0x[0-9a-fA-F]+|\d+)$/, 'a number (0x hex or decimal)').optional(), presentation: z.string().min(1).optional(),
+  allowBearer: z.boolean().optional(), onChain: z.boolean().optional(),
+}).strict().refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the code you issued) or audience (with nonce)' });
+export const RepAttestZ = z.object({ confirm: z.boolean().optional(), selfSign: z.boolean().optional() }).strict();
+export const RepStatusZ = z.object({}).strict();
+
 export const ZOD: Record<OpName, z.ZodType<any>> = {
   h081_bank_deposit: DepositZ, h081_bank_withdraw: WithdrawZ, h081_bank_balance: BalanceZ, h081_loan_quote: LoanQuoteZ,
   h081_loan_borrow: LoanBorrowZ, h081_stake: StakeZ, h081_protocol_info: ProtocolInfoZ, h081_pay: PayZ,
   h081_allowance_grant: AllowanceGrantZ, h081_allowance_delegate: AllowanceDelegateZ, h081_allowance_reclaim: AllowanceReclaimZ,
   h081_lend: LendZ, h081_transfer: TransferZ,
+  h081_reputation_request: RepRequestZ, h081_prove_reputation: ProveRepZ, h081_verify_reputation: VerifyRepZ,
+  h081_reputation_attest: RepAttestZ, h081_reputation_status: RepStatusZ,
 };
 
 // ------------------------------------------------------------------ JSON Schema (MCP inputSchema)
 
+const repAudienceJ = { type: 'string', minLength: 1, maxLength: 128, description: 'the verifier\'s name (any stable string); the proof is only good for it' };
+const repThresholdsJ = {
+  minLoans: { type: 'integer', minimum: 1, maximum: 16, description: 'at least this many repaid loans (ladder 1, 2, 3, 5, 8, 12, 16)' },
+  minVolumeUsdg: { type: 'string', pattern: DECIMAL.source, description: 'at least this much principal in total, USDG (ladder 1 / 2.5 / 5 x 10^k)' },
+  minLenders: { type: 'integer', minimum: 0, maximum: 255, description: 'from at least this many different lender wallets (cheap to fake: wallets are free)' },
+  minSpanDays: { type: 'integer', minimum: 0, maximum: 65535, description: 'first and last funding at least this many days apart' },
+  minMonths: { type: 'integer', minimum: 0, maximum: 255, description: 'in at least this many distinct 30-day periods, counting loans of at least monthFloorUsdg' },
+  monthFloorUsdg: { type: 'string', pattern: DECIMAL.source, description: 'smallest loan that makes its 30-day period count' },
+};
 const amountJ = { type: 'string', pattern: BASE.source, description: 'base units (USDG has 6 decimals): "1000000" = 1 USDG' };
 const decimalJ = (unit: string) => ({ type: 'string', pattern: DECIMAL.source, description: `decimal ${unit} amount, e.g. "12.5"` });
 const b58J = { type: 'string', pattern: BASE58.source, description: 'base58 Solana wallet address' };
@@ -451,6 +515,23 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
     additionalProperties: false,
     description: 'exactly one of amount (base units) or usdg (decimal), and the recipient\'s address code',
   },
+  h081_reputation_request: {
+    type: 'object',
+    properties: { audience: repAudienceJ, ...repThresholdsJ, ttlSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'how long the request (and the answer) stays valid, seconds; default 600' }, bindTo: { ...b58J, description: 'optional: the Solana key you know the presenter by; the answer is then bound to it' }, label: { type: 'string', maxLength: 32, description: 'a label shown to the prover (default: the audience)' } },
+    required: ['audience'], additionalProperties: false,
+  },
+  h081_prove_reputation: {
+    type: 'object',
+    properties: { request: { type: 'string', description: 'the verifier\'s "h081-rep-ask:" code (carries audience, challenge and thresholds)' }, audience: repAudienceJ, ...repThresholdsJ, bindTo: { ...b58J, description: 'optional: bind the proof to this key (default: a fresh session key, signed separately)' }, expiresInSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'without a request: lifetime of the proof, default 600' } },
+    additionalProperties: false, description: 'exactly one of request, or audience with thresholds',
+  },
+  h081_verify_reputation: {
+    type: 'object',
+    properties: { code: { type: 'string', description: 'the "h081-rep:" code' }, request: { type: 'string', description: 'the "h081-rep-ask:" code you issued' }, audience: repAudienceJ, nonce: { type: 'string', pattern: '^(0x[0-9a-fA-F]+|\\d+)$', description: 'without a request: the nonce you issued' }, presentation: { type: 'string', description: 'the presenter\'s "h081-rep-sig:" code (needed when the code is bound to a session key)' }, allowBearer: { type: 'boolean', description: 'accept a code bound to no key (anyone who saw it could replay it); default false' }, onChain: { type: 'boolean', description: 'also simulate rep_registry verify_reputation (read-only)' } },
+    required: ['code'], additionalProperties: false, description: 'the code and exactly one of request, or audience with nonce',
+  },
+  h081_reputation_attest: { type: 'object', properties: { confirm: { type: 'boolean', description: 'true to send; otherwise only the plan' }, selfSign: { type: 'boolean', description: 'send from this wallet instead of the relayer (links each loan to it on chain)' } }, additionalProperties: false },
+  h081_reputation_status: { type: 'object', properties: {}, additionalProperties: false },
 };
 
 /** Example inputs (one per operation) that the schemas accept; the plugin's action examples and tests use them. */
@@ -490,4 +571,9 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'sweep', loanRef: '3' },
   ],
   h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
+  h081_reputation_request: [{ audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '500', minSpanDays: 90 }, { audience: 'acme-desk', minLoans: 5, minMonths: 3, monthFloorUsdg: '50', bindTo: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv' }],
+  h081_prove_reputation: [{ request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' }, { audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '500' }],
+  h081_verify_reputation: [{ code: 'h081-rep:7Yk3LmQ9pR2', request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4', presentation: 'h081-rep-sig:3Df8Kq2' }, { code: 'h081-rep:7Yk3LmQ9pR2', audience: 'acme-desk', nonce: '0x1f2e', onChain: true }],
+  h081_reputation_attest: [{}, { confirm: true }],
+  h081_reputation_status: [{}],
 };

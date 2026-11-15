@@ -102,6 +102,7 @@ On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for 
 | `h081 loan borrow <termsCode> --days N --unlock-days N [--principal X] [--yes]` | Pledge an allowance and get the proof code for the lender. |
 | `h081 lend <open\|fund\|status\|collect\|claim\|settle> […] [--yes]` | The lender side. |
 | `h081 stake <view\|stake\|request-unstake\|unstake> [amount] [--yes]` | H081 in capacity_stake. |
+| `h081 rep <ask\|prove\|verify\|attest\|status> […]` | Private reputation: ask for, prove and verify a repayment record without revealing the loans. A proof is a lower bound on repaid loans only (it says nothing about defaults); beta, single-party trusted setup; not deployed on mainnet yet. |
 | `h081 check <code>` | Validates any `h081-*` code: kind, network, checksum. |
 | `h081 serve [--port 8081] [--poll 20] [--allow-origin <url>]` | The local API on 127.0.0.1. Downloads the proving files in the background. |
 | `h081 token [--rotate]` | Prints or replaces the API token. |

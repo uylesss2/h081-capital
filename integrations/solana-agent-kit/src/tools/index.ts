@@ -31,10 +31,20 @@ export const h081Lend = (agent: AgentLike, input: {
 
 export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: string; toAddressCode: string }) => run(agent, 'h081_transfer', input);
 
-export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer };
+type RepThresholds = { minLoans?: number; minVolumeUsdg?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloorUsdg?: string };
+export const h081ReputationRequest = (agent: AgentLike, input: { audience: string; ttlSec?: number; bindTo?: string; label?: string } & RepThresholds) => run(agent, 'h081_reputation_request', input);
+export const h081ProveReputation = (agent: AgentLike, input: { request?: string; audience?: string; bindTo?: string; expiresInSec?: number } & RepThresholds) => run(agent, 'h081_prove_reputation', input);
+export const h081VerifyReputation = (agent: AgentLike, input: { code: string; request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean }) => run(agent, 'h081_verify_reputation', input);
+export const h081ReputationAttest = (agent: AgentLike, input: { confirm?: boolean; selfSign?: boolean } = {}) => run(agent, 'h081_reputation_attest', input);
+export const h081ReputationStatus = (agent: AgentLike, input: Record<string, never> = {}) => run(agent, 'h081_reputation_status', input);
+
+export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer,
+  h081ReputationRequest, h081ProveReputation, h081VerifyReputation, h081ReputationAttest, h081ReputationStatus };
 export const METHOD_OF: Record<OpName, keyof typeof METHODS> = {
   h081_bank_deposit: 'h081BankDeposit', h081_bank_withdraw: 'h081BankWithdraw', h081_bank_balance: 'h081BankBalance', h081_loan_quote: 'h081LoanQuote',
   h081_loan_borrow: 'h081LoanBorrow', h081_stake: 'h081Stake', h081_protocol_info: 'h081ProtocolInfo', h081_pay: 'h081Pay',
   h081_allowance_grant: 'h081AllowanceGrant', h081_allowance_delegate: 'h081AllowanceDelegate', h081_allowance_reclaim: 'h081AllowanceReclaim',
   h081_lend: 'h081Lend', h081_transfer: 'h081Transfer',
+  h081_reputation_request: 'h081ReputationRequest', h081_prove_reputation: 'h081ProveReputation', h081_verify_reputation: 'h081VerifyReputation',
+  h081_reputation_attest: 'h081ReputationAttest', h081_reputation_status: 'h081ReputationStatus',
 };

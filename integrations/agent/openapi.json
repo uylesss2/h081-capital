@@ -1613,6 +1613,455 @@
         }
       }
     },
+    "/v1/reputation/request": {
+      "post": {
+        "operationId": "postReputationRequest",
+        "summary": "Verifier: make an h081-rep-ask: request (fresh challenge, thresholds)",
+        "description": "Sends nothing. Thresholds are rounded UP to the public ladder. A reputation proof is a lower bound on repaid loans only: it says nothing about defaults.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "audience": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "the verifier's name (any stable string); the proof is only good for it"
+                  },
+                  "minLoans": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "description": "at least this many repaid loans (ladder 1, 2, 3, 5, 8, 12, 16)"
+                  },
+                  "minVolumeUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "at least this much principal in total, USDG (ladder 1 / 2.5 / 5 x 10^k)"
+                  },
+                  "minLenders": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "from at least this many different lender wallets (cheap to fake: wallets are free)"
+                  },
+                  "minSpanDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535,
+                    "description": "first and last funding at least this many days apart"
+                  },
+                  "minMonths": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "in at least this many distinct 30-day periods, counting loans of at least monthFloorUsdg"
+                  },
+                  "monthFloorUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "smallest loan that makes its 30-day period count"
+                  },
+                  "ttlSec": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "description": "how long the request (and the answer) stays valid, seconds; default 600"
+                  },
+                  "bindTo": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "optional: the Solana key you know the presenter by; the answer is then bound to it"
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "description": "a label shown to the prover (default: the audience)"
+                  }
+                },
+                "required": [
+                  "audience"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {code, audience, nonce, expiresAt, thresholds, note}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/reputation/prove": {
+      "post": {
+        "operationId": "postReputationProve",
+        "summary": "Prover: answer a request with an h081-rep: code (local proof)",
+        "description": "Proves locally (the account secret is in the witness; no service proves for you), 3-15 s. Sends nothing.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "the verifier's \"h081-rep-ask:\" code (carries audience, challenge and thresholds)"
+                  },
+                  "audience": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "the verifier's name (any stable string); the proof is only good for it"
+                  },
+                  "minLoans": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16,
+                    "description": "at least this many repaid loans (ladder 1, 2, 3, 5, 8, 12, 16)"
+                  },
+                  "minVolumeUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "at least this much principal in total, USDG (ladder 1 / 2.5 / 5 x 10^k)"
+                  },
+                  "minLenders": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "from at least this many different lender wallets (cheap to fake: wallets are free)"
+                  },
+                  "minSpanDays": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535,
+                    "description": "first and last funding at least this many days apart"
+                  },
+                  "minMonths": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "in at least this many distinct 30-day periods, counting loans of at least monthFloorUsdg"
+                  },
+                  "monthFloorUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "smallest loan that makes its 30-day period count"
+                  },
+                  "bindTo": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "optional: bind the proof to this key (default: a fresh session key, signed separately)"
+                  },
+                  "expiresInSec": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "description": "without a request: lifetime of the proof, default 600"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "exactly one of request, or audience with thresholds"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {code, presentation?, presNullifier, expiresAt, thresholds, counted, binding, setup, statement, next}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/reputation/verify": {
+      "post": {
+        "operationId": "postReputationVerify",
+        "summary": "Verifier: check an h081-rep: code",
+        "description": "Checks challenge, presenter binding, expiry, root and proof. ok means a lower bound on repaid loans; it says nothing about defaults.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "the \"h081-rep:\" code"
+                  },
+                  "request": {
+                    "type": "string",
+                    "description": "the \"h081-rep-ask:\" code you issued"
+                  },
+                  "audience": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "the verifier's name (any stable string); the proof is only good for it"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^(0x[0-9a-fA-F]+|\\d+)$",
+                    "description": "without a request: the nonce you issued"
+                  },
+                  "presentation": {
+                    "type": "string",
+                    "description": "the presenter's \"h081-rep-sig:\" code (needed when the code is bound to a session key)"
+                  },
+                  "allowBearer": {
+                    "type": "boolean",
+                    "description": "accept a code bound to no key (anyone who saw it could replay it); default false"
+                  },
+                  "onChain": {
+                    "type": "boolean",
+                    "description": "also simulate rep_registry verify_reputation (read-only)"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {ok, reason?, thresholds, presNullifier, presenter, lowerBoundOnly, statement, setup}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/reputation/attest": {
+      "post": {
+        "operationId": "postReputationAttest",
+        "summary": "Prover: have the relayer attest repaid loans",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "selfSign": {
+                    "type": "boolean",
+                    "description": "send from this wallet instead of the relayer (links each loan to it on chain)"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {attested, failed, via, signatures}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/reputation": {
+      "get": {
+        "operationId": "getReputation",
+        "summary": "Prover: what counts toward private reputation (read-only, local)",
+        "responses": {
+          "200": {
+            "description": "ok: {attested, pending, legacy, loanKeys, warnings, statement, setup}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
     "/v1/codes/check": {
       "post": {
         "operationId": "postCodesCheck",
