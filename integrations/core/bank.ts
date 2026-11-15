@@ -51,6 +51,12 @@ import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, ch
 import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from './errors.js';
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
+import {
+  REP_LOAN_KEY_BASE, type RepEnv, type ThresholdArgs, proveReputation as repProve, reputationAttest as repAttest,
+  reputationRequest as repRequest, reputationStatus as repStatus, verifyReputation as repVerify,
+} from './reputation.js';
+import { loanSk } from '../../src/crypto.js';
+import { attestIx, isAttested } from '../../src/solana/reputation.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
 
@@ -312,6 +318,11 @@ export class H081Bank {
   readonly prover: Prover;
   private readonly relayer?: RelayerClient;
   private readonly agents = new Map<number, { account: Account; wallet: SolanaWallet }>();
+  /** the shielded account secret: loan keys derive from it (loanSk = Poseidon(15, accountSk, k)) */
+  private readonly accountSk: bigint;
+  /** loan key indices this account has borrowed under (private reputation); kept across restarts, no key or amount */
+  private readonly loanKeySet = new Set<number>();
+  private readonly loanKeysFile?: string;
   /** sub-accounts this process delegated to: they may hold allowances this account does not own (and so cannot see from its own view) */
   private readonly touched = new Set<number>();
   private lenderWallet?: SolanaLoanLenderWallet;
@@ -342,6 +353,7 @@ export class H081Bank {
       if (total < 200) return;
       if (done === total || done - reported >= 500) { reported = done; this.log(`syncing the pool's event log: ${done}/${total} transactions`); }
     };
+    this.accountSk = opts.accountSk;
     this.account = new Account(opts.accountSk);
     this.owner = new SolanaWallet(this.account, this.pool, opts.signer);
     this.owner.registerMint(this.usdg);
@@ -350,11 +362,34 @@ export class H081Bank {
     if (cacheDir) {
       this.cacheFile = join(cacheDir, `${opts.config.cluster}-${opts.config.poolProgramId.toBase58()}.events.json`);
       this.subAccountsFile = join(cacheDir, `${opts.config.cluster}-${opts.config.poolProgramId.toBase58()}.subaccounts-${opts.signer.publicKey.toBase58()}.json`);
+      this.loanKeysFile = join(cacheDir, `${opts.config.cluster}-${opts.config.poolProgramId.toBase58()}.loankeys-${opts.signer.publicKey.toBase58()}.json`);
+      try {
+        const saved = JSON.parse(readFileSync(this.loanKeysFile, 'utf8')) as { keys?: unknown };
+        if (Array.isArray(saved.keys)) for (const k of saved.keys) if (Number.isInteger(k) && k >= 0 && k < 2 ** 32) this.loanKeySet.add(k);
+      } catch { /* none yet */ }
       try {
         const saved = JSON.parse(readFileSync(this.subAccountsFile, 'utf8')) as { indices?: unknown };
         if (Array.isArray(saved.indices)) for (const i of saved.indices) if (Number.isInteger(i) && i >= 0 && i < MAX_AGENTS) this.touched.add(i);
       } catch { /* none yet */ }
     }
+  }
+
+  /** Remembers loan keys (private reputation) across restarts: indices only, never a key. */
+  private rememberLoanKeys(ks: number[]): void {
+    const before = this.loanKeySet.size;
+    for (const k of ks) if (Number.isInteger(k) && k >= 0 && k < 2 ** 32) this.loanKeySet.add(k);
+    if (this.loanKeySet.size === before || !this.loanKeysFile) return;
+    try {
+      mkdirSync(join(this.loanKeysFile, '..'), { recursive: true });
+      writeFileSync(this.loanKeysFile, JSON.stringify({ keys: [...this.loanKeySet].sort((a, b) => a - b) }));
+    } catch (e) { this.log(`could not save the loan key list: ${(e as Error).message}`); }
+  }
+
+  /** The next unused loan key index. */
+  private nextLoanKey(): number {
+    let k = 0;
+    while (this.loanKeySet.has(k)) k++;
+    return k;
   }
 
   /** Remembers that sub-account `i` holds something this account may not own (a delegated child), across restarts. */
@@ -475,6 +510,7 @@ export class H081Bank {
   private agentPks(): Map<bigint, number> {
     const m = new Map<bigint, number>();
     for (let i = 0; i < MAX_AGENTS; i++) m.set(this.agent(i).account.keys.pk, i);
+    for (const k of this.loanKeySet) m.set(this.agent(REP_LOAN_KEY_BASE + k).account.keys.pk, REP_LOAN_KEY_BASE + k);
     return m;
   }
 
@@ -493,6 +529,7 @@ export class H081Bank {
     const used = new Set(this.owner.grantedAllowances().map((g) => g.allowance.agentPk));
     const out: number[] = [];
     for (let i = 0; i < MAX_AGENTS; i++) if (this.touched.has(i) || used.has(this.agent(i).account.keys.pk)) out.push(i);
+    for (const k of [...this.loanKeySet].sort((a, b) => a - b)) out.push(REP_LOAN_KEY_BASE + k);
     return out;
   }
 
@@ -1313,7 +1350,8 @@ export class H081Bank {
   agent(i: number): { account: Account; wallet: SolanaWallet } {
     let a = this.agents.get(i);
     if (!a) {
-      const account = new Account(deriveAgentSk(this.signer, i, this.derivation));
+      // indices from REP_LOAN_KEY_BASE stand for loan keys: Poseidon(15, accountSk, k), one fresh key per loan
+      const account = new Account(i >= REP_LOAN_KEY_BASE ? loanSk(this.accountSk, i - REP_LOAN_KEY_BASE) : deriveAgentSk(this.signer, i, this.derivation));
       const wallet = new SolanaWallet(account, this.pool, this.signer);
       wallet.registerMint(this.usdg);
       a = { account, wallet };
@@ -1360,7 +1398,11 @@ export class H081Bank {
     if (budget > shielded) throw new Error(`the shielded balance is ${fromUnits(shielded, d)} ${sym}, less than the budget ${fromUnits(budget, d)}; deposit first.`);
     const lamports = await this.connection.getBalance(this.signer.publicKey, 'confirmed');
     if (lamports < 0.1 * LAMPORTS_PER_SOL) throw new Error(`the agent wallet holds ${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL; a pledge stages a large proof and needs about 0.1 SOL (most of it refunded).`);
-    const i = rules.agentIndex ?? (await this.freeAgentIndex());
+    // A fresh loan key per loan (counts toward private reputation), unless the caller names a legacy sub-account.
+    // The key is recorded before the grant, so a crash after it still finds the allowance.
+    let i: number;
+    if (rules.agentIndex !== undefined) i = rules.agentIndex;
+    else { const k = this.nextLoanKey(); this.rememberLoanKeys([k]); i = REP_LOAN_KEY_BASE + k; }
     const a = this.agent(i);
     const now = await this.pool.now();
     const secs = BigInt(Math.max(1, Math.round(rules.unlockDays * 86400)));
@@ -1798,9 +1840,13 @@ export class H081Bank {
     }
     await this.needSol(LEND_SOL_MIN, 'closing a slot');
     let tx: { signature: string; refunded?: bigint };
+    // Private reputation: close_slot erases the loan's agent key, so a repaid loan is attested first (the lender is
+    // already public on the slot; attesting from its wallet links nothing new). Best effort: a refused attest (tiny,
+    // slashed) never blocks the close.
+    const attestSig = await this.attestBeforeClose(ref, s).catch((e) => { this.log(`attest before close skipped: ${(e as Error).message}`); return undefined; });
     // returnExcess: a repaid loan may close with borrower excess in its inbox; it is sent back right after (best effort)
     try { tx = await lender.close(ref, { returnExcess: true }); } catch (e) { throw this.loanErr(e); }
-    return { sent: true, action: 'close', loanRef: ref, signatures: [tx.signature], ...(tx.refunded === undefined ? {} : { refundedLamports: tx.refunded }) };
+    return { sent: true, action: 'close', loanRef: ref, signatures: [...(attestSig ? [attestSig] : []), tx.signature], ...(tx.refunded === undefined ? {} : { refundedLamports: tx.refunded }) };
   }
 
   /**
@@ -1831,6 +1877,39 @@ export class H081Bank {
       returnedToBorrower: returned, returnedToBorrowerUsdg: fromUnits(returned, d),
     };
   }
+
+  // ---- private reputation (docs/REPUTATION-SPEC.md; integrations/core/reputation.ts)
+
+  private repEnv(): RepEnv {
+    return {
+      connection: this.connection, config: this.config, signer: this.signer, accountSk: this.accountSk, prover: this.prover, fetch: this.fetchFn,
+      relayerUrl: this.config.relayerUrl, cacheDir: this.cacheFile ? join(this.cacheFile, '..') : undefined, log: this.log,
+      loanKeys: () => [...this.loanKeySet], rememberLoanKeys: (ks) => this.rememberLoanKeys(ks),
+      legacyAgentPks: () => Array.from({ length: MAX_AGENTS }, (_, i) => this.agent(i).account.keys.pk),
+    };
+  }
+
+  /** Lender side: attests a repaid, unattested loan from the lender wallet before close_slot erases its agent key. */
+  private async attestBeforeClose(ref: bigint, s: { funded: boolean; repaid: bigint; principal: bigint }): Promise<string | undefined> {
+    const rep = this.config.repProgramId;
+    if (!rep || !s.funded || s.repaid < s.principal || (await isAttested(this.connection, ref, rep))) return undefined;
+    return sendLegacy(this.connection, this.signer, [this.signer], [attestIx(this.signer.publicKey, ref, { rep, loan: this.config.loanProgramId })]);
+  }
+
+  /** Verifier: an "h081-rep-ask:" request (audience, fresh challenge, thresholds rounded UP to the ladder). */
+  reputationRequest(req: ThresholdArgs & { audience: string; ttlSec?: number; bindTo?: string; label?: string }) { return repRequest(this.repEnv(), req); }
+
+  /** Prover: an "h081-rep:" code over this account's attested loans. Local only (the witness holds the account secret). */
+  proveReputation(req: ThresholdArgs & { audience?: string; request?: string; bindTo?: string; expiresInSec?: number }) { return repProve(this.repEnv(), req); }
+
+  /** Verifier: checks a code against its request (or audience + nonce), the presenter binding, the time, the root and the proof. */
+  verifyReputation(code: string, opts: Parameters<typeof repVerify>[2] = {}) { return repVerify(this.repEnv(), code, opts); }
+
+  /** Prover: what counts so far, what waits for an attest, and what can never count. Reads only. */
+  reputationStatus() { return repStatus(this.repEnv()); }
+
+  /** Prover: has the relayer attest this account's repaid loans (plan unless confirm). */
+  reputationAttest(opts: { confirm?: boolean; selfSign?: boolean } = {}) { return repAttest(this.repEnv(), opts); }
 
   // ---- info
 

@@ -285,3 +285,20 @@ export function repPublicFromList(xs: bigint[]): RepPublic {
   return Object.fromEntries(REPUTATION_PUBLIC.map((k, i) => [k, xs[i]])) as RepPublic;
 }
 
+
+/** Rounds every threshold UP to the ladder (a verifier's request: never weaker than what was asked). */
+export function snapRequirementUp(r: RepRequirement, decimals = 6): RepRequirement {
+  const ceilTo = <T extends number | bigint>(steps: readonly T[], x: T, what: string): T => {
+    for (const s of steps) if (s >= x) return s;
+    throw new Error(`${what} ${x} is above the largest ladder step ${steps[steps.length - 1]}`);
+  };
+  const vol = volumeLadder(decimals);
+  return {
+    minLoans: ceilTo(LADDER.loans, Math.max(1, r.minLoans), 'minLoans'),
+    minVolume: ceilTo(vol, r.minVolume, 'minVolume'),
+    minLenders: ceilTo(LADDER.lenders, r.minLenders, 'minLenders'),
+    minSpanDays: ceilTo(LADDER.spanDays, r.minSpanDays, 'minSpanDays'),
+    minMonths: ceilTo(LADDER.months, r.minMonths, 'minMonths'),
+    monthFloor: r.minMonths > 0 ? ceilTo(vol, r.monthFloor, 'monthFloor') : 0n,
+  };
+}

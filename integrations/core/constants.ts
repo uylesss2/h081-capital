@@ -10,6 +10,7 @@ import type { CircuitName } from '../../src/prover.js';
 import { LOCALNET_POOL_PROGRAM_ID } from '../../src/solana/program.js';
 import { LOCALNET_LOAN_PROGRAM_ID } from '../../src/solana/lender.js';
 import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_PROGRAM_ID } from '../../src/solana/token.js';
+import { LOCALNET_REP_PROGRAM_ID } from '../../src/solana/reputation.js';
 
 export const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
 
@@ -134,6 +135,10 @@ export interface H081Config {
   maxGrant?: bigint;
   /** operator ceiling per loan this agent funds as a lender (h081_lend fund), base units; undefined = no ceiling beyond the wallet's USDG */
   maxLend?: bigint;
+  /** rep_registry (private reputation); undefined = not deployed on this cluster, every reputation call refuses */
+  repProgramId?: PublicKey;
+  /** localnet only: accept reputation artifacts from a dev (single-party) setup whose hashes are not pinned */
+  repDevSetup?: boolean;
 }
 
 /** `~` or `~/...` (also `~\...`) expanded with the home directory; anything else unchanged (trimmed). */
@@ -182,6 +187,8 @@ export const ENV_VARS = {
   H081_API_PORT: 'port of the local gateway (h081 serve), default 8081; it binds 127.0.0.1 only',
   H081_API_TOKEN_FILE: 'the gateway bearer token file (default $H081_HOME/api-token)',
   H081_API_MAX_SENDS_PER_MIN: 'most confirmed writes the local gateway accepts per minute (default 30)',
+  H081_REP_PROGRAM_ID: 'rep_registry program id (private reputation). Default: the localnet id on localnet; none on mainnet yet (not deployed), so reputation calls refuse',
+  H081_REP_DEV_SETUP: 'localnet only; 1 = accept reputation proving artifacts from a dev single-party setup (their hashes are not pinned). Refused on mainnet',
 } as const;
 
 const key = (env: NodeJS.ProcessEnv, name: string, fallback: string): PublicKey => {
@@ -241,7 +248,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
     maxPay: maxPayRaw ? BigInt(maxPayRaw) : undefined,
     maxGrant: maxGrantRaw ? BigInt(maxGrantRaw) : undefined,
     maxLend: maxLendRaw ? BigInt(maxLendRaw) : undefined,
+    repProgramId: env.H081_REP_PROGRAM_ID?.trim() ? key(env, 'H081_REP_PROGRAM_ID', '') : localnet ? LOCALNET_REP_PROGRAM_ID : undefined,
+    repDevSetup: repDevSetup(env, localnet),
   };
+}
+
+function repDevSetup(env: NodeJS.ProcessEnv, localnet: boolean): boolean {
+  const on = /^(1|true|yes)$/i.test(env.H081_REP_DEV_SETUP?.trim() ?? '');
+  if (on && !localnet) throw new Error('H081_REP_DEV_SETUP is for localnet only: a dev reputation setup can be forged by whoever ran it');
+  return on;
 }
 
 /** Solana's own public endpoints: no API key in the URL. */

@@ -4,6 +4,9 @@
 //   h081-loan-proof:  { ref, payout, proof: {a, b, c}, args: StreamArgs }       (borrower -> lender)   (kind 2)
 //   h081-address:     a shielded H081 address (spending pk + viewing key) that others pay privately   (kind 5)
 //   h081-key:         the agent key backup: the 32-byte Solana secret seed (CLI only, never sent anywhere)   (kind 6)
+//   h081-rep:         a reputation proof for one audience and challenge                       (prover -> verifier) (kind 7)
+//   h081-rep-ask:     a reputation request: audience, challenge, thresholds                   (verifier -> prover) (kind 8)
+//   h081-rep-sig:     the presenter's session-key signature that unlocks a bound h081-rep code (prover -> verifier) (kind 9)
 // Loan codes in the first (v1) format still decode: JSON with bigints, keys and bytes tagged, base64url, prefixed
 // (stipend-site/src/lib/live/bank.ts). encodeTerms / encodeProofCode make them only to test that compatibility.
 import bs58 from 'bs58';
@@ -92,8 +95,11 @@ export function decodeProofCode(code: string): LoanProofCode {
 // 4 (practice proof) are the site's; 5 is the shielded address below.
 
 export const FRAME_VERSION = 2;
-export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6 } as const;
-const KIND_NAME: Record<number, string> = { 1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code' };
+export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, reputation: 7, repRequest: 8, repSig: 9 } as const;
+const KIND_NAME: Record<number, string> = {
+  1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code',
+  7: 'reputation proof code', 8: 'reputation request code', 9: 'reputation presenter signature',
+};
 
 /** Which network, program and asset a code belongs to. */
 export interface CodeContext { cluster: string; program: string; mint: string }
@@ -275,8 +281,116 @@ export function decodeKeyCode(ctx: CodeContext, code: string): Uint8Array {
   return body;
 }
 
+// ---- reputation codes (kinds 7, 8, 9). Network tag: { cluster, program: rep_registry id, mint: USDG }. The asset is
+// implicit (the tag's mint): a verifier rebuilds it as fieldOf(USDG).
+
+export const REP_PREFIX = 'h081-rep:';
+export const REP_ASK_PREFIX = 'h081-rep-ask:';
+export const REP_SIG_PREFIX = 'h081-rep-sig:';
+const REP_CODE_VERSION = 1;
+
+/** Thresholds a reputation code states (all lower bounds). */
+export interface RepThresholds { minLoans: number; minVolume: bigint; minLenders: number; minSpanDays: number; minMonths: number; monthFloor: bigint }
+
+/** What an "h081-rep:" code carries: the proof, its public inputs (asset implicit) and the tree version it was made on. */
+export interface RepCode extends RepThresholds {
+  treeVersion: number;
+  proof: Uint8Array;
+  repRoot: bigint; presNullifier: bigint; audience: bigint; nonce: bigint; expiry: bigint; bindTo: bigint;
+}
+
+/** What an "h081-rep-ask:" code carries: who asks, the challenge, the thresholds, and an optional binding and label. */
+export interface RepRequestCode extends RepThresholds {
+  audience: bigint; nonce: bigint; expiry: bigint; bindTo: bigint; label: string;
+}
+
+/** "h081-rep-sig:": the session key the code is bound to (bindTo = fieldOf(pub)) and its signature over the challenge. */
+export interface RepSigCode { pub: Uint8Array; sig: Uint8Array }
+
+class W {
+  private parts: number[] = [];
+  u8(x: number) { if (!Number.isInteger(x) || x < 0 || x > 255) throw new Error('u8 out of range'); this.parts.push(x); return this; }
+  u16(x: number) { if (!Number.isInteger(x) || x < 0 || x > 0xffff) throw new Error('u16 out of range'); this.parts.push(x & 0xff, x >> 8); return this; }
+  u64(x: bigint) { if (x < 0n || x >= 1n << 64n) throw new Error('u64 out of range'); this.parts.push(...u64le(x)); return this; }
+  f(x: bigint) { if (x < 0n || x >= FIELD) throw new Error('not a field element'); this.parts.push(...be32(x)); return this; }
+  raw(b: Uint8Array) { this.parts.push(...b); return this; }
+  done() { return Uint8Array.from(this.parts); }
+}
+class R {
+  o = 0;
+  constructor(private b: Uint8Array, private what: string) {}
+  need(n: number) { if (this.o + n > this.b.length) throw new CodeError(`That ${this.what} is incomplete; copy it again.`); }
+  u8() { this.need(1); return this.b[this.o++]; }
+  u16() { this.need(2); const v = this.b[this.o] | (this.b[this.o + 1] << 8); this.o += 2; return v; }
+  u64() { this.need(8); const v = readU64le(this.b, this.o); this.o += 8; return v; }
+  f() { this.need(32); const v = readBe(this.b.slice(this.o, this.o + 32)); this.o += 32; if (v >= FIELD) throw new CodeError(`That ${this.what} holds a value out of range.`); return v; }
+  raw(n: number) { this.need(n); const v = this.b.slice(this.o, this.o + n); this.o += n; return v; }
+  end() { if (this.o !== this.b.length) throw new CodeError(`That ${this.what} has the wrong length; copy it again.`); }
+}
+
+const thresholdsOut = (w: W, t: RepThresholds) => w.u8(t.minLoans).u64(t.minVolume).u8(t.minLenders).u16(t.minSpanDays).u8(t.minMonths).u64(t.monthFloor);
+const thresholdsIn = (r: R): RepThresholds => ({ minLoans: r.u8(), minVolume: r.u64(), minLenders: r.u8(), minSpanDays: r.u16(), minMonths: r.u8(), monthFloor: r.u64() });
+
+/** "h081-rep:<base58>": kind 7, body = ver 1 | treeVersion u16 | proof 256 | repRoot | presNullifier | audience | nonce (32 each) | expiry u64 | bindTo 32 | thresholds (21 B). 448 bytes. */
+export function encodeRepCode(ctx: CodeContext, c: RepCode): string {
+  if (c.proof.length !== 256) throw new Error('the proof must be 256 bytes');
+  const w = new W().u8(REP_CODE_VERSION).u16(c.treeVersion).raw(c.proof).f(c.repRoot).f(c.presNullifier).f(c.audience).f(c.nonce).u64(c.expiry).f(c.bindTo);
+  return frameV2(REP_PREFIX, CODE_KIND.reputation, ctx, thresholdsOut(w, c).done());
+}
+
+export function decodeRepCode(ctx: CodeContext, code: string): RepCode {
+  const what = KIND_NAME[CODE_KIND.reputation];
+  const r = new R(unframeV2(REP_PREFIX, CODE_KIND.reputation, ctx, code), what);
+  if (r.u8() !== REP_CODE_VERSION) throw new CodeError(`That ${what} is in a format this bank does not read; ask for a new one.`);
+  const treeVersion = r.u16(), proof = r.raw(256);
+  const repRoot = r.f(), presNullifier = r.f(), audience = r.f(), nonce = r.f(), expiry = r.u64(), bindTo = r.f();
+  const t = thresholdsIn(r);
+  r.end();
+  return { treeVersion, proof, repRoot, presNullifier, audience, nonce, expiry, bindTo, ...t };
+}
+
+/** "h081-rep-ask:<base58>": kind 8, body = ver 1 | audience | nonce | expiry u64 | bindTo (0 = none) | thresholds | label len u8 + UTF-8 (at most 32 bytes). */
+export function encodeRepRequest(ctx: CodeContext, q: RepRequestCode): string {
+  const label = new TextEncoder().encode(q.label ?? '');
+  if (label.length > 32) throw new Error('the request label is at most 32 bytes');
+  const w = new W().u8(REP_CODE_VERSION).f(q.audience).f(q.nonce).u64(q.expiry).f(q.bindTo);
+  return frameV2(REP_ASK_PREFIX, CODE_KIND.repRequest, ctx, thresholdsOut(w, q).u8(label.length).raw(label).done());
+}
+
+export function decodeRepRequest(ctx: CodeContext, code: string): RepRequestCode {
+  const what = KIND_NAME[CODE_KIND.repRequest];
+  const r = new R(unframeV2(REP_ASK_PREFIX, CODE_KIND.repRequest, ctx, code), what);
+  if (r.u8() !== REP_CODE_VERSION) throw new CodeError(`That ${what} is in a format this bank does not read; ask for a new one.`);
+  const audience = r.f(), nonce = r.f(), expiry = r.u64(), bindTo = r.f();
+  const t = thresholdsIn(r);
+  const n = r.u8();
+  if (n > 32) throw new CodeError(`That ${what} has a label longer than 32 bytes.`);
+  let label: string;
+  try { label = new TextDecoder('utf-8', { fatal: true }).decode(r.raw(n)); } catch { throw new CodeError(`That ${what} has an unreadable label.`); }
+  r.end();
+  return { audience, nonce, expiry, bindTo, label, ...t };
+}
+
+/** "h081-rep-sig:<base58>": kind 9, body = session pub 32 | ed25519 signature 64. */
+export function encodeRepSig(ctx: CodeContext, s: RepSigCode): string {
+  if (s.pub.length !== 32 || s.sig.length !== 64) throw new Error('a presenter signature is a 32-byte key and a 64-byte signature');
+  return frameV2(REP_SIG_PREFIX, CODE_KIND.repSig, ctx, Uint8Array.from([...s.pub, ...s.sig]));
+}
+
+export function decodeRepSig(ctx: CodeContext, code: string): RepSigCode {
+  const body = unframeV2(REP_SIG_PREFIX, CODE_KIND.repSig, ctx, code);
+  if (body.length !== 96) throw new CodeError('That reputation presenter signature has the wrong length; copy it again.');
+  return { pub: body.slice(0, 32), sig: body.slice(32) };
+}
+
+/** What the presenter's session key signs: sha256("h081-rep-present|" || audience || nonce || presNullifier), 32-byte fields. */
+export function repPresentationMessage(audience: bigint, nonce: bigint, presNullifier: bigint): Uint8Array {
+  return sha256(Uint8Array.from([...new TextEncoder().encode('h081-rep-present|'), ...be32(audience), ...be32(nonce), ...be32(presNullifier)]));
+}
+
 /** The kind of an "h081-*:" code from its prefix, or undefined. */
 export const PREFIX_KIND: Record<string, number> = {
   [TERMS_PREFIX]: CODE_KIND.terms, [PROOF_PREFIX]: CODE_KIND.proof, [ADDRESS_PREFIX]: CODE_KIND.address, [KEY_PREFIX]: CODE_KIND.key,
+  [REP_PREFIX]: CODE_KIND.reputation, [REP_ASK_PREFIX]: CODE_KIND.repRequest, [REP_SIG_PREFIX]: CODE_KIND.repSig,
 };
 export const KIND_NAMES: Readonly<Record<number, string>> = KIND_NAME;

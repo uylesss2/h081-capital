@@ -2,7 +2,7 @@
 // the clock they were made for (meta.json), into solana/test-ledger/rep-accounts/. Localnet only.
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fixtureAccounts } from '../test/solana/rep-fixtures.ts';
+import { fixtureAccounts } from '../test/solana/rep-fixtures.js';
 
 const dir = resolve(import.meta.dirname, '..', 'solana', 'test-ledger', 'rep-accounts');
 rmSync(dir, { recursive: true, force: true });

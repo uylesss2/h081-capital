@@ -4,6 +4,8 @@
 // loan program's network tag); the SDK calls that would prove or send (grant, proveStream, openSlot, fund, claim,
 // syncLoan, collect, settle) and the lender's event scan are mocked: nothing is proven or sent.
 import { createHash } from 'node:crypto';
+import { REP_LOAN_KEY_BASE } from '../../integrations/core/reputation.js';
+import { loanPk } from '../../src/crypto.js';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -450,8 +452,11 @@ describe('a loan between two agents (mocked SDK, real codes)', () => {
     const bPayout = getAssociatedTokenAddressSync(USDG, B.signer.publicKey, false, TOKEN_2022_PROGRAM_ID);
     const p = pledged(A.bank, { payout: bPayout });
     const owned: SolOwnedAllowance = { allowance: p.a, commitment: p.note.commitment, index: 5, spent: false, views: p.note.views, lender: p.note.lender, lenderKey: slotPda(ref, LOAN), mint: USDG };
-    vi.spyOn(B.bank.agent(0).wallet, 'agentAllowances').mockReturnValue([owned]);
-    const prove = vi.spyOn(B.bank.agent(0).wallet, 'proveStream').mockImplementation(async (_o, bounds) => ({
+    // borrow pledges to a fresh loan key (private reputation): loan key 0 = virtual sub-account REP_LOAN_KEY_BASE + 0
+    const loanAgent = B.bank.agent(REP_LOAN_KEY_BASE);
+    vi.spyOn(loanAgent.wallet, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(loanAgent.wallet, 'agentAllowances').mockReturnValue([owned]);
+    const prove = vi.spyOn(loanAgent.wallet, 'proveStream').mockImplementation(async (_o, bounds) => ({
       proof: { proof: p.proof, publicSignals: [], raw: { proof: {}, publicSignals: [] } }, args: { ...p.args, minRemaining: bounds.minRemaining, audience: bounds.audience },
     }));
     const borrowed = await runOp(B.bank, 'h081_loan_borrow', { termsCode: opened.termsCode, budgetUsdg: '100', days: 30, unlockDays: 30, principalUsdg: '40' }) as { proofCode: string; principal: bigint };
@@ -460,6 +465,10 @@ describe('a loan between two agents (mocked SDK, real codes)', () => {
     expect(pledge.lender.equals(slotPda(ref, LOAN))).toBe(true);
     expect(pledge.loanRef).toBe(ref);
     expect(pledge.pledgeBps).toBe(4000n);
+    // the allowance goes to the loan-key account Poseidon(15, accountSk, 0), not to a legacy HMAC sub-account
+    expect(grant.mock.calls[0][1][0].to).toEqual(loanAgent.account.address);
+    expect(loanAgent.account.keys.pk).toBe(loanPk(B.bank.account.keys.sk, 0));
+    expect(loanAgent.account.keys.pk).not.toBe(B.bank.agent(0).account.keys.pk);
     expect(Buffer.from(pledge.lenderViewPub).equals(Buffer.from(A.bank.lender().view.pub))).toBe(true);
     expect(prove.mock.calls[0][1].audience).toBe(payoutAudience(bPayout));
     expect(borrowed.principal).toBe(USD(40));
