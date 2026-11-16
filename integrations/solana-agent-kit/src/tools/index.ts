@@ -25,16 +25,29 @@ export const h081AllowanceDelegate = (agent: AgentLike, input: { allowanceId: st
 export const h081AllowanceReclaim = (agent: AgentLike, input: { allowanceId: string; confirm?: boolean }) => run(agent, 'h081_allowance_reclaim', input);
 
 export const h081Lend = (agent: AgentLike, input: {
-  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close' | 'sweep'; pledgeBps?: number; proofCode?: string; loanRef?: string;
+  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close' | 'sweep'; pledgeBps?: number; proofCode?: string; backingCode?: string; minCoverBps?: number; loanRef?: string;
   principal?: string; principalUsdg?: string; amount?: string; usdg?: string; confirm?: boolean;
 }) => run(agent, 'h081_lend', input);
 
 export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: string; toAddressCode: string }) => run(agent, 'h081_transfer', input);
 
-export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer };
+/** Backed lines: the backer side (docs/BACKER-SPEC.md). Writes return the plan unless confirm: true. */
+export const h081Back = (agent: AgentLike, input: {
+  action: 'open' | 'stake' | 'status' | 'withdraw' | 'close' | 'cancel' | 'release' | 'forgive' | 'claim'; drawKeyCode?: string; backingCode?: string; coverBps?: number; feeBps?: number;
+  days?: number; maxAdvance?: string; maxAdvanceUsdg?: string; maxTotal?: string; maxTotalUsdg?: string; lender?: string; cosign?: boolean; allowPartialCover?: boolean;
+  fromShielded?: boolean; nonce?: string; loanRef?: string; amount?: string; usdg?: string; confirm?: boolean;
+}) => run(agent, 'h081_back', input);
+
+/** Backed lines: the borrower side. */
+export const h081BackDraw = (agent: AgentLike, input: {
+  action: 'key' | 'request' | 'cancel' | 'repay' | 'take' | 'status'; backingCode?: string; lineNonce?: string; loanRef?: string; advance?: string; advanceUsdg?: string;
+  lenderFeeBps?: number; days?: number; ttlHours?: number; allowHighFees?: boolean; fromShielded?: boolean; amount?: string; usdg?: string; confirm?: boolean;
+}) => run(agent, 'h081_back_draw', input);
+
+export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer, h081Back, h081BackDraw };
 export const METHOD_OF: Record<OpName, keyof typeof METHODS> = {
   h081_bank_deposit: 'h081BankDeposit', h081_bank_withdraw: 'h081BankWithdraw', h081_bank_balance: 'h081BankBalance', h081_loan_quote: 'h081LoanQuote',
   h081_loan_borrow: 'h081LoanBorrow', h081_stake: 'h081Stake', h081_protocol_info: 'h081ProtocolInfo', h081_pay: 'h081Pay',
   h081_allowance_grant: 'h081AllowanceGrant', h081_allowance_delegate: 'h081AllowanceDelegate', h081_allowance_reclaim: 'h081AllowanceReclaim',
-  h081_lend: 'h081Lend', h081_transfer: 'h081Transfer',
+  h081_lend: 'h081Lend', h081_transfer: 'h081Transfer', h081_back: 'h081Back', h081_back_draw: 'h081BackDraw',
 };

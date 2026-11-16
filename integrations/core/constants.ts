@@ -127,6 +127,10 @@ export interface H081Config {
   maxGrant?: bigint;
   /** operator ceiling per loan this agent funds as a lender (h081_lend fund), base units; undefined = no ceiling beyond the wallet's USDG */
   maxLend?: bigint;
+  /** operator ceiling for a backed line's stake (h081_back stake): the most one stake may move and a vault may hold after it, base units */
+  maxBack?: bigint;
+  /** operator ceiling per advance this agent requests on a backed line (h081_back_draw request), base units */
+  maxDraw?: bigint;
 }
 
 /** `~` or `~/...` (also `~\...`) expanded with the home directory; anything else unchanged (trimmed). */
@@ -169,7 +173,9 @@ export const ENV_VARS = {
   H081_MAX_DEPOSIT: 'optional operator ceiling per deposit in base units, below the program cap',
   H081_MAX_PAY: 'optional operator ceiling per payment from an allowance (h081_pay) in base units',
   H081_MAX_GRANT: 'optional operator ceiling per allowance granted or delegated (h081_allowance_grant / h081_allowance_delegate) in base units',
-  H081_MAX_LEND: 'optional operator ceiling per loan the agent funds as a lender (h081_lend fund) in base units',
+  H081_MAX_LEND: 'optional operator ceiling per loan the agent funds as a lender (h081_lend fund, stream-backed or backed) in base units',
+  H081_MAX_BACK: 'optional operator ceiling for a backed line\'s stake (h081_back stake): per stake and for the vault after it, in base units',
+  H081_MAX_DRAW: 'optional operator ceiling per advance requested on a backed line (h081_back_draw request) in base units',
   H081_CLUSTER: 'mainnet-beta (default) or localnet (tests only: needs H081_RPC_URL and H081_USDG_MINT; the program ids default to the localnet ones). A cluster/id mismatch is refused before anything is signed',
   H081_HOME: 'the data directory (default ~/.h081): agent.json, config.json, api-token, ops.jsonl, cache/, circuits/',
   H081_API_PORT: 'port of the local gateway (h081 serve), default 8081; it binds 127.0.0.1 only',
@@ -215,6 +221,10 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
   if (maxGrantRaw !== undefined && maxGrantRaw !== '' && !/^\d+$/.test(maxGrantRaw)) throw new Error('H081_MAX_GRANT must be an integer in base units');
   const maxLendRaw = env.H081_MAX_LEND?.trim();
   if (maxLendRaw !== undefined && maxLendRaw !== '' && !/^\d+$/.test(maxLendRaw)) throw new Error('H081_MAX_LEND must be an integer in base units');
+  const maxBackRaw = env.H081_MAX_BACK?.trim();
+  if (maxBackRaw !== undefined && maxBackRaw !== '' && !/^\d+$/.test(maxBackRaw)) throw new Error('H081_MAX_BACK must be an integer in base units');
+  const maxDrawRaw = env.H081_MAX_DRAW?.trim();
+  if (maxDrawRaw !== undefined && maxDrawRaw !== '' && !/^\d+$/.test(maxDrawRaw)) throw new Error('H081_MAX_DRAW must be an integer in base units');
   return {
     cluster,
     rpcUrl: env.H081_RPC_URL?.trim() || 'https://api.mainnet-beta.solana.com',
@@ -234,6 +244,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): H081Config 
     maxPay: maxPayRaw ? BigInt(maxPayRaw) : undefined,
     maxGrant: maxGrantRaw ? BigInt(maxGrantRaw) : undefined,
     maxLend: maxLendRaw ? BigInt(maxLendRaw) : undefined,
+    maxBack: maxBackRaw ? BigInt(maxBackRaw) : undefined,
+    maxDraw: maxDrawRaw ? BigInt(maxDrawRaw) : undefined,
   };
 }
 

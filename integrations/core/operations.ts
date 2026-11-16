@@ -6,12 +6,14 @@ import type { StipendAddress } from '../../src/account.js';
 import type { H081Bank } from './bank.js';
 import { decodeAddressCode } from './codes.js';
 import { MAINNET } from './constants.js';
-import { LEND_ACTIONS, LEND_FIELDS, type OpName, STAKE_ACTIONS, ZOD } from './schemas.js';
+import { BACK_ACTIONS, BACK_FIELDS, DRAW_ACTIONS, DRAW_FIELDS, LEND_ACTIONS, LEND_FIELDS, type OpName, STAKE_ACTIONS, ZOD } from './schemas.js';
 import { parseAmount } from './units.js';
 
 /** What an operation needs from the bank (H081Bank satisfies it; tests pass a mock). */
 export type BankLike = Pick<H081Bank, 'deposit' | 'withdraw' | 'balance' | 'loanQuote' | 'borrow' | 'stakeView' | 'stake' | 'requestUnstake' | 'unstake' | 'protocolInfo' | 'pay' | 'codeContext'
-  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'> & { decimals: number };
+  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'
+  | 'backOpen' | 'backStake' | 'backStatus' | 'backWithdraw' | 'backSettle' | 'backClaim' | 'backDrawKey' | 'backRequest' | 'backDrawCancel' | 'backRepay' | 'backTake'
+  | 'backDrawStatus' | 'lendFundBacked'> & { decimals: number };
 
 /** Input an operation refuses (a schema or argument check); nothing was sent. */
 export class InputError extends Error {
@@ -200,6 +202,10 @@ export async function opLend(bank: BankLike, args: Args) {
       return bank.lendOpen({ pledgeBps, confirm });
     }
     case 'fund': {
+      if (present(args, 'backingCode')) {
+        const minCoverBps = present(args, 'minCoverBps') ? Number(args.minCoverBps) : undefined;
+        return bank.lendFundBacked({ backingCode: String(args.backingCode).trim(), loanRef: loanRefOf(args, false), minCoverBps, confirm });
+      }
       const proofCode = String(args.proofCode ?? '').trim();
       if (!proofCode) throw new Error('proofCode (the borrower\'s "h081-loan-proof:" code) is required to fund a loan');
       return bank.lendFund({ proofCode, loanRef: loanRefOf(args, false), principal: optionalUsdg(args, 'principal'), pledgeBps: pledgeBpsOf(args), confirm });
@@ -210,6 +216,71 @@ export async function opLend(bank: BankLike, args: Args) {
     case 'settle': return bank.lendSettle({ loanRef: loanRefOf(args, true)!, confirm });
     case 'sweep': return bank.lendSweep({ loanRef: loanRefOf(args, true)! });
     default: return bank.lendClose({ loanRef: loanRefOf(args, true)!, confirm });
+  }
+}
+
+function strayFields(args: Args, allowed: string[], action: string): void {
+  const stray = Object.keys(args).filter((k) => k !== 'action' && args[k] !== undefined && !allowed.includes(k));
+  if (stray.length) throw new Error(`action "${action}" does not take ${stray.join(', ')} (it takes ${allowed.join(', ') || 'no other fields'}). Nothing was sent.`);
+}
+function bigOf(args: Args, key: string, fallback?: bigint): bigint {
+  if (!present(args, key)) {
+    if (fallback !== undefined) return fallback;
+    throw new Error(`${key} is required`);
+  }
+  const s = String(args[key]).trim();
+  if (!/^\d+$/.test(s)) throw new Error(`${key} must be a non-negative integer`);
+  return BigInt(s);
+}
+const flag = (args: Args, k: string) => args[k] === true || args[k] === 'true';
+
+/** h081_back: the backer side of a backed line. */
+export async function opBack(bank: BankLike, args: Args) {
+  const action = String(args.action ?? '');
+  if (!(BACK_ACTIONS as readonly string[]).includes(action)) throw new Error(`action must be one of ${BACK_ACTIONS.join(', ')}`);
+  strayFields(args, BACK_FIELDS[action as (typeof BACK_ACTIONS)[number]], action);
+  const confirm = confirmed(args);
+  switch (action) {
+    case 'open': {
+      let lender: PublicKey | undefined;
+      if (present(args, 'lender')) { try { lender = new PublicKey(String(args.lender).trim()); } catch { throw new Error('lender must be a base58 Solana wallet address'); } }
+      const maxAdvance = parseAmount(args, 'maxAdvanceUsdg', USDG_DECIMALS, { baseKey: 'maxAdvance' });
+      return bank.backOpen({
+        nonce: present(args, 'nonce') ? bigOf(args, 'nonce') : undefined, drawKeyCode: String(args.drawKeyCode ?? ''), coverBps: present(args, 'coverBps') ? Number(args.coverBps) : undefined,
+        feeBps: Number(args.feeBps), days: Number(args.days), maxAdvance, maxTotal: optionalUsdg(args, 'maxTotal'), lender, cosign: flag(args, 'cosign'),
+        allowPartialCover: flag(args, 'allowPartialCover'), confirm,
+      });
+    }
+    case 'stake': return bank.backStake({ nonce: bigOf(args, 'nonce'), amount: parseAmount(args, 'usdg', USDG_DECIMALS), fromShielded: flag(args, 'fromShielded'), confirm });
+    case 'status': return bank.backStatus({ nonce: present(args, 'nonce') ? bigOf(args, 'nonce') : undefined });
+    case 'withdraw': return bank.backWithdraw({ nonce: bigOf(args, 'nonce'), amount: present(args, 'amount') || present(args, 'usdg') ? parseAmount(args, 'usdg', USDG_DECIMALS) : undefined, confirm });
+    case 'close': return bank.backWithdraw({ nonce: bigOf(args, 'nonce'), close: true, confirm });
+    case 'claim': return bank.backClaim({ backingCode: String(args.backingCode ?? ''), loanRef: loanRefOf(args, false) });
+    default: return bank.backSettle({ nonce: bigOf(args, 'nonce'), loanRef: loanRefOf(args, true)!, mode: action as 'cancel' | 'release' | 'forgive', confirm });
+  }
+}
+
+/** h081_back_draw: the borrower side of a backed line. */
+export async function opBackDraw(bank: BankLike, args: Args) {
+  const action = String(args.action ?? '');
+  if (!(DRAW_ACTIONS as readonly string[]).includes(action)) throw new Error(`action must be one of ${DRAW_ACTIONS.join(', ')}`);
+  strayFields(args, DRAW_FIELDS[action as (typeof DRAW_ACTIONS)[number]], action);
+  const confirm = confirmed(args);
+  const lineNonce = bigOf(args, 'lineNonce', 1n);
+  const backingCode = String(args.backingCode ?? '');
+  switch (action) {
+    case 'key': return bank.backDrawKey({ lineNonce });
+    case 'request': {
+      const advance = parseAmount(args, 'advanceUsdg', USDG_DECIMALS, { baseKey: 'advance' });
+      return bank.backRequest({
+        backingCode, lineNonce, loanRef: loanRefOf(args, true)!, advance, lenderFeeBps: present(args, 'lenderFeeBps') ? Number(args.lenderFeeBps) : 0, days: Number(args.days),
+        ttlHours: present(args, 'ttlHours') ? Number(args.ttlHours) : undefined, allowHighFees: flag(args, 'allowHighFees'), confirm,
+      });
+    }
+    case 'cancel': return bank.backDrawCancel({ backingCode, lineNonce, loanRef: loanRefOf(args, false), confirm });
+    case 'repay': return bank.backRepay({ backingCode, lineNonce, loanRef: loanRefOf(args, false), amount: parseAmount(args, 'usdg', USDG_DECIMALS), fromShielded: flag(args, 'fromShielded'), confirm });
+    case 'take': return bank.backTake({ lineNonce, amount: parseAmount(args, 'usdg', USDG_DECIMALS), confirm });
+    default: return bank.backDrawStatus({ backingCode, loanRef: loanRefOf(args, false) });
   }
 }
 
@@ -249,6 +320,8 @@ export const OPERATIONS: Record<OpName, (bank: BankLike, args: Args) => Promise<
   h081_stake: opStake,
   h081_protocol_info: opProtocolInfo,
   h081_transfer: opTransfer,
+  h081_back: opBack,
+  h081_back_draw: opBackDraw,
 };
 
 /** Checks `args` against the operation's zod schema (strict: unknown or misplaced fields are refused). Both front ends

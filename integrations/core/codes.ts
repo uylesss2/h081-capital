@@ -4,6 +4,9 @@
 //   h081-loan-proof:  { ref, payout, proof: {a, b, c}, args: StreamArgs }       (borrower -> lender)   (kind 2)
 //   h081-address:     a shielded H081 address (spending pk + viewing key) that others pay privately   (kind 5)
 //   h081-key:         the agent key backup: the 32-byte Solana secret seed (CLI only, never sent anywhere)   (kind 6)
+//   h081-backing:     a backed line, and the loan slot a draw on it is requested for   (backer -> borrower -> lender)   (kind 8)
+//   h081-draw-key:    a borrower's per-line draw key and the account its advance is paid to   (borrower -> backer)   (kind 9)
+// Kind 7 is reserved for the reputation proof code.
 // Loan codes in the first (v1) format still decode: JSON with bigints, keys and bytes tagged, base64url, prefixed
 // (stipend-site/src/lib/live/bank.ts). encodeTerms / encodeProofCode make them only to test that compatibility.
 import bs58 from 'bs58';
@@ -92,8 +95,10 @@ export function decodeProofCode(code: string): LoanProofCode {
 // 4 (practice proof) are the site's; 5 is the shielded address below.
 
 export const FRAME_VERSION = 2;
-export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6 } as const;
-const KIND_NAME: Record<number, string> = { 1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code' };
+export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, backing: 8, drawKey: 9 } as const;
+const KIND_NAME: Record<number, string> = {
+  1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code', 8: 'backing code', 9: 'draw key code',
+};
 
 /** Which network, program and asset a code belongs to. */
 export interface CodeContext { cluster: string; program: string; mint: string }
@@ -275,8 +280,42 @@ export function decodeKeyCode(ctx: CodeContext, code: string): Uint8Array {
   return body;
 }
 
+// ---- backed lines (docs/BACKER-SPEC.md): kinds 8 and 9, in the loan code context (the stream_loan program)
+
+export const BACKING_PREFIX = 'h081-backing:';
+export const DRAW_KEY_PREFIX = 'h081-draw-key:';
+
+/** A line, and (after a request) the loan slot its draw waits on; loanRef 0 = no slot yet. */
+export interface BackingCodeBody { backing: PublicKey; loanRef: bigint }
+/** A borrower's draw key for one line, and the token account its advance is paid to. */
+export interface DrawKeyCodeBody { drawKey: PublicKey; payoutTo: PublicKey }
+
+/** "h081-backing:<base58>": kind 8, body = backing (32) | loanRef u64 LE (0 = none). */
+export function encodeBackingCode(ctx: CodeContext, b: BackingCodeBody): string {
+  if (b.loanRef < 0n || b.loanRef >= 1n << 64n) throw new Error('loanRef out of range');
+  return frameV2(BACKING_PREFIX, CODE_KIND.backing, ctx, Uint8Array.from([...b.backing.toBytes(), ...u64le(b.loanRef)]));
+}
+export function decodeBackingCode(ctx: CodeContext, code: string): BackingCodeBody {
+  const body = unframeV2(BACKING_PREFIX, CODE_KIND.backing, ctx, code);
+  if (body.length !== 40) throw new CodeError('That backing code is incomplete (40 bytes expected); copy it again.');
+  return { backing: new PublicKey(body.slice(0, 32)), loanRef: readU64le(body, 32) };
+}
+
+/** "h081-draw-key:<base58>": kind 9, body = draw key (32) | payout token account (32). */
+export function encodeDrawKeyCode(ctx: CodeContext, d: DrawKeyCodeBody): string {
+  return frameV2(DRAW_KEY_PREFIX, CODE_KIND.drawKey, ctx, Uint8Array.from([...d.drawKey.toBytes(), ...d.payoutTo.toBytes()]));
+}
+export function decodeDrawKeyCode(ctx: CodeContext, code: string): DrawKeyCodeBody {
+  const body = unframeV2(DRAW_KEY_PREFIX, CODE_KIND.drawKey, ctx, code);
+  if (body.length !== 64) throw new CodeError('That draw key code is incomplete (64 bytes expected); copy it again.');
+  const drawKey = new PublicKey(body.slice(0, 32));
+  if (drawKey.equals(PublicKey.default)) throw new CodeError('That draw key code holds no key.');
+  return { drawKey, payoutTo: new PublicKey(body.slice(32, 64)) };
+}
+
 /** The kind of an "h081-*:" code from its prefix, or undefined. */
 export const PREFIX_KIND: Record<string, number> = {
   [TERMS_PREFIX]: CODE_KIND.terms, [PROOF_PREFIX]: CODE_KIND.proof, [ADDRESS_PREFIX]: CODE_KIND.address, [KEY_PREFIX]: CODE_KIND.key,
+  [BACKING_PREFIX]: CODE_KIND.backing, [DRAW_KEY_PREFIX]: CODE_KIND.drawKey,
 };
 export const KIND_NAMES: Readonly<Record<number, string>> = KIND_NAME;

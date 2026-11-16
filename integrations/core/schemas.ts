@@ -8,7 +8,7 @@ const DECIMAL = /^\d+(\.\d+)?$/;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export const OPS = ['h081_bank_deposit', 'h081_bank_withdraw', 'h081_bank_balance', 'h081_loan_quote', 'h081_loan_borrow', 'h081_stake', 'h081_protocol_info', 'h081_pay',
-  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer'] as const;
+  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer', 'h081_back', 'h081_back_draw'] as const;
 export type OpName = (typeof OPS)[number];
 
 const NOTICE_SHORT = 'H081 Capital is live on Solana mainnet, not audited yet; use at your own risk.';
@@ -139,6 +139,30 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'beyond it. Privacy: stream_loan needs the slot owner\'s signature, so the agent key sends every lender action (no ' +
     'relayer): the agent wallet is public as the lender, and the principal and payout account are public; the ' +
     'borrower\'s budget and payments are not. Needs SOL for slot rent and fees (~0.02 SOL to fund). ' + NOTICE_SHORT,
+  h081_back:
+    'Back another agent\'s credit with a USDG stake (a backed line, docs/BACKER-SPEC.md), by `action`: "open" a line for ' +
+    'a borrower\'s "h081-draw-key:" code (`drawKeyCode`) with `feeBps` (your fee, paid first out of its repayments, 0..2000), ' +
+    '`days` (the line\'s life, 1..180), `maxAdvance` / `maxAdvanceUsdg` per draw and `maxTotal` over the line; `coverBps` ' +
+    'defaults to 10000 (the stake covers the lender\'s whole due; mainnet accepts nothing less); returns the "h081-backing:" ' +
+    'code to hand the borrower. "stake" moves USDG into the line\'s vault (from the agent wallet, or `fromShielded`: a pool ' +
+    'withdraw straight to it; H081_MAX_BACK caps it); "status" lists your lines and their draws; "withdraw" takes free ' +
+    'stake (not reserved by draws) to the agent wallet; "close" empties and closes a line with no open draw; "cancel" a ' +
+    'request; "release" (anyone) frees the reserve of a finished loan; "forgive" gives up an unrecovered fee or payout; ' +
+    '"claim" (anyone, with `backingCode` and `loanRef`) pays a defaulted loan\'s lender out of the stake. Risk: on a default ' +
+    'the stake pays the lender\'s shortfall up to the cover; you then get the borrower\'s later repayments until that is ' +
+    'recovered. Privacy: the line acts through a fresh key, but the agent wallet pays its fees, so the chain links the line ' +
+    'to the agent wallet; stake, terms, the advance and any default are public. WITHOUT `confirm: true` open, stake, ' +
+    'withdraw, close, cancel and forgive send NOTHING and return the plan. ' + NOTICE_SHORT,
+  h081_back_draw:
+    'Borrow against a backed line another agent opened for you, by `action`: "key" gives your "h081-draw-key:" code for ' +
+    'line `lineNonce` (read-only; hand it to the backer first); "request" asks the lender of slot `loanRef` for an advance ' +
+    '(`advance` / `advanceUsdg`, `lenderFeeBps` 0..2000, `days` until due, request valid `ttlHours`, default 24) on the ' +
+    'line in `backingCode` and returns the "h081-backing:" code to hand the lender (h081_lend fund with backingCode); ' +
+    '"cancel" an unfunded request; "repay" (from the draw key\'s account where the advance was paid, or `fromShielded`); ' +
+    '"take" moves USDG from the draw key\'s account to the agent wallet; "status" shows the line and the loan. The loan ' +
+    'owes advance + backer fee + lender fee; the borrower receives the advance minus the 0.25% origination fee. ' +
+    'H081_MAX_DRAW caps an advance. WITHOUT `confirm: true` request, cancel, repay and take send NOTHING and return the ' +
+    'plan. ' + NOTICE_SHORT,
   h081_transfer:
     'Pay USDG from this account\'s main shielded balance to another account\'s shielded address, given as its ' +
     '"h081-address:" code (its checksum, kind and network are checked first). Note to note: the amount and the recipient ' +
@@ -261,7 +285,7 @@ export const AllowanceReclaimZ = z.object({ allowanceId: idZ, confirm: z.boolean
 export const LEND_ACTIONS = ['open', 'fund', 'status', 'claim', 'collect', 'settle', 'close', 'sweep'] as const;
 export const LEND_FIELDS: Record<(typeof LEND_ACTIONS)[number], string[]> = {
   open: ['pledgeBps', 'confirm'],
-  fund: ['proofCode', 'loanRef', 'principal', 'principalUsdg', 'pledgeBps', 'confirm'],
+  fund: ['proofCode', 'backingCode', 'minCoverBps', 'loanRef', 'principal', 'principalUsdg', 'pledgeBps', 'confirm'],
   status: ['loanRef', 'pledgeBps'],
   claim: ['loanRef', 'amount', 'usdg'],
   collect: ['loanRef'],
@@ -273,6 +297,8 @@ export const LendZ = z.object({
   action: z.enum(LEND_ACTIONS, { errorMap: () => ({ message: `action must be one of ${LEND_ACTIONS.join(', ')}` }) }),
   pledgeBps: z.number().int().min(100, 'pledgeBps must be 100..9000 (1% to 90%)').max(9000, 'pledgeBps must be 100..9000 (1% to 90%)').optional(),
   proofCode: z.string().min(1).optional(),
+  backingCode: z.string().min(1).optional(),
+  minCoverBps: z.number().int().min(2000, 'minCoverBps must be 2000..10000').max(10000, 'minCoverBps must be 2000..10000').optional(),
   loanRef: z.string().regex(BASE, 'loanRef must be a non-negative integer (the loan slot number)').optional(),
   principal: posAmountZ.optional(), principalUsdg: posDecimalZ.optional(),
   amount: posAmountZ.optional(), usdg: posDecimalZ.optional(),
@@ -282,7 +308,9 @@ export const LendZ = z.object({
     message: `each action takes only its own fields: ${LEND_ACTIONS.map((a) => `${a} (${LEND_FIELDS[a].join(', ')})`).join('; ')}`,
   })
   .refine((o) => o.action !== 'open' || o.pledgeBps !== undefined, { message: 'pledgeBps is required: open needs pledgeBps (100..9000)' })
-  .refine((o) => o.action !== 'fund' || o.proofCode !== undefined, { message: 'proofCode (the borrower\'s "h081-loan-proof:" code) is required: fund needs proofCode' })
+  .refine((o) => o.action !== 'fund' || (o.proofCode !== undefined) !== (o.backingCode !== undefined), { message: 'proofCode (the borrower\'s "h081-loan-proof:" code) is required: fund needs exactly one of proofCode or backingCode (an "h081-backing:" code for a backed draw)' })
+  .refine((o) => o.backingCode !== undefined || (o.minCoverBps === undefined), { message: 'minCoverBps applies to a backed draw (backingCode) only' })
+  .refine((o) => o.backingCode === undefined || (o.principal === undefined && o.principalUsdg === undefined && o.pledgeBps === undefined), { message: 'a backed draw (backingCode) takes no principal or pledgeBps: the lender funds exactly the draw on chain' })
   .refine((o) => !['claim', 'collect', 'settle', 'close', 'sweep'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: claim, collect, settle, close and sweep need loanRef (the loan slot number)' })
   .refine(atMostOne('principal', 'principalUsdg'), bothMsg('principal', 'principalUsdg'))
   .refine(atMostOne('amount', 'usdg'), bothMsg('amount', 'usdg'));
@@ -292,11 +320,72 @@ export const TransferZ = z.object({
   toAddressCode: z.string({ required_error: 'must be given: the recipient\'s "h081-address:" code' }).min(1),
 }).strict().refine(exactlyOne('amount', 'usdg'), oneOfMsg('amount', 'usdg'));
 
+const nonceZ = z.string().regex(BASE, 'must be a positive integer string (the line number)');
+const loanRefZ = z.string().regex(BASE, 'loanRef must be a non-negative integer (the loan slot number)');
+export const BACK_ACTIONS = ['open', 'stake', 'status', 'withdraw', 'close', 'cancel', 'release', 'forgive', 'claim'] as const;
+export const BACK_FIELDS: Record<(typeof BACK_ACTIONS)[number], string[]> = {
+  open: ['drawKeyCode', 'coverBps', 'feeBps', 'days', 'maxAdvance', 'maxAdvanceUsdg', 'maxTotal', 'maxTotalUsdg', 'lender', 'cosign', 'allowPartialCover', 'nonce', 'confirm'],
+  stake: ['nonce', 'amount', 'usdg', 'fromShielded', 'confirm'],
+  status: ['nonce'],
+  withdraw: ['nonce', 'amount', 'usdg', 'confirm'],
+  close: ['nonce', 'confirm'],
+  cancel: ['nonce', 'loanRef', 'confirm'],
+  release: ['nonce', 'loanRef'],
+  forgive: ['nonce', 'loanRef', 'confirm'],
+  claim: ['backingCode', 'loanRef'],
+};
+export const BackZ = z.object({
+  action: z.enum(BACK_ACTIONS, { errorMap: () => ({ message: `action must be one of ${BACK_ACTIONS.join(', ')}` }) }),
+  drawKeyCode: z.string().min(1).optional(), backingCode: z.string().min(1).optional(),
+  coverBps: z.number().int().min(2000, 'coverBps must be 2000..10000').max(10000, 'coverBps must be 2000..10000').optional(),
+  feeBps: z.number().int().min(0, 'feeBps must be 0..2000').max(2000, 'feeBps must be 0..2000').optional(),
+  days: z.number().positive('days must be positive').max(180, 'days must be at most 180').optional(),
+  maxAdvance: posAmountZ.optional(), maxAdvanceUsdg: posDecimalZ.optional(), maxTotal: posAmountZ.optional(), maxTotalUsdg: posDecimalZ.optional(),
+  lender: b58Z.optional(), cosign: z.boolean().optional(), allowPartialCover: z.boolean().optional(), fromShielded: z.boolean().optional(),
+  nonce: nonceZ.optional(), loanRef: loanRefZ.optional(), amount: posAmountZ.optional(), usdg: posDecimalZ.optional(), confirm: z.boolean().optional(),
+}).strict()
+  .refine((o) => Object.keys(o).every((k) => k === 'action' || BACK_FIELDS[o.action].includes(k)), {
+    message: `each action takes only its own fields: ${BACK_ACTIONS.map((a) => `${a} (${BACK_FIELDS[a].join(', ')})`).join('; ')}`,
+  })
+  .refine((o) => o.action !== 'open' || (o.drawKeyCode !== undefined && o.feeBps !== undefined && o.days !== undefined && (o.maxAdvance !== undefined) !== (o.maxAdvanceUsdg !== undefined)), { message: 'open needs drawKeyCode, feeBps, days and one of maxAdvance / maxAdvanceUsdg' })
+  .refine((o) => !['stake', 'withdraw', 'close', 'cancel', 'release', 'forgive'].includes(o.action) || o.nonce !== undefined, { message: 'nonce (the line number h081_back status shows) is required' })
+  .refine((o) => !['cancel', 'release', 'forgive'].includes(o.action) || o.loanRef !== undefined, { message: 'loanRef is required: the loan slot the draw is on' })
+  .refine((o) => o.action !== 'stake' || (o.amount !== undefined) !== (o.usdg !== undefined), oneOfMsg('amount', 'usdg'))
+  .refine((o) => o.action !== 'claim' || o.backingCode !== undefined, { message: 'claim needs backingCode (and loanRef unless the code carries it)' })
+  .refine(atMostOne('amount', 'usdg'), bothMsg('amount', 'usdg'))
+  .refine(atMostOne('maxTotal', 'maxTotalUsdg'), bothMsg('maxTotal', 'maxTotalUsdg'));
+
+export const DRAW_ACTIONS = ['key', 'request', 'cancel', 'repay', 'take', 'status'] as const;
+export const DRAW_FIELDS: Record<(typeof DRAW_ACTIONS)[number], string[]> = {
+  key: ['lineNonce'],
+  request: ['backingCode', 'lineNonce', 'loanRef', 'advance', 'advanceUsdg', 'lenderFeeBps', 'days', 'ttlHours', 'allowHighFees', 'confirm'],
+  cancel: ['backingCode', 'lineNonce', 'loanRef', 'confirm'],
+  repay: ['backingCode', 'lineNonce', 'loanRef', 'amount', 'usdg', 'fromShielded', 'confirm'],
+  take: ['lineNonce', 'amount', 'usdg', 'confirm'],
+  status: ['backingCode', 'loanRef'],
+};
+export const BackDrawZ = z.object({
+  action: z.enum(DRAW_ACTIONS, { errorMap: () => ({ message: `action must be one of ${DRAW_ACTIONS.join(', ')}` }) }),
+  backingCode: z.string().min(1).optional(), lineNonce: nonceZ.optional(), loanRef: loanRefZ.optional(),
+  advance: posAmountZ.optional(), advanceUsdg: posDecimalZ.optional(),
+  lenderFeeBps: z.number().int().min(0, 'lenderFeeBps must be 0..2000').max(2000, 'lenderFeeBps must be 0..2000').optional(),
+  days: z.number().positive('days must be positive').max(180, 'days must be at most 180').optional(),
+  ttlHours: z.number().positive('ttlHours must be positive').max(168, 'ttlHours must be at most 168 (7 days)').optional(),
+  allowHighFees: z.boolean().optional(), fromShielded: z.boolean().optional(),
+  amount: posAmountZ.optional(), usdg: posDecimalZ.optional(), confirm: z.boolean().optional(),
+}).strict()
+  .refine((o) => Object.keys(o).every((k) => k === 'action' || DRAW_FIELDS[o.action].includes(k)), {
+    message: `each action takes only its own fields: ${DRAW_ACTIONS.map((a) => `${a} (${DRAW_FIELDS[a].join(', ')})`).join('; ')}`,
+  })
+  .refine((o) => o.action !== 'request' || (o.backingCode !== undefined && o.loanRef !== undefined && o.days !== undefined && (o.advance !== undefined) !== (o.advanceUsdg !== undefined)), { message: 'request needs backingCode, loanRef, days and one of advance / advanceUsdg' })
+  .refine((o) => !['cancel', 'repay', 'status'].includes(o.action) || o.backingCode !== undefined, { message: 'backingCode is required' })
+  .refine((o) => !['repay', 'take'].includes(o.action) || (o.amount !== undefined) !== (o.usdg !== undefined), oneOfMsg('amount', 'usdg'));
+
 export const ZOD: Record<OpName, z.ZodType<any>> = {
   h081_bank_deposit: DepositZ, h081_bank_withdraw: WithdrawZ, h081_bank_balance: BalanceZ, h081_loan_quote: LoanQuoteZ,
   h081_loan_borrow: LoanBorrowZ, h081_stake: StakeZ, h081_protocol_info: ProtocolInfoZ, h081_pay: PayZ,
   h081_allowance_grant: AllowanceGrantZ, h081_allowance_delegate: AllowanceDelegateZ, h081_allowance_reclaim: AllowanceReclaimZ,
-  h081_lend: LendZ, h081_transfer: TransferZ,
+  h081_lend: LendZ, h081_transfer: TransferZ, h081_back: BackZ, h081_back_draw: BackDrawZ,
 };
 
 // ------------------------------------------------------------------ JSON Schema (MCP inputSchema)
@@ -430,6 +519,8 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
       action: { type: 'string', enum: [...LEND_ACTIONS], description: 'open a slot, fund it against a borrower proof, status, claim the vested share (up to what is owed), collect routed shares, settle, close, sweep a closed loan' },
       pledgeBps: { type: 'integer', minimum: 100, maximum: 9000, description: 'open: the share of every borrower payment routed to the slot (basis points). fund: the least share the proof must pledge. status: show an open slot terms code with this share' },
       proofCode: { type: 'string', description: 'fund: the borrower proof code, "h081-loan-proof:..." (from h081_loan_borrow)' },
+      backingCode: { type: 'string', description: 'fund: instead of proofCode, an "h081-backing:" code for a backed draw (from h081_back_draw request)' },
+      minCoverBps: { type: 'integer', minimum: 2000, maximum: 10000, description: 'fund with backingCode: the least cover you accept (default 10000)' },
       loanRef: { type: 'string', pattern: BASE.source, description: 'the loan slot number; status without it lists every slot of this agent; fund defaults to the slot in the proof code' },
       principal: { ...amountJ, description: 'fund: the amount you expect to lend (base units); refused unless it is exactly what the proof backs. Default: what the proof backs' },
       principalUsdg: decimalJ('USDG'),
@@ -439,7 +530,51 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
     },
     required: ['action'],
     additionalProperties: false,
-    description: 'open needs pledgeBps; fund needs proofCode; claim, collect, settle and close need loanRef; each action takes only its own fields',
+    description: 'open needs pledgeBps; fund needs proofCode or backingCode; claim, collect, settle and close need loanRef; each action takes only its own fields',
+  },
+  h081_back: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: [...BACK_ACTIONS], description: 'open a line, stake, status, withdraw free stake, close, cancel a request, release a finished loan, forgive, claim a default for the lender' },
+      drawKeyCode: { type: 'string', description: 'open: the borrower\'s "h081-draw-key:" code' },
+      coverBps: { type: 'integer', minimum: 2000, maximum: 10000, description: 'open: share of the lender\'s due the stake covers (default 10000; mainnet accepts only 10000)' },
+      feeBps: { type: 'integer', minimum: 0, maximum: 2000, description: 'open: your fee on each advance, paid first out of repayments' },
+      days: { type: 'number', exclusiveMinimum: 0, maximum: 180, description: 'open: the line\'s life in days; every backed loan must be due by then' },
+      maxAdvance: { ...amountJ, description: 'open: the largest advance per draw (base units)' }, maxAdvanceUsdg: decimalJ('USDG'),
+      maxTotal: { ...amountJ, description: 'open: the most the line advances in all (base units; default maxAdvance)' }, maxTotalUsdg: decimalJ('USDG'),
+      lender: { ...b58J, description: 'open: pin the line to one lender wallet (default any)' },
+      cosign: { type: 'boolean', description: 'open: every request also needs this agent\'s line key' },
+      allowPartialCover: { type: 'boolean', description: 'open: accept coverBps below 10000 (localnet only on v1)' },
+      fromShielded: { type: 'boolean', description: 'stake: from the shielded balance (a pool withdraw to the line) instead of the agent wallet' },
+      nonce: { type: 'string', pattern: BASE.source, description: 'the line number (status lists them); open picks the next free one by default' },
+      loanRef: { type: 'string', pattern: BASE.source, description: 'cancel, release, forgive, claim: the loan slot of the draw' },
+      backingCode: { type: 'string', description: 'claim: the "h081-backing:" code of the line' },
+      amount: { ...amountJ, description: 'stake, withdraw: base units' }, usdg: decimalJ('USDG'),
+      confirm: { type: 'boolean', description: 'true sends it. Default false: nothing is sent, the result is the plan' },
+    },
+    required: ['action'],
+    additionalProperties: false,
+    description: 'each action takes only its own fields',
+  },
+  h081_back_draw: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: [...DRAW_ACTIONS], description: 'key (your draw-key code), request an advance, cancel it, repay, take the advance to the agent wallet, status' },
+      backingCode: { type: 'string', description: 'the "h081-backing:" code the backer gave you' },
+      lineNonce: { type: 'string', pattern: BASE.source, description: 'which of your draw keys (default 1)' },
+      loanRef: { type: 'string', pattern: BASE.source, description: 'request: the lender\'s open loan slot' },
+      advance: { ...amountJ, description: 'request: the advance (base units)' }, advanceUsdg: decimalJ('USDG'),
+      lenderFeeBps: { type: 'integer', minimum: 0, maximum: 2000, description: 'request: the lender\'s fee on the advance' },
+      days: { type: 'number', exclusiveMinimum: 0, maximum: 180, description: 'request: days from funding until the loan is due' },
+      ttlHours: { type: 'number', exclusiveMinimum: 0, maximum: 168, description: 'request: how long the lender may fund it (default 24)' },
+      allowHighFees: { type: 'boolean', description: 'request: accept fees above 10% of the advance' },
+      fromShielded: { type: 'boolean', description: 'repay: from the shielded balance (a pool withdraw to the loan)' },
+      amount: { ...amountJ, description: 'repay, take: base units' }, usdg: decimalJ('USDG'),
+      confirm: { type: 'boolean', description: 'true sends it. Default false: nothing is sent, the result is the plan' },
+    },
+    required: ['action'],
+    additionalProperties: false,
+    description: 'each action takes only its own fields',
   },
   h081_transfer: {
     type: 'object',
@@ -482,6 +617,7 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'open', pledgeBps: 4000, confirm: true },
     { action: 'fund', proofCode: 'h081-loan-proof:3vQB7B6MrGQZaxCuFg4oh', principalUsdg: '40' },
     { action: 'fund', proofCode: 'h081-loan-proof:3vQB7B6MrGQZaxCuFg4oh', confirm: true },
+    { action: 'fund', backingCode: 'h081-backing:7mZb3Lq9Xc2Wn4Rt', confirm: true },
     { action: 'status' },
     { action: 'status', loanRef: '3', pledgeBps: 4000 },
     { action: 'claim', loanRef: '3' },
@@ -490,4 +626,18 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'sweep', loanRef: '3' },
   ],
   h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
+  h081_back: [
+    { action: 'open', drawKeyCode: 'h081-draw-key:5vQB7B6MrGQZaxCuFg4oh', feeBps: 500, days: 30, maxAdvanceUsdg: '500' },
+    { action: 'stake', nonce: '1', usdg: '600', confirm: true },
+    { action: 'status' },
+    { action: 'release', nonce: '1', loanRef: '3' },
+    { action: 'claim', backingCode: 'h081-backing:7mZb3Lq9Xc2Wn4Rt', loanRef: '3' },
+    { action: 'close', nonce: '1', confirm: true },
+  ],
+  h081_back_draw: [
+    { action: 'key' },
+    { action: 'request', backingCode: 'h081-backing:7mZb3Lq9Xc2Wn4Rt', loanRef: '3', advanceUsdg: '500', lenderFeeBps: 300, days: 14 },
+    { action: 'repay', backingCode: 'h081-backing:7mZb3Lq9Xc2Wn4Rt', loanRef: '3', usdg: '540', confirm: true },
+    { action: 'status', backingCode: 'h081-backing:7mZb3Lq9Xc2Wn4Rt' },
+  ],
 };

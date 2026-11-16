@@ -51,6 +51,7 @@ import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, ch
 import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from './errors.js';
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
+import { BackerOps } from './backer.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
 
@@ -1417,6 +1418,41 @@ export class H081Bank {
     }
     return this.lenderWallet;
   }
+
+  // ---- backed lines (docs/BACKER-SPEC.md; integrations/core/backer.ts). Every write is a plan unless confirm: true.
+
+  private backerOps?: BackerOps;
+  /** The backed-line operations of this agent (backer, borrower and lender sides). */
+  async backed(): Promise<BackerOps> {
+    if (!this.backerOps) {
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
+      const bank = this;
+      this.backerOps = new BackerOps({
+        connection: this.connection, signer: this.signer, config: this.config, usdg: this.usdg, decimals: this.decimals, account: this.account,
+        get loanCodeContext() { return bank.loanCodeContext; },
+        tokenProgram: () => this.tokenProgram(),
+        walletUsdgAccount: () => this.walletUsdgAccount(),
+        shieldedWithdrawTo: async (amount, recipient) => {
+          await this.sync();
+          try { return await this.owner.withdraw(this.usdg, amount, recipient, {}, { allowOffCurve: true }); } finally { this.saveCache(); }
+        },
+      });
+    }
+    return this.backerOps.prepare();
+  }
+  async backOpen(req: Parameters<BackerOps['open']>[0]) { return (await this.backed()).open(req); }
+  async backStake(req: Parameters<BackerOps['stake']>[0]) { return (await this.backed()).stake(req); }
+  async backStatus(req: Parameters<BackerOps['status']>[0]) { return (await this.backed()).status(req); }
+  async backWithdraw(req: Parameters<BackerOps['withdraw']>[0]) { return (await this.backed()).withdraw(req); }
+  async backSettle(req: Parameters<BackerOps['settle']>[0]) { return (await this.backed()).settle(req); }
+  async backClaim(req: Parameters<BackerOps['claim']>[0]) { return (await this.backed()).claim(req); }
+  async backDrawKey(req: { lineNonce: bigint }) { return (await this.backed()).drawKeyCode(req.lineNonce); }
+  async backRequest(req: Parameters<BackerOps['request']>[0]) { return (await this.backed()).request(req); }
+  async backDrawCancel(req: Parameters<BackerOps['cancelDraw']>[0]) { return (await this.backed()).cancelDraw(req); }
+  async backRepay(req: Parameters<BackerOps['repay']>[0]) { return (await this.backed()).repay(req); }
+  async backTake(req: Parameters<BackerOps['take']>[0]) { return (await this.backed()).take(req); }
+  async backDrawStatus(req: Parameters<BackerOps['drawStatus']>[0]) { return (await this.backed()).drawStatus(req); }
+  async lendFundBacked(req: Parameters<BackerOps['lendFund']>[0]) { return (await this.backed()).lendFund(req); }
 
   /** Where loan codes belong: this cluster, the stream_loan program, USDG (the site's loan code context). */
   get loanCodeContext(): CodeContext {
