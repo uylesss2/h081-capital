@@ -271,17 +271,63 @@ export const ROUTES: RouteDef[] = [
     description: 'The fields are the h081_lend schema\'s. close answers 501 not_available. Every lender action is sent by the agent key.',
     body: obj({
       action: { type: 'string', enum: ['open', 'fund', 'collect', 'claim', 'settle'] },
-      pledgeBps: prop('h081_lend', 'pledgeBps'), proofCode: prop('h081_lend', 'proofCode'), loanRef: prop('h081_lend', 'loanRef'),
+      pledgeBps: prop('h081_lend', 'pledgeBps'), proofCode: prop('h081_lend', 'proofCode'), backingCode: prop('h081_lend', 'backingCode'),
+      minCoverBps: prop('h081_lend', 'minCoverBps'), loanRef: prop('h081_lend', 'loanRef'),
       principal: prop('h081_lend', 'principal'), principalUsdg: prop('h081_lend', 'principalUsdg'), amount: prop('h081_lend', 'amount'), usdg: prop('h081_lend', 'usdg'),
       confirm: confirmJ,
     }, ['action']),
     result: 'plan, or the matching lend result',
     handle: async (c) => {
-      only(c.body, ['action', 'pledgeBps', 'proofCode', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg', 'confirm']);
+      only(c.body, ['action', 'pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg', 'confirm']);
       const action = optStr(c.body.action, 'action') ?? '';
       if (action === 'status') throw bad('status is a read: GET /v1/loans/lent');
       const { action: _a, confirm: _c, ...fields } = c.body;
       return out(await c.h.lend(action, fields, wo(c)));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/backing', auth: true, write: true, summary: 'Backer actions on a backed line: open, stake, withdraw, close, cancel, release, forgive, claim',
+    description: 'The fields are the h081_back schema\'s (docs/BACKER-SPEC.md). Every write is sent by the agent key and is a plan unless confirm.',
+    body: { ...(JSON_SCHEMA.h081_back as Json), properties: { ...((JSON_SCHEMA.h081_back as Json).properties as Json), confirm: confirmJ } },
+    result: 'plan, or the h081_back result',
+    handle: async (c) => {
+      const action = optStr(c.body.action, 'action') ?? '';
+      if (action === 'status') throw bad('status is a read: GET /v1/backing');
+      const { action: _a, confirm: _c, ...fields } = c.body;
+      return out(await c.h.back(action, fields, wo(c)));
+    },
+  },
+  {
+    method: 'GET', path: '/v1/backing', auth: true, summary: 'This agent\'s backed lines and their draws',
+    query: [{ name: 'nonce', schema: { type: 'string', pattern: '^\\d+$' }, description: 'one line; default every line of this agent' }],
+    result: 'the h081_back status result {lines:[...]}',
+    handle: async (c) => out(await c.h.back('status', { nonce: c.query.get('nonce') ?? undefined })),
+  },
+  {
+    method: 'POST', path: '/v1/draws', auth: true, write: true, summary: 'Borrower actions on a backed line: request, cancel, repay, take',
+    description: 'The fields are the h081_back_draw schema\'s. key and status are reads: GET /v1/draws.',
+    body: { ...(JSON_SCHEMA.h081_back_draw as Json), properties: { ...((JSON_SCHEMA.h081_back_draw as Json).properties as Json), confirm: confirmJ } },
+    result: 'plan, or the h081_back_draw result',
+    handle: async (c) => {
+      const action = optStr(c.body.action, 'action') ?? '';
+      if (action === 'key' || action === 'status') throw bad(`${action} is a read: GET /v1/draws`);
+      const { action: _a, confirm: _c, ...fields } = c.body;
+      return out(await c.h.draw(action, fields, wo(c)));
+    },
+  },
+  {
+    method: 'GET', path: '/v1/draws', auth: true, summary: 'The draw-key code (no backingCode) or a backed loan\'s status (with backingCode)',
+    query: [
+      { name: 'backingCode', schema: { type: 'string' }, description: 'the line; without it the agent\'s draw-key code is returned' },
+      { name: 'loanRef', schema: { type: 'string', pattern: '^\\d+$' }, description: 'the loan on that line' },
+      { name: 'lineNonce', schema: { type: 'string', pattern: '^\\d+$' }, description: 'which draw key (default 1)' },
+    ],
+    result: 'the h081_back_draw key or status result',
+    handle: async (c) => {
+      const code = c.query.get('backingCode');
+      return out(code
+        ? await c.h.draw('status', { backingCode: code, loanRef: c.query.get('loanRef') ?? undefined })
+        : await c.h.draw('key', { lineNonce: c.query.get('lineNonce') ?? undefined }));
     },
   },
   {

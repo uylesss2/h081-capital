@@ -1305,6 +1305,16 @@
                     "type": "string",
                     "description": "fund: the borrower proof code, \"h081-loan-proof:...\" (from h081_loan_borrow)"
                   },
+                  "backingCode": {
+                    "type": "string",
+                    "description": "fund: instead of proofCode, an \"h081-backing:\" code for a backed draw (from h081_back_draw request)"
+                  },
+                  "minCoverBps": {
+                    "type": "integer",
+                    "minimum": 2000,
+                    "maximum": 10000,
+                    "description": "fund with backingCode: the least cover you accept (default 10000)"
+                  },
                   "loanRef": {
                     "type": "string",
                     "pattern": "^\\d+$",
@@ -1404,6 +1414,505 @@
           },
           "501": {
             "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/backing": {
+      "post": {
+        "operationId": "postBacking",
+        "summary": "Backer actions on a backed line: open, stake, withdraw, close, cancel, release, forgive, claim",
+        "description": "The fields are the h081_back schema's (docs/BACKER-SPEC.md). Every write is sent by the agent key and is a plan unless confirm.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "stake",
+                      "status",
+                      "withdraw",
+                      "close",
+                      "cancel",
+                      "release",
+                      "forgive",
+                      "claim"
+                    ],
+                    "description": "open a line, stake, status, withdraw free stake, close, cancel a request, release a finished loan, forgive, claim a default for the lender"
+                  },
+                  "drawKeyCode": {
+                    "type": "string",
+                    "description": "open: the borrower's \"h081-draw-key:\" code"
+                  },
+                  "coverBps": {
+                    "type": "integer",
+                    "minimum": 2000,
+                    "maximum": 10000,
+                    "description": "open: share of the lender's due the stake covers (default 10000; mainnet accepts only 10000)"
+                  },
+                  "feeBps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2000,
+                    "description": "open: your fee on each advance, paid first out of repayments"
+                  },
+                  "days": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 180,
+                    "description": "open: the line's life in days; every backed loan must be due by then"
+                  },
+                  "maxAdvance": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "open: the largest advance per draw (base units)"
+                  },
+                  "maxAdvanceUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "maxTotal": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "open: the most the line advances in all (base units; default maxAdvance)"
+                  },
+                  "maxTotalUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "lender": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "open: pin the line to one lender wallet (default any)"
+                  },
+                  "cosign": {
+                    "type": "boolean",
+                    "description": "open: every request also needs this agent's line key"
+                  },
+                  "allowPartialCover": {
+                    "type": "boolean",
+                    "description": "open: accept coverBps below 10000 (localnet only on v1)"
+                  },
+                  "fromShielded": {
+                    "type": "boolean",
+                    "description": "stake: from the shielded balance (a pool withdraw to the line) instead of the agent wallet"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "the line number (status lists them); open picks the next free one by default"
+                  },
+                  "loanRef": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "cancel, release, forgive, claim: the loan slot of the draw"
+                  },
+                  "backingCode": {
+                    "type": "string",
+                    "description": "claim: the \"h081-backing:\" code of the line"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "stake, withdraw: base units"
+                  },
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": false,
+                "description": "each action takes only its own fields"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the h081_back result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getBacking",
+        "summary": "This agent's backed lines and their draws",
+        "parameters": [
+          {
+            "name": "nonce",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            },
+            "description": "one line; default every line of this agent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: the h081_back status result {lines:[...]}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/draws": {
+      "post": {
+        "operationId": "postDraws",
+        "summary": "Borrower actions on a backed line: request, cancel, repay, take",
+        "description": "The fields are the h081_back_draw schema's. key and status are reads: GET /v1/draws.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "key",
+                      "request",
+                      "cancel",
+                      "repay",
+                      "take",
+                      "status"
+                    ],
+                    "description": "key (your draw-key code), request an advance, cancel it, repay, take the advance to the agent wallet, status"
+                  },
+                  "backingCode": {
+                    "type": "string",
+                    "description": "the \"h081-backing:\" code the backer gave you"
+                  },
+                  "lineNonce": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "which of your draw keys (default 1)"
+                  },
+                  "loanRef": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "request: the lender's open loan slot"
+                  },
+                  "advance": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "request: the advance (base units)"
+                  },
+                  "advanceUsdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "lenderFeeBps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2000,
+                    "description": "request: the lender's fee on the advance"
+                  },
+                  "days": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 180,
+                    "description": "request: days from funding until the loan is due"
+                  },
+                  "ttlHours": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 168,
+                    "description": "request: how long the lender may fund it (default 24)"
+                  },
+                  "allowHighFees": {
+                    "type": "boolean",
+                    "description": "request: accept fees above 10% of the advance"
+                  },
+                  "fromShielded": {
+                    "type": "boolean",
+                    "description": "repay: from the shielded balance (a pool withdraw to the loan)"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+$",
+                    "description": "repay, take: base units"
+                  },
+                  "usdg": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "decimal USDG amount, e.g. \"12.5\""
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "additionalProperties": false,
+                "description": "each action takes only its own fields"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or the h081_back_draw result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getDraws",
+        "summary": "The draw-key code (no backingCode) or a backed loan's status (with backingCode)",
+        "parameters": [
+          {
+            "name": "backingCode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "the line; without it the agent's draw-key code is returned"
+          },
+          {
+            "name": "loanRef",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            },
+            "description": "the loan on that line"
+          },
+          {
+            "name": "lineNonce",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d+$"
+            },
+            "description": "which draw key (default 1)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok: the h081_back_draw key or status result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
           },
           "502": {
             "$ref": "#/components/responses/E502"

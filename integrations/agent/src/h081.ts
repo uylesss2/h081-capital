@@ -13,14 +13,15 @@ import type { CircuitName } from '../../../src/prover.js';
 import { H081Bank, type BalanceView, type RelayTerms } from '../../core/bank.js';
 import { missingCircuits } from '../../core/circuits.js';
 import {
-  ADDRESS_PREFIX, type CodeContext, KEY_PREFIX, PROOF_PREFIX, TERMS_PREFIX, decodeAddressCode, decodeKeyCode, decodeLoanProof,
-  decodeLoanTerms, encodeAddressCode,
+  ADDRESS_PREFIX, BACKING_PREFIX, type CodeContext, DRAW_KEY_PREFIX, KEY_PREFIX, PROOF_PREFIX, TERMS_PREFIX, decodeAddressCode, decodeBackingCode, decodeDrawKeyCode,
+  decodeKeyCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode,
 } from '../../core/codes.js';
 import { AGENT_CIRCUITS, MAINNET, type H081Config, configFromEnv, rpcHost } from '../../core/constants.js';
 import { CodedError, classify, classifySend } from '../../core/errors.js';
 import { accountSkFromEnv, describeKeySource, keySource, loadKeypair } from '../../core/keys.js';
 import { openFromEnv } from '../../core/open.js';
 import { type Args, type BankLike, plain, runOp, validateArgs } from '../../core/operations.js';
+import { BACKED_PRIVACY } from '../../core/backer.js';
 import type { OpName } from '../../core/schemas.js';
 import { fromUnits, toUnits } from '../../core/units.js';
 import { BalanceWatcher, EventHub, type Snapshot } from './events.js';
@@ -120,7 +121,7 @@ const NEXT = 'Nothing was sent. Send it again with confirm: true (CLI: --yes) to
 const SELF_LINK = 'Sending back to the wallet that deposited links the two.';
 const KINDS: Record<string, string> = {
   h081_bank_deposit: 'deposit', h081_bank_withdraw: 'withdraw', h081_pay: 'pay', h081_transfer: 'transfer', h081_allowance_grant: 'allow',
-  h081_allowance_reclaim: 'reclaim', h081_lend: 'lend', h081_loan_borrow: 'borrow', h081_stake: 'stake',
+  h081_allowance_reclaim: 'reclaim', h081_lend: 'lend', h081_loan_borrow: 'borrow', h081_stake: 'stake', h081_back: 'back', h081_back_draw: 'draw',
 };
 
 const bad = (message: string) => new CodedError('bad_request', message);
@@ -145,7 +146,9 @@ export function loanContext(config: H081Config): CodeContext {
   return { cluster: config.cluster, program: config.loanProgramId.toBase58(), mint: config.usdgMint.toBase58() };
 }
 
-const PREFIX_KIND_NAME: Record<string, string> = { [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof' };
+const PREFIX_KIND_NAME: Record<string, string> = {
+  [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof', [BACKING_PREFIX]: 'loan-backing', [DRAW_KEY_PREFIX]: 'loan-draw-key',
+};
 
 /** Checks any "h081-*:" code against `config`: its kind, its network and whether it is valid there. Offline, no key needed. */
 export function checkCode(config: H081Config, code: string): CodeCheck {
@@ -159,6 +162,8 @@ export function checkCode(config: H081Config, code: string): CodeCheck {
     [KEY_PREFIX]: { kind: 'key', ctx: pool, decode: decodeKeyCode },
     [TERMS_PREFIX]: { kind: 'loan-terms', ctx: loan, decode: decodeLoanTerms },
     [PROOF_PREFIX]: { kind: 'loan-proof', ctx: loan, decode: decodeLoanProof },
+    [BACKING_PREFIX]: { kind: 'loan-backing', ctx: loan, decode: decodeBackingCode },
+    [DRAW_KEY_PREFIX]: { kind: 'loan-draw-key', ctx: loan, decode: decodeDrawKeyCode },
   };
   const k = prefix ? kinds[prefix] : undefined;
   if (!k) return { kind: null, network: null, valid: false, reason: prefix ? `"${prefix}" is not a code this bank reads` : 'not an H081 code (it should start with "h081-")' };
@@ -687,10 +692,13 @@ export class H081 {
     if (action === 'close') throw new CodedError('not_available', 'closing a loan slot is not available in this version');
     if (action === 'status') return { status: 'done', result: await this.lendStatus(fields.loanRef as string | undefined) };
     if (!['open', 'fund', 'collect', 'claim', 'settle'].includes(action)) throw bad('action must be one of open, fund, collect, claim, settle (status: GET /v1/loans/lent)');
-    const allowed = ['pledgeBps', 'proofCode', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg'];
+    const allowed = ['pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg'];
     const stray = Object.keys(fields).filter((k) => fields[k] !== undefined && !allowed.includes(k));
     if (stray.length) throw bad(`unknown field(s): ${stray.join(', ')}`);
-    if (action === 'fund') this.requireCode(fields.proofCode, PROOF_PREFIX, 'proofCode');
+    if (action === 'fund') {
+      if (fields.backingCode !== undefined) this.requireCode(fields.backingCode, BACKING_PREFIX, 'backingCode');
+      else this.requireCode(fields.proofCode, PROOF_PREFIX, 'proofCode');
+    }
     const args: Args = { action, ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) };
     const hasPlanStep = action === 'open' || action === 'fund' || action === 'settle';
     const sol = { open: '0.01', fund: '0.02', collect: '0.01', claim: '0.02', settle: '0.01' }[action as 'open'];
@@ -705,6 +713,39 @@ export class H081 {
         });
       },
       run: (bank) => runOp(bank, 'h081_lend', hasPlanStep ? { ...args, confirm: true } : args),
+    }, o);
+  }
+
+  /**
+   * Backed lines (docs/BACKER-SPEC.md): `back` is the backer (h081_back), `draw` the borrower (h081_back_draw). Reads
+   * (back status, draw key / status) answer at once; every write is a plan unless confirm, like the other writes.
+   */
+  async back(action: string, fields: Record<string, unknown> = {}, o: WriteOptions = {}): Promise<Outcome> {
+    return this.backed('h081_back', 'back', action, fields, o, ['status'], ['release', 'claim']);
+  }
+
+  async draw(action: string, fields: Record<string, unknown> = {}, o: WriteOptions = {}): Promise<Outcome> {
+    return this.backed('h081_back_draw', 'draw', action, fields, o, ['key', 'status'], []);
+  }
+
+  private async backed(op: 'h081_back' | 'h081_back_draw', route: string, action: string, fields: Record<string, unknown>, o: WriteOptions, reads: string[], noPlan: string[]): Promise<Outcome> {
+    const args: Args = { action, ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) };
+    try { validateArgs(op, args); } catch (e) { throw bad((e as Error).message); }
+    if (reads.includes(action)) return { status: 'done', result: plain(await runOp(await this.bank(), op, args)) };
+    const hasPlanStep = !noPlan.includes(action);
+    const usdg = typeof fields.usdg === 'string' ? fields.usdg : typeof fields.advanceUsdg === 'string' ? fields.advanceUsdg : undefined;
+    return this.write({
+      route, op, args, usdg,
+      plan: async () => {
+        const details = hasPlanStep ? plain(await runOp(await this.bank(), op, { ...args, confirm: false })) : { action, ...fields };
+        const shielded = fields.fromShielded === true;
+        return this.planOf({
+          op: `${route} ${action}`, fee: '0', solNeeded: shielded ? '0.05' : '0.01', circuit: shielded ? 'transact' : null, circuits: shielded ? ['transact'] : [],
+          publicOnChain: ['the line and its terms', 'stake and advance amounts', 'the lender', 'the agent wallet as fee payer of the line keys'], sentBy: 'agent key',
+          warnings: [BACKED_PRIVACY], details,
+        });
+      },
+      run: (bank) => runOp(bank, op, hasPlanStep ? { ...args, confirm: true } : args),
     }, o);
   }
 

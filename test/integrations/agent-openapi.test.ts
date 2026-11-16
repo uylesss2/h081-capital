@@ -27,9 +27,10 @@ describe('OpenAPI', () => {
     expect(routesOf(committed)).toEqual(table);
     // the spec's endpoint list
     expect(table).toEqual([
-      'GET /v1/address', 'GET /v1/balance', 'GET /v1/events', 'GET /v1/fees/withdraw', 'GET /v1/health', 'GET /v1/history', 'GET /v1/loans/lent', 'GET /v1/loans/quote',
-      'GET /v1/openapi.json', 'GET /v1/stake', 'GET /v1/status', 'POST /v1/allowances', 'POST /v1/allowances/{id}/reclaim', 'POST /v1/codes/check', 'POST /v1/deposit',
-      'POST /v1/loans/borrow', 'POST /v1/loans/lend', 'POST /v1/pay', 'POST /v1/stake', 'POST /v1/transfer', 'POST /v1/withdraw',
+      'GET /v1/address', 'GET /v1/backing', 'GET /v1/balance', 'GET /v1/draws', 'GET /v1/events', 'GET /v1/fees/withdraw', 'GET /v1/health', 'GET /v1/history',
+      'GET /v1/loans/lent', 'GET /v1/loans/quote', 'GET /v1/openapi.json', 'GET /v1/stake', 'GET /v1/status', 'POST /v1/allowances', 'POST /v1/allowances/{id}/reclaim',
+      'POST /v1/backing', 'POST /v1/codes/check', 'POST /v1/deposit', 'POST /v1/draws', 'POST /v1/loans/borrow', 'POST /v1/loans/lend', 'POST /v1/pay', 'POST /v1/stake',
+      'POST /v1/transfer', 'POST /v1/withdraw',
     ]);
     expect(table.some((r) => /\/ops\/|delegate/.test(r))).toBe(false);
   });

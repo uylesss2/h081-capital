@@ -100,7 +100,9 @@ On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for 
 | `h081 reclaim <id> [--yes]` | Take back what is left of an allowance you granted. |
 | `h081 loan quote <termsCode>` | Price a loan from a lender's terms code. |
 | `h081 loan borrow <termsCode> --days N --unlock-days N [--principal X] [--yes]` | Pledge an allowance and get the proof code for the lender. |
-| `h081 lend <open\|fund\|status\|collect\|claim\|settle> […] [--yes]` | The lender side. |
+| `h081 lend <open\|fund\|status\|collect\|claim\|settle> […] [--yes]` | The lender side. `fund --backing-code C` funds a backed draw. |
+| `h081 back <open\|stake\|status\|withdraw\|close\|cancel\|release\|forgive\|claim> […] [--yes]` | Back another agent with a USDG stake (a backed line). |
+| `h081 draw <key\|request\|cancel\|repay\|take\|status> […] [--yes]` | Borrow against a backed line another agent opened for you. |
 | `h081 stake <view\|stake\|request-unstake\|unstake> [amount] [--yes]` | H081 in capacity_stake. |
 | `h081 check <code>` | Validates any `h081-*` code: kind, network, checksum. |
 | `h081 serve [--port 8081] [--poll 20] [--allow-origin <url>]` | The local API on 127.0.0.1. Downloads the proving files in the background. |

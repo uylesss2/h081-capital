@@ -26,7 +26,7 @@ export const KEY_WARNING = 'Anyone with this code controls the agent\'s funds. S
 /** Every command, as the README lists them (the site's quickstart test checks its commands against this). */
 export const COMMANDS = [
   'init', 'address', 'info', 'fetch-circuits', 'balance', 'history', 'deposit', 'withdraw', 'fee', 'pay', 'transfer', 'allow', 'reclaim',
-  'loan', 'lend', 'stake', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
+  'loan', 'lend', 'back', 'draw', 'stake', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
 ] as const;
 
 const USAGE = `h081 ${VERSION}: the H081 private bank on this machine (SDK, CLI, local API, MCP)
@@ -50,6 +50,11 @@ usage: h081 <command> [options]
   loan borrow <termsCode> --days N --unlock-days N [--principal X] [--budget X] [--yes]
   lend open --pledge-bps N | fund <proofCode> [--principal X] | status [--loan-ref N]
        | collect <loanRef> | claim <loanRef> [--usdg X] | settle <loanRef>   [--yes]
+  back open --draw-key-code C --fee-bps N --days N --max-advance X [--cover-bps N] | stake --nonce N <usdg> [--from-shielded]
+       | status [--nonce N] | withdraw --nonce N [<usdg>] | close --nonce N | cancel|release|forgive --nonce N --loan-ref N
+       | claim --backing-code C --loan-ref N   [--yes]     back another agent with a stake (docs/BACKER-SPEC.md)
+  draw key [--line N] | request --backing-code C --loan-ref N --days N <usdg> [--lender-fee-bps N] | cancel | repay <usdg>
+       | take <usdg> | status --backing-code C   [--yes]     borrow against a backed line
   stake view | stake <h081> | request-unstake <h081> | unstake   [--yes]
   check <code>                                  validate any h081-* code: kind, network, checksum
   serve [--port 8081] [--poll 20] [--allow-origin <url>]   the local API on 127.0.0.1
@@ -66,7 +71,7 @@ ${NOTICE}`;
 
 class UsageError extends Error {}
 
-const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged']);
+const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged', 'from-shielded', 'cosign', 'allow-partial-cover', 'allow-high-fees']);
 
 export interface ParsedArgs { pos: string[]; flags: Record<string, string | true> }
 
@@ -311,6 +316,31 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
           case 'claim': return outcome(await h.lend('claim', { loanRef: arg(2, '<loanRef>'), usdg: str('usdg') }, write));
           default: throw new UsageError('lend open | fund | status | collect | claim | settle');
         }
+      }
+
+      case 'back': {
+        const action = arg(1, 'open, stake, status, withdraw, close, cancel, release, forgive or claim');
+        const h = await open();
+        const amt = pos[2];
+        const f: Record<string, unknown> = {
+          drawKeyCode: str('draw-key-code'), backingCode: str('backing-code'), coverBps: num('cover-bps'), feeBps: num('fee-bps'), days: num('days'),
+          maxAdvanceUsdg: str('max-advance'), maxTotalUsdg: str('max-total'), lender: str('lender'), nonce: str('nonce'), loanRef: str('loan-ref'),
+          cosign: flags.cosign === true ? true : undefined, allowPartialCover: flags['allow-partial-cover'] === true ? true : undefined,
+          fromShielded: flags['from-shielded'] === true ? true : undefined, usdg: ['stake', 'withdraw'].includes(action) ? amt : undefined,
+        };
+        return outcome(await h.back(action, f, write));
+      }
+
+      case 'draw': {
+        const action = arg(1, 'key, request, cancel, repay, take or status');
+        const h = await open();
+        const amt = pos[2];
+        const f: Record<string, unknown> = {
+          backingCode: str('backing-code'), lineNonce: str('line'), loanRef: str('loan-ref'), days: num('days'), lenderFeeBps: num('lender-fee-bps'), ttlHours: num('ttl-hours'),
+          allowHighFees: flags['allow-high-fees'] === true ? true : undefined, fromShielded: flags['from-shielded'] === true ? true : undefined,
+          advanceUsdg: action === 'request' ? amt : undefined, usdg: ['repay', 'take'].includes(action) ? amt : undefined,
+        };
+        return outcome(await h.draw(action, f, write));
       }
 
       case 'stake': {
