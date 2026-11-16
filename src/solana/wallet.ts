@@ -749,8 +749,12 @@ export class SolanaWallet extends Scanner {
   }
 
   /** Unshield: `amount` leaves the pool to `recipient`'s associated token account; it gets amount - fee. */
-  async withdraw(mint: PublicKey, amount: bigint, recipient: PublicKey, relay: SolRelay = {}): Promise<SolTxResult> {
-    await this.pool.checkRecipient(recipient);
+  /**
+   * `opts.allowOffCurve`: the recipient may be a program-derived address whose program moves the funds (a backed line's
+   * Backing PDA, whose vault is its associated token account, or a loan slot PDA, whose inbox is). Off by default.
+   */
+  async withdraw(mint: PublicKey, amount: bigint, recipient: PublicKey, relay: SolRelay = {}, opts: { allowOffCurve?: boolean } = {}): Promise<SolTxResult> {
+    await this.pool.checkRecipient(recipient, opts);
     await this.sync();
     const asset = this.registerMint(mint);
     const fee = relay.fee ?? 0n;

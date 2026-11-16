@@ -1,0 +1,121 @@
+// Backed lines: the SDK's pure parts (no validator). The math vectors are shared with the program's Rust tests.
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { Keypair, PublicKey } from '@solana/web3.js';
+import {
+  BACKER_ERROR, BACKING_ACCOUNT_SIZE, DRAW_ACCOUNT_SIZE, FULL_COVER_BPS, LOCALNET_LOAN_FAST_PROGRAM_ID, backClaimIx, backOpenIx, backRequestIx, backSettleIx,
+  backWithdrawIx, backedClaimAmount, backedTerms, backerKeyFor, backerTimes, backingPda, backingVault, checkLineTerms, decodeBacking, decodeDraw, drawKeyFor, drawPda,
+  fundBackedIx, isBackedSlot, lineCapacity, releaseReason, routingDone,
+} from '../../src/solana/backer.js';
+import { LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, MAINNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, loanStatus, slotPda, subrogationPda } from '../../src/solana/lender.js';
+
+const V = JSON.parse(readFileSync(resolve(import.meta.dirname, '..', 'data', 'backer-vectors.json'), 'utf8'));
+const disc = (s: string) => createHash('sha256').update(s).digest().subarray(0, 8);
+
+describe('backed-line math (shared vectors with backer.rs)', () => {
+  it('terms: fees round down, the reserve rounds up', () => {
+    for (const t of V.terms) {
+      const r = backedTerms({ advance: BigInt(t.advance), feeBps: t.feeBps, lenderFeeBps: t.lenderFeeBps, coverBps: t.coverBps });
+      expect([r.backerFee, r.lenderFee, r.principal, r.reserve]).toEqual([BigInt(t.backerFee), BigInt(t.lenderFee), BigInt(t.principal), BigInt(t.reserve)]);
+      expect(r.lenderDue).toBe(r.principal - r.backerFee);
+      expect(r.toPayout).toBe(BigInt(t.advance) - r.originationFee);
+    }
+    const w = backedTerms({ advance: 500_000_000n, feeBps: 500, lenderFeeBps: 300, coverBps: 2000 });
+    expect(w.uncovered).toBe(w.lenderDue - w.reserve);
+  });
+  it('claim amount table', () => {
+    for (const c of V.claim) {
+      expect(backedClaimAmount(BigInt(c.principal), BigInt(c.backerFee), BigInt(c.repaid), BigInt(c.subPaid), BigInt(c.reserve), BigInt(c.vault))).toBe(BigInt(c.pay));
+    }
+  });
+  it('release reasons and routing', () => {
+    for (const r of V.release) {
+      expect(releaseReason({ slotClosed: r.slotClosed, repaid: BigInt(r.repaid), principal: BigInt(r.principal), settled: r.settled, expiry: BigInt(r.expiry) }, BigInt(r.now))).toBe(r.reason);
+    }
+    expect(routingDone(false, 9n, 10n, 4n, 5n)).toBe(false);
+    expect(routingDone(false, 0n, 10n, 5n, 5n)).toBe(true);
+    expect(backerTimes(LOCALNET_LOAN_FAST_PROGRAM_ID).grace).toBe(2n);
+    expect(backerTimes(LOCALNET_LOAN_PROGRAM_ID).claimWindow).toBe(30n * 86_400n);
+    expect(lineCapacity(1000n, 300n, 5000)).toEqual({ free: 700n, capacity: 1400n });
+    expect(lineCapacity(100n, 300n, 10_000)).toEqual({ free: 0n, capacity: 0n });
+  });
+  it('the SDK refuses partial cover and high fees unless asked', () => {
+    expect(checkLineTerms({ coverBps: FULL_COVER_BPS, feeBps: 500, lenderFeeBps: 300 })).toEqual([]);
+    expect(() => checkLineTerms({ coverBps: 5000, feeBps: 0 })).toThrow(/below 100%/);
+    expect(checkLineTerms({ coverBps: 5000, feeBps: 0 }, { allowPartialCover: true })[0]).toMatch(/unsecured/);
+    expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 800, lenderFeeBps: 500 })).toThrow(/above 10%/);
+    expect(() => checkLineTerms({ coverBps: 1999, feeBps: 0 }, { allowPartialCover: true })).toThrow();
+    expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 2001 })).toThrow();
+  });
+});
+
+describe('per-line keys', () => {
+  it('are deterministic, distinct per nonce and per role', () => {
+    const sk = 123456789n;
+    expect(backerKeyFor(sk, 1n).publicKey.equals(backerKeyFor(sk, 1n).publicKey)).toBe(true);
+    expect(backerKeyFor(sk, 1n).publicKey.equals(backerKeyFor(sk, 2n).publicKey)).toBe(false);
+    expect(backerKeyFor(sk, 1n).publicKey.equals(drawKeyFor(sk, 1n).publicKey)).toBe(false);
+    expect(drawKeyFor(sk, 1n).publicKey.equals(drawKeyFor(sk + 1n, 1n).publicKey)).toBe(false);
+    // the seed is sha256("h081/backer/v1" | be32(sk) | le64(nonce))
+    const seed = createHash('sha256').update(Buffer.concat([Buffer.from('h081/backer/v1'), Buffer.from(sk.toString(16).padStart(64, '0'), 'hex'), Buffer.from([7, 0, 0, 0, 0, 0, 0, 0])])).digest();
+    expect(backerKeyFor(sk, 7n).publicKey.equals(Keypair.fromSeed(seed).publicKey)).toBe(true);
+  });
+});
+
+describe('instructions and accounts', () => {
+  const backer = Keypair.generate().publicKey, mint = Keypair.generate().publicKey, payer = Keypair.generate().publicKey, dk = Keypair.generate().publicKey;
+  const backing = backingPda(backer, 3n);
+  it('encode the program\'s argument layouts', () => {
+    const open = backOpenIx(backer, payer, mint, { nonce: 3n, coverBps: 10_000, feeBps: 500, expiry: 99n, drawKey: dk, maxAdvance: 1n, maxTotal: 2n, cosign: true });
+    expect(open.data.length).toBe(8 + 8 + 2 + 2 + 8 + 32 + 32 + 8 + 8 + 1);
+    expect(Buffer.from(open.data.subarray(0, 8)).equals(disc('global:back_open'))).toBe(true);
+    expect(open.keys[0].pubkey.equals(backing)).toBe(true);
+    expect(open.keys[4].pubkey.equals(backingVault(backing, mint))).toBe(true);
+    const req = backRequestIx({ backing, backer, asset: mint, tokenProgram: SPL_TOKEN_PROGRAM_ID }, dk, payer, { loanRef: 5n, advance: 10n, lenderFeeBps: 1, term: 2n, fundBy: 3n, payoutTo: payer });
+    expect(req.data.length).toBe(8 + 8 + 8 + 2 + 8 + 8);
+    expect(req.keys[1].pubkey.equals(drawPda(backing, 5n))).toBe(true);
+    expect(req.keys[4].isSigner).toBe(false);
+    const fund = fundBackedIx({ lender: payer, loanRef: 5n, backing, mint, tokenProgram: SPL_TOKEN_PROGRAM_ID, lenderSource: payer, expect: { advance: 1n, principal: 2n, term: 3n, payoutTo: dk, coverBps: 10_000, minCoverBps: 10_000 } });
+    expect(fund.data.length).toBe(8 + 8 + 8 + 8 + 8 + 32 + 2 + 2);
+    expect(fund.keys.length).toBe(16);
+    expect(fund.keys[15].pubkey.equals(subrogationPda(5n))).toBe(true);
+    const claim = backClaimIx(5n, backing, { lender: payer, asset: mint, tokenProgram: SPL_TOKEN_PROGRAM_ID });
+    expect(claim.keys[0].pubkey.equals(slotPda(5n))).toBe(true);
+    expect(backSettleIx(5n, backing, { asset: mint, tokenProgram: SPL_TOKEN_PROGRAM_ID }, backer, payer, true).data.at(-1)).toBe(1);
+    expect(backWithdrawIx(backing, backer, { asset: mint, tokenProgram: SPL_TOKEN_PROGRAM_ID, payer }, payer, 0n, true).data.length).toBe(8 + 8 + 1);
+  });
+  it('decode Backing and Draw at their sizes', () => {
+    const b = Buffer.alloc(BACKING_ACCOUNT_SIZE);
+    disc('account:Backing').copy(b, 0);
+    backer.toBuffer().copy(b, 8); dk.toBuffer().copy(b, 40); mint.toBuffer().copy(b, 104);
+    let o = 8 + 32 * 6; b.writeBigUInt64LE(3n, o); o += 8; b.writeUInt16LE(10_000, o); o += 2; b.writeUInt16LE(500, o); o += 2; b.writeBigUInt64LE(77n, o); o += 8;
+    o += 8 * 3; b.writeBigUInt64LE(515n, o); o += 8; b.writeUInt16LE(2, o);
+    const l = decodeBacking(b);
+    expect([l.backer.equals(backer), l.drawKey.equals(dk), l.asset.equals(mint), l.nonce, l.coverBps, l.feeBps, l.expiry, l.reserved, l.openDraws]).toEqual([true, true, true, 3n, 10_000, 500, 77n, 515n, 2]);
+    const d = Buffer.alloc(DRAW_ACCOUNT_SIZE);
+    disc('account:Draw').copy(d, 0); d.writeBigUInt64LE(9n, 8); backing.toBuffer().copy(d, 16); d[DRAW_ACCOUNT_SIZE - 2] = 2;
+    const dr = decodeDraw(d);
+    expect([dr.loanRef, dr.backing.equals(backing), dr.state]).toEqual([9n, true, 'claimed']);
+    expect(() => decodeDraw(b)).toThrow();
+  });
+  it('a backed slot has no pledge; error codes are appended after ReceiptNotWritable', () => {
+    expect(isBackedSlot({ funded: true, pledgeBps: 0n })).toBe(true);
+    expect(isBackedSlot({ funded: true, pledgeBps: 4000n })).toBe(false);
+    expect(isBackedSlot({ funded: false, pledgeBps: 0n })).toBe(false);
+    expect(BACKER_ERROR.BackingTerms).toBe(LOAN_ERROR.ReceiptNotWritable + 1);
+    expect(BACKER_ERROR.BadVault).toBe(6057);
+    for (const [k, v] of Object.entries(BACKER_ERROR)) expect((LOAN_ERROR as Record<string, number>)[k]).toBe(v);
+    expect(LOCALNET_LOAN_FAST_PROGRAM_ID.equals(MAINNET_LOAN_PROGRAM_ID)).toBe(false);
+  });
+  it('loanStatus marks a backed slot', async () => {
+    const data = Buffer.alloc(253);
+    disc('account:Slot').copy(data, 0);
+    data[8 + 8 + 32 + 1] = 1; // funded; pledge_bps stays 0
+    const fake = { getMultipleAccountsInfo: async () => [{ owner: LOCALNET_LOAN_PROGRAM_ID, data }, null, null] } as never;
+    const st = await loanStatus(fake, 1n);
+    expect(st.state === 'open' && st.backed).toBe(true);
+    void PublicKey;
+  });
+});

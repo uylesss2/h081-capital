@@ -183,7 +183,9 @@ function upgradeLoanProgram(so: string) {
   try {
     const script = join(SOLANA_DIR, 'scripts', 'loan-upgrade-localnet.sh');
     const win = process.platform === 'win32';
-    const args = [win ? toWsl(script) : script, win ? toWsl(so) : so, win ? toWsl(auth) : auth, LOAN.toBase58()];
+    // the validator this suite runs on (9099 by default; never another one)
+    const port = new URL(RPC ?? 'http://127.0.0.1:9099').port || '9099';
+    const args = [win ? toWsl(script) : script, win ? toWsl(so) : so, win ? toWsl(auth) : auth, LOAN.toBase58(), port];
     const r = spawnSync(win ? 'wsl.exe' : 'bash', win ? ['-d', 'Ubuntu', '--', 'bash', ...args] : args, { encoding: 'utf8', env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
     if (r.status !== 0) throw new Error(`localnet upgrade to ${so} failed: ${r.stdout}${r.stderr}`);
   } finally {

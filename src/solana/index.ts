@@ -12,6 +12,8 @@ export * from './send.js';
 // stream_loan (lender side of stream-backed loans) and Phase 2 staking (capacity_stake, safety_pool).
 // Namespaced: they carry their own program ids, PDAs and error tables.
 export * as loan from './lender.js';
+// backed lines on stream_loan (docs/BACKER-SPEC.md)
+export * as backer from './backer.js';
 export * as staking from './token.js';
 // Read-only comparison of a local build with a deployed program (verifiable builds; no signing).
 export * as verify from './verify.js';

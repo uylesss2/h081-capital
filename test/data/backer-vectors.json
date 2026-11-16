@@ -1,0 +1,26 @@
+{
+  "comment": "Shared with programs/stream_loan/src/backer.rs tests (terms_round_fees_down_and_the_reserve_up, claim_amount_table, release_reasons). Amounts are base units.",
+  "terms": [
+    { "advance": "500000000", "feeBps": 500, "lenderFeeBps": 300, "coverBps": 10000, "backerFee": "25000000", "lenderFee": "15000000", "principal": "540000000", "reserve": "515000000" },
+    { "advance": "1", "feeBps": 0, "lenderFeeBps": 0, "coverBps": 2000, "backerFee": "0", "lenderFee": "0", "principal": "1", "reserve": "1" },
+    { "advance": "19", "feeBps": 500, "lenderFeeBps": 500, "coverBps": 10000, "backerFee": "0", "lenderFee": "0", "principal": "19", "reserve": "19" },
+    { "advance": "7777777", "feeBps": 2000, "lenderFeeBps": 2000, "coverBps": 2000, "backerFee": "1555555", "lenderFee": "1555555", "principal": "10888887", "reserve": "1866667" }
+  ],
+  "claim": [
+    { "principal": "540", "backerFee": "25", "repaid": "0", "subPaid": "0", "reserve": "515", "vault": "1000", "pay": "515" },
+    { "principal": "540", "backerFee": "25", "repaid": "10", "subPaid": "10", "reserve": "515", "vault": "1000", "pay": "515" },
+    { "principal": "540", "backerFee": "25", "repaid": "100", "subPaid": "25", "reserve": "515", "vault": "1000", "pay": "440" },
+    { "principal": "540", "backerFee": "25", "repaid": "540", "subPaid": "25", "reserve": "515", "vault": "1000", "pay": "0" },
+    { "principal": "540", "backerFee": "25", "repaid": "0", "subPaid": "0", "reserve": "103", "vault": "1000", "pay": "103" },
+    { "principal": "540", "backerFee": "25", "repaid": "0", "subPaid": "0", "reserve": "515", "vault": "300", "pay": "300" },
+    { "principal": "540", "backerFee": "25", "repaid": "0", "subPaid": "0", "reserve": "515", "vault": "0", "pay": "0" },
+    { "principal": "540", "backerFee": "0", "repaid": "200", "subPaid": "0", "reserve": "540", "vault": "1000", "pay": "340" }
+  ],
+  "release": [
+    { "slotClosed": true, "repaid": "0", "principal": "10", "settled": false, "now": "0", "expiry": "1000", "reason": 3 },
+    { "slotClosed": false, "repaid": "10", "principal": "10", "settled": false, "now": "0", "expiry": "1000", "reason": 1 },
+    { "slotClosed": false, "repaid": "3", "principal": "10", "settled": true, "now": "0", "expiry": "1000", "reason": 2 },
+    { "slotClosed": false, "repaid": "3", "principal": "10", "settled": false, "now": "3197800", "expiry": "1000", "reason": 0 },
+    { "slotClosed": false, "repaid": "3", "principal": "10", "settled": false, "now": "3197801", "expiry": "1000", "reason": 4 }
+  ]
+}

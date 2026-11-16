@@ -14,6 +14,7 @@ import { escrowPda, poolPda } from './pda.js';
 import { LOCALNET_POOL_PROGRAM_ID, type StreamArgs, bufferCloseIx, encodeStreamArgs, programDataAddress } from './program.js';
 import { LOCALNET_SAFETY_POOL_PROGRAM_ID, coverPda, createAtaIdempotentIx, decodeCover, loanAccounts, releaseCoverIx } from './token.js';
 import { OP_CU_LIMIT, type SolPledgeTerms, type SolanaPool, openSolLenderMemo, solAllowanceMemo, solSealForLender } from './wallet.js';
+import * as backer from './backer.js';
 
 /** Localnet stream_loan program id (solana/keys/stream_loan-keypair.json, declared in programs/stream_loan). */
 export const LOCALNET_LOAN_PROGRAM_ID = new PublicKey('FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc');
@@ -48,6 +49,10 @@ export const LOAN_ERROR = {
   BadCover: 6031, BadReceipt: 6032, SubrogationOpen: 6033,
   // overpay cap (docs/LOAN-OVERPAY-CAP.md)
   LoanRepaid: 6034, ClaimTooLarge: 6035, NoExcess: 6036, PayoutCannotReceive: 6037, LegacyReceiptNoPayout: 6038, ReceiptNotWritable: 6039,
+  // backed lines (docs/BACKER-SPEC.md; also BACKER_ERROR in backer.ts)
+  BackingTerms: 6040, NotTheBacker: 6041, NotTheDrawKey: 6042, DrawState: 6043, StakeShort: 6044, LineExpired: 6045, TooManyDraws: 6046,
+  DrawTooLarge: 6047, NoBackedDefault: 6048, NotReleasable: 6049, BackingBusy: 6050, LenderNotAllowed: 6051, AssetNotBackable: 6052,
+  TermsMismatch: 6053, CoverTooLow: 6054, RequestExpired: 6055, ReceiptsPending: 6056, BadVault: 6057,
 } as const;
 
 /**
@@ -435,7 +440,8 @@ export function slotClosedEvents(logs: string[]): SlotClosedEvent[] {
  * A closed slot is a finished loan, never an error.
  */
 export type LoanStatus =
-  | { state: 'open'; slot: SlotAccount }
+  /** `backed`: funded by a backed line (fund_backed: no pledge); its Subrogation is the backer's fee and recovery, not a slash */
+  | { state: 'open'; slot: SlotAccount; backed?: true }
   | { state: 'closed'; receipt?: ClosedSlotAccount }
   | { state: 'none' };
 type AccountsReader = Pick<Connection, 'getMultipleAccountsInfo'>;
@@ -443,7 +449,10 @@ export async function loanStatus(connection: AccountsReader, loanRef: bigint, pr
   const [slot, receipt, registry] = await connection.getMultipleAccountsInfo(
     [slotPda(loanRef, programId), closedSlotPda(loanRef, programId), registryPda(programId)], 'confirmed',
   );
-  if (slot && slot.owner.equals(programId) && isSlotAccount(slot.data)) return { state: 'open', slot: decodeSlot(slot.data) };
+  if (slot && slot.owner.equals(programId) && isSlotAccount(slot.data)) {
+    const s = decodeSlot(slot.data);
+    return s.funded && s.pledgeBps === 0n ? { state: 'open', slot: s, backed: true } : { state: 'open', slot: s };
+  }
   if (receipt && receipt.owner.equals(programId) && isClosedSlotAccount(receipt.data)) return { state: 'closed', receipt: decodeClosedSlot(receipt.data) };
   // no slot and no receipt: a closed unfunded slot when the ref was handed out, else never opened
   if (registry && loanRef > 0n && loanRef < decodeRegistry(registry.data).nextLoanRef) return { state: 'closed' };
@@ -752,6 +761,31 @@ export class SolanaLoanLenderWallet {
     }
   }
 
+  // ---- backed lines (docs/BACKER-SPEC.md) ----
+
+  /**
+   * Funds a backed draw on one of this lender's slots at exactly the terms on chain, refusing a line whose cover is below
+   * `minCoverBps` (default 100%). The advance leaves the lender's associated token account.
+   */
+  fundBacked(backing: PublicKey, loanRef: bigint, opts: { minCoverBps?: number; maxAdvance?: bigint } = {}) {
+    return backer.fundBacked(this.connection, this.signer, backing, loanRef, { ...opts, programId: this.programId, treasuryOwner: this.treasuryOwner, poolProgram: this.pool.programId });
+  }
+
+  /** Permissionless default claim on a backed loan (syncs first in the same transaction). */
+  claimBacked(backing: PublicKey, loanRef: bigint) {
+    return backer.claimBacked(this.connection, this.signer, backing, loanRef, this.programId, this.pool.programId);
+  }
+
+  /** Permissionless: frees a finished backed loan's reserve (and closes its Draw when nothing more is owed to the vault). */
+  releaseBacked(backing: PublicKey, loanRef: bigint) {
+    return backer.releaseBacked(this.connection, this.signer, backing, loanRef, this.programId);
+  }
+
+  /** A backed loan as this lender sees it: the draw, the slot, what went to the backer and to the lender. */
+  backedStatus(backing: PublicKey, loanRef: bigint) {
+    return backer.backedLoanView(this.connection, backing, loanRef, this.programId);
+  }
+
   /** Permissionless: credit and forward the shares that reached the slot's inbox (defaults to the loan asset). */
   async syncLoan(loanRef: bigint, mint?: PublicKey, payer: Keypair = this.signer): Promise<SentTx> {
     const slot = await this.loan(loanRef);
@@ -819,6 +853,7 @@ export class SolanaLoanLenderWallet {
       if (!s.settled) throw new Error(`loan ${loanRef} is not settled: settle it first`);
       const sub = await this.subrogation(loanRef);
       if (sub && sub.paid < sub.owed && s.repaid < s.principal) {
+        if (s.pledgeBps === 0n) throw new Error(`loan ${loanRef} is backed and its backer is still owed ${sub.owed - sub.paid} (fee or recovery): the slot stays open until it is paid, forgiven, or the recovery horizon passes`);
         throw new Error(`loan ${loanRef} was slashed and the safety pool has recovered ${sub.paid} of ${sub.owed}: the slot stays open until it has`);
       }
       loan = { asset: s.asset, tokenProgram: s.tokenProgram };
