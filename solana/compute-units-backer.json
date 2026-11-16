@@ -1,0 +1,13 @@
+{
+  "measured": "2026-11-16T00:27:07.999Z",
+  "rpc": "http://127.0.0.1:18899",
+  "computeUnits": {
+    "back_open": 55580,
+    "back_request (+ payout ATA idempotent)": 40325,
+    "fund_backed (+ treasury ATA idempotent)": 94260,
+    "transfer + sync (fee to the vault, rest to the lender)": 31426,
+    "back_settle (release + close Draw)": 24084,
+    "back_withdraw close (+ backer ATA idempotent)": 23184,
+    "sync + back_claim": 71567
+  }
+}

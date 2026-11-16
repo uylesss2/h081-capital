@@ -200,7 +200,9 @@ DrawState, StakeShort, LineExpired, TooManyDraws, DrawTooLarge, NoBackedDefault,
 LenderNotAllowed, AssetNotBackable, TermsMismatch, CoverTooLow, RequestExpired, ReceiptsPending, BadVault.
 `error_codes_never_shift` still pins 33, 34 and 39 and now also 40 and 57.
 
-**Compute units**: not measured yet. Measure them before the go.
+**Compute units** (localnet, `solana/compute-units-backer.json`, whole transactions): back_open 36-56k, back_request
+(with the payout ATA create-idempotent) 40k, fund_backed (with the treasury ATA create-idempotent) 94k, transfer + sync
+31k, sync + back_claim 72k, back_settle (release and close) 24k, back_withdraw close 23k.
 
 ## 5. Circuits
 
@@ -360,7 +362,7 @@ repayment before expiry and a minimum fee paid.
      cancelled by the lender; max_total; the lender pin; co-sign; the SDK's partial-cover refusal; dust swept at close;
      a funded slot refusing a second line.
 - **Not covered yet**: a shielded stake or repayment through a real pool withdraw to a PDA; safety_pool `insure` on a
-  backed slot (expected: `slash` fails at `record_slash`); compute-unit measurements; the site mirror.
+  backed slot (expected: `slash` fails at `record_slash`); the H081Bank backed flow against a validator; the site mirror.
 
 ## 15. Files
 
