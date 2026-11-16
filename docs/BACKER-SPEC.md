@@ -72,7 +72,7 @@ default: after expiry + GRACE anyone back_claim (after syncing): vault pays L mi
 Sizes include the 8-byte discriminator. Rent at the runbook's 5,080 lamports per byte including the 128-byte
 overhead.
 
-### 3.1 `Backing`: PDA `["backing", backer, nonce u64 LE]`, **276 B**, ≈ 0.00205 SOL, refunded at close
+### 3.1 `Backing`: PDA `["backing", backer, nonce u64 LE]`, **278 B**, ≈ 0.00206 SOL, refunded at close
 
 | field | type | meaning |
 |---|---|---|
@@ -84,6 +84,7 @@ overhead.
 | nonce | u64 | |
 | cover_bps | u16 | MIN_COVER_BPS..10000 |
 | fee_bps | u16 | ≤ 2000 |
+| max_lender_fee_bps | u16 | ≤ 2000, set by the backer at open (SDK and agent default 500): the highest lender fee a request may offer |
 | expiry | u64 | the line's end; every backed loan must be due by then |
 | max_advance, max_total | u64 ×2 | per-draw and lifetime limits set by the backer |
 | advanced_total | u64 | sum of funded advances |
@@ -97,6 +98,13 @@ overhead.
 
 The stake is the vault balance; anyone may top it up. free = `vault - reserved` (saturating: a Token-2022 permanent
 delegate can move vault funds); capacity = free × 10000 / cover_bps.
+
+The reserve covers advance + lender fee, and the draw key picks the lender fee on each request, so `max_lender_fee_bps`
+is what bounds how far one draw can reach into the stake past its advance. It does not stop a borrower from funding its
+own draw: slots are open to anyone, so on a line with no lender pin and no co-sign the draw key can open a slot from a
+second wallet, fund its own request (cost: the 0.25% origination fee), default, and claim up to advance + lender fee
+from the stake. **The guard against that is the lender pin or `cosign`**; a backer that opens a line without either
+accepts it (the agent's open plan says so).
 
 ### 3.2 `Draw`: PDA `["draw", backing, loan_ref u64 LE]`, **178 B**, ≈ 0.00155 SOL, refunded to `payer`
 
@@ -152,18 +160,22 @@ gitignored `solana/keys/stream_loan_fast-keypair.json`), refuses to compile with
 neither the localnet nor the mainnet stream_loan id. It is only ever loaded on a local test validator.
 
 1. **`back_open(args)`**: signers backer, payer. Creates the Backing and the vault ATA (idempotent). Checks: token
-   program, mint, asset list, **no Token-2022 TransferFeeConfig on the mint**, cover range, fee ≤ 2000,
+   program, mint, asset list, **no transfer fee on the mint** (below), cover range, fee ≤ 2000, max_lender_fee_bps ≤ 2000,
    `now + MIN_TERM ≤ expiry ≤ now + MAX_LINE_TERM`, draw key set, `MIN_ADVANCE ≤ max_advance ≤ MAX_DRAW`,
    `max_total ≥ max_advance`. Event `BackingOpened`.
 2. **`back_request(loan_ref, advance, lender_fee_bps, term, fund_by)`**: signers draw key, payer (and the backer when
    `cosign`). Checks: the slot is unfunded; the pin; `MIN_ADVANCE ≤ advance ≤ min(MAX_DRAW, max_advance)`;
-   `advanced_total + advance ≤ max_total`; lender fee ≤ 2000; `term ≥ MIN_TERM` and `now + term ≤ line expiry`;
+   `advanced_total + advance ≤ max_total`; lender fee ≤ min(2000, the line's max_lender_fee_bps); the line's mint
+   (passed last) has no transfer fee; `term ≥ MIN_TERM` and `now + term ≤ line expiry`;
    `now < fund_by ≤ now + 7 days`; `open_draws < 8`; `payout_to` is an unfrozen token account of the asset that is
    not the vault or the inbox and not owned by the lender, the slot PDA, the Backing PDA or the backer; free stake ≥
    reserve. Effect: `reserved += reserve`, `open_draws += 1`. Event `DrawRequested`.
 3. **`fund_backed(loan_ref, expect)`**: signer the slot's lender (`has_one`). `expect = {advance, principal, term,
    payout_to, cover_bps, min_cover_bps}` must match the Draw and the line exactly (`TermsMismatch`), and
-   `cover_bps ≥ min_cover_bps` (`CoverTooLow`). Also: state 0, unfunded, the line's mint and token program, the pin,
+   `cover_bps ≥ min_cover_bps` (`CoverTooLow`). Callers must pass the terms the lender was **shown**, never a fresh
+   read: the SDK's `fundBacked` takes them as `expect` and refuses a Draw that differs, and the agent's fund plan
+   returns them with a `planDigest` that the confirm call must pass back. Also: state 0, unfunded, the line's mint
+   (no transfer fee) and token program, the pin,
    `now ≤ fund_by`, `now + term ≤ line expiry`, `advanced_total + advance ≤ max_total`, the payout checks again (and not
    the lender's source account), `vault ≥ reserved`, an empty pool escrow, and the treasury checks of `fund`. Effect:
    origination fee (25 bps of the advance) to the treasury, the rest of the advance to `payout_to`, the inbox created
@@ -173,7 +185,12 @@ neither the localnet nor the mainnet stream_loan id. It is only ever loaded on a
 4. **Repayment**: the existing `sync`, unchanged.
 5. **`back_claim(loan_ref)`**: permissionless. Requires Draw state 1, the Subrogation naming this Backing,
    `shortfall_of(slot, now, 0) > 0`, and **no unsynced value: inbox balance ≤ `ledger.held` and an empty pool escrow**
-   (`ReceiptsPending`; the SDK sends `sync` + `back_claim` in one transaction). Pays
+   (`ReceiptsPending`). Anyone can put value in the slot's pool escrow (a spend naming the slot with no lender
+   account, then dust), so **a claim must bundle pull + sync + claim in one transaction**: the SDK's `claimBacked` sends
+   `createAtaIdempotent(slot inbox)` + `pull_lender_share` when the escrow holds anything, then `sync`, then
+   `back_claim`. Without that, an escrow left non-empty could block every claim until the claim window passed and the
+   reserve went back to the backer. back_claim does not check the transfer fee: refusing a claim would let the cover
+   lapse. Pays
    `min((principal - backer_fee) - (repaid - sub.paid), reserve, vault)` to the lender's associated token account, or,
    when that account is missing or frozen, **into the slot's inbox as `held`** (the lender takes it with `collect`, so
    the cover can never lapse because of the lender's account). Sets `sub.owed = sub.paid + pay` (the unpaid fee is
@@ -194,6 +211,13 @@ neither the localnet nor the mainnet stream_loan id. It is only ever loaded on a
    `close = true`: needs `open_draws == 0` and `reserved == 0`; **sweeps the whole vault** (including dust others sent)
    to the backer's destination, harvests withheld Token-2022 fees, closes the vault and the Backing, both rents to the
    line's payer. Events `BackingWithdrawn` / `BackingClosed`.
+
+**Transfer fees.** USDG is Token-2022 with a TransferFeeConfig extension set to 0 bps and maximum fee 0 (and a
+PermanentDelegate). The program parses the TransferFeeConfig value (two authorities, withheld u64, then the older and
+the newer `TransferFee {epoch u64, maximum_fee u64, basis_points u16}`) and refuses (`AssetNotBackable`) only when the
+older or the newer fee has basis points > 0 or a maximum > 0, or the value is too short to read. A rate the fee
+authority raises later shows in the newer fee at once, so `back_request` and `fund_backed` check again: new draws stop,
+open loans repay and claim as before.
 
 **Errors**, appended after `ReceiptNotWritable` (39), so 6040..6057: BackingTerms, NotTheBacker, NotTheDrawKey,
 DrawState, StakeShort, LineExpired, TooManyDraws, DrawTooLarge, NoBackedDefault, NotReleasable, BackingBusy,
@@ -287,6 +311,8 @@ deposit volume), a pinned lender hints at who the backer is, and the lender is n
 
 ## 10. Cost (mainnet)
 
+- **After the review fixes** (lender-fee cap, transfer-fee parse, the mint on back_request) the localnet build is
+  444,984 B (+2,608 B on the figures below); the mainnet-feature scratch build was not re-measured.
 - **stream_loan extend: measured, not estimated.** The localnet build of the pre-backer source is 320,720 B; with
   backed lines it is 442,376 B. That is **+121,656 B (≈ 119 KB)**, about 0.62 SOL locked at 5,080 lamports/byte (about
   0.85 SOL at 6,960 lamports/byte). The first build, with nine instructions, was +140,672 B. Merging cancel, release
@@ -304,9 +330,10 @@ deposit volume), a pinned lender hints at who the backer is, and the lender is n
 - **D1. Program size.** +119 KB (about 0.62-0.85 SOL locked). Accept it, or ask for a further cut (hand-parsed accounts
   instead of Anchor's generated ones for the backer instructions; not attempted).
 - **D2. Constants** as in section 4, compiled in; changing one means another upgrade. On mainnet, full cover only.
-- **D3. USDG check.** USDG is Token-2022. `back_open` refuses a mint with a TransferFeeConfig extension. Check the
-  mainnet mint's extensions (transfer fee, permanent delegate, default-frozen accounts) before the go; nothing in this
-  branch read mainnet.
+- **D3. USDG check.** USDG is Token-2022 with TransferFeeConfig at 0 bps / maximum 0 and a PermanentDelegate (a
+  read-only review check). The program accepts that and refuses any non-zero rate or maximum, current or scheduled
+  (section 4). Re-check the mainnet mint's extensions (transfer fee, permanent delegate, default-frozen accounts)
+  before the go.
 - **D4. Fee sponsorship** (section 9). Without it, v1 lines are linkable to the paying wallet.
 - **D5. The upgrade** (section 16): owner-only, rehearsed on localnet first, upgrade authority kept, never `--final`.
 - **D6. The site mirror** of kinds 8 and 9, and the "backed" label in the site and x402 views (section 16).
@@ -331,7 +358,8 @@ repayment before expiry and a minimum fee paid.
 
 ## 14. Tests
 
-- **Rust** (`cargo test`, host): sizes (Backing 276, Draw 178; the existing size and cover-offset tests unchanged),
+- **Rust** (`cargo test`, host): the TransferFeeConfig rule (0 bps accepted next to a PermanentDelegate; a rate or a
+  maximum on the older or the newer fee refused; a short value refused), sizes (Backing 278, Draw 178; the existing size and cover-offset tests unchanged),
   terms rounding, the claim-amount table, release reasons and routing, the fee routed first through the unchanged
   `split_receipt`, error codes appended, the fast id never a deployed id, and `property_backer_and_lender_accounting`.
   That property runs 5,000 random repayment, claim and recovery sequences and checks that the lender plus the vault
@@ -360,14 +388,21 @@ repayment before expiry and a minimum fee paid.
   7. Guards: every line-term bound, the draw key, the limits, the payout owner checks; the front-run (cancel and
      re-request bigger) refused with `TermsMismatch`; a stranger's line on the same slot does not block and is
      cancelled by the lender; max_total; the lender pin; co-sign; the SDK's partial-cover refusal; dust swept at close;
-     a funded slot refusing a second line.
+     a funded slot refusing a second line; the line's lender-fee cap; a re-request with the same advance but another
+     term and lender fee refused against the planned terms (SDK and `TermsMismatch`).
+  8. A Token-2022 mint like USDG (TransferFeeConfig at 0 bps + PermanentDelegate): a whole loan opens, funds, repays
+     and closes; after `SetTransferFee` a pending request cannot be funded and a new one is refused
+     (`AssetNotBackable`); mints charging 100 bps, a maximum only, or 1 bp only are refused at open.
+  9. The pool escrow cannot block a default claim: a share escrowed by a spend naming the slot plus dust sent into the
+     escrow; sync + claim alone is refused (`ReceiptsPending`), `claimBacked` (pull + sync + claim) pays the lender its
+     whole due.
 - **Not covered yet**: a shielded stake or repayment through a real pool withdraw to a PDA; safety_pool `insure` on a
   backed slot (expected: `slash` fails at `record_slash`); the H081Bank backed flow against a validator; the site mirror.
 
 ## 15. Files
 
 - Program: `solana/programs/stream_loan/src/backer.rs` (new), `lib.rs`, `error.rs`, `state.rs` (GRACE under `fast`),
-  `token.rs` (`mint_has_transfer_fee`), `Cargo.toml` (`fast`).
+  `token.rs` (`transfer_fee_active`, `mint_charges_transfer_fee`), `Cargo.toml` (`fast`).
 - Scripts: `solana/scripts/loan-build.sh` (also builds `stream_loan_fast.so`; `LOAN_TARGET_DIR`), `loan-keygen.sh`,
   `loan-upgrade-localnet.sh` (port), `backer-validator.sh`, `scripts/solana-backer-localnet.mjs`.
 - SDK: `src/solana/backer.ts` (new), `lender.ts`, `wallet.ts`, `index.ts`.

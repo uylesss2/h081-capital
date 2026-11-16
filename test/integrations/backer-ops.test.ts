@@ -9,8 +9,8 @@ import {
 } from '../../integrations/core/codes.js';
 import { configFromEnv } from '../../integrations/core/constants.js';
 import { BackerOps, BACKED_PRIVACY, type BackerHost } from '../../integrations/core/backer.js';
-import { BACKING_ACCOUNT_SIZE, backerKeyFor, backingPda, backingVault } from '../../src/solana/backer.js';
-import { LOCALNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID } from '../../src/solana/lender.js';
+import { BACKING_ACCOUNT_SIZE, DRAW_ACCOUNT_SIZE, backerKeyFor, backingPda, backingVault, drawPda } from '../../src/solana/backer.js';
+import { LOCALNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, slotPda } from '../../src/solana/lender.js';
 import { createHash } from 'node:crypto';
 
 const ctx = { cluster: 'mainnet-beta', program: '8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4', mint: '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH' };
@@ -82,7 +82,7 @@ describe('h081_back and h081_back_draw are operations', () => {
     await runOp(bank, 'h081_back_draw', { action: 'request', backingCode, loanRef: '3', advanceUsdg: '500', lenderFeeBps: 300, days: 14 });
     await runOp(bank, 'h081_back_draw', { action: 'repay', backingCode, usdg: '540', confirm: true });
     await runOp(bank, 'h081_lend', { action: 'fund', backingCode });
-    await runOp(bank, 'h081_lend', { action: 'fund', backingCode, minCoverBps: 5000, confirm: true });
+    await runOp(bank, 'h081_lend', { action: 'fund', backingCode, minCoverBps: 5000, planDigest: 'abcdef0123456789', confirm: true });
     expect(calls.map(([n]) => n)).toEqual(['backDrawKey', 'backRequest', 'backRepay', 'lendFundBacked', 'lendFundBacked']);
     expect(calls[0][1]).toEqual({ lineNonce: 1n });
     expect(calls[1][1]).toMatchObject({ advance: 500_000_000n, lenderFeeBps: 300, days: 14, confirm: false });
@@ -144,5 +144,86 @@ describe('operator ceilings', () => {
     const p = await ops.stake({ nonce: 1n, amount: 100_000n });
     expect(p).toMatchObject({ sent: false, dryRun: true });
     expect(sent).toBe(0);
+  });
+});
+
+describe('h081_lend fund with a backing code: the lender funds exactly the planned terms (B3 through the agent ops)', () => {
+  const disc = (s: string) => createHash('sha256').update(s).digest().subarray(0, 8);
+  /** A mocked chain with one line and one requested draw on slot 3; `setDraw` re-requests with other terms. */
+  function chain(lender: Keypair, usdg: PublicKey) {
+    const backer = Keypair.generate().publicKey;
+    const backing = backingPda(backer, 1n, LOCALNET_LOAN_PROGRAM_ID);
+    const payoutTo = Keypair.generate().publicKey;
+    const line = Buffer.alloc(BACKING_ACCOUNT_SIZE);
+    disc('account:Backing').copy(line, 0);
+    backer.toBuffer().copy(line, 8); usdg.toBuffer().copy(line, 104); SPL_TOKEN_PROGRAM_ID.toBuffer().copy(line, 136);
+    line.writeUInt16LE(10_000, 208); line.writeUInt16LE(500, 210); line.writeUInt16LE(500, 212);
+    let draw = Buffer.alloc(DRAW_ACCOUNT_SIZE);
+    const setDraw = (o: { advance: bigint; backerFee: bigint; lenderFee: bigint; term: bigint }) => {
+      draw = Buffer.alloc(DRAW_ACCOUNT_SIZE);
+      disc('account:Draw').copy(draw, 0); draw.writeBigUInt64LE(3n, 8); backing.toBuffer().copy(draw, 16); payoutTo.toBuffer().copy(draw, 80);
+      draw.writeBigUInt64LE(o.advance, 112); draw.writeBigUInt64LE(o.backerFee, 120); draw.writeBigUInt64LE(o.lenderFee, 128); draw.writeBigUInt64LE(o.advance, 136);
+      draw.writeBigUInt64LE(o.term, 144); draw.writeBigInt64LE(9_999_999_999n, 152); draw[176] = 0;
+    };
+    setDraw({ advance: 100_000_000n, backerFee: 5_000_000n, lenderFee: 1_000_000n, term: 2n * 86_400n });
+    const slot = Buffer.alloc(253);
+    disc('account:Slot').copy(slot, 0); slot.writeBigUInt64LE(3n, 8); lender.publicKey.toBuffer().copy(slot, 16);
+    let sends = 0;
+    const connection = {
+      getAccountInfo: async (k: PublicKey) => k.equals(backing) ? { owner: LOCALNET_LOAN_PROGRAM_ID, data: line }
+        : k.equals(drawPda(backing, 3n, LOCALNET_LOAN_PROGRAM_ID)) ? { owner: LOCALNET_LOAN_PROGRAM_ID, data: draw }
+          : k.equals(slotPda(3n, LOCALNET_LOAN_PROGRAM_ID)) ? { owner: LOCALNET_LOAN_PROGRAM_ID, data: slot } : null,
+      getLatestBlockhash: async () => { sends++; throw new Error('reached the send step'); },
+      sendTransaction: async () => { sends++; throw new Error('reached the send step'); },
+      sendRawTransaction: async () => { sends++; throw new Error('reached the send step'); },
+    };
+    return { backing, connection, setDraw, sends: () => sends };
+  }
+  function ops(lender: Keypair, usdg: PublicKey, connection: unknown) {
+    const host: BackerHost = {
+      connection: connection as never, signer: lender, usdg, decimals: 6, account: { keys: { sk: 1n } }, loanCodeContext: ctx,
+      config: { ...configFromEnv({} as NodeJS.ProcessEnv), loanProgramId: LOCALNET_LOAN_PROGRAM_ID },
+      tokenProgram: async () => SPL_TOKEN_PROGRAM_ID, walletUsdgAccount: async () => Keypair.generate().publicKey, shieldedWithdrawTo: async () => ({}),
+    };
+    return new BackerOps(host);
+  }
+
+  it('the plan returns the exact terms and a planDigest; a confirm without it or with a stale one sends nothing', async () => {
+    const lender = Keypair.generate(), usdg = Keypair.generate().publicKey;
+    const c = chain(lender, usdg);
+    const o = ops(lender, usdg, c.connection);
+    const code = encodeBackingCode(ctx, { backing: c.backing, loanRef: 3n });
+    const p = await o.lendFund({ backingCode: code }) as { sent: false; plan: Record<string, unknown>; next: string };
+    expect(p.sent).toBe(false);
+    const digest = p.plan.planDigest as string;
+    expect(digest).toMatch(/^[0-9a-f]{16}$/);
+    expect(p.plan.terms).toMatchObject({ advance: 100_000_000n, principal: 106_000_000n, term: 172_800n, coverBps: 10_000 });
+    expect(p.next).toContain(digest);
+    await expect(o.lendFund({ backingCode: code, confirm: true })).rejects.toThrow(/planDigest is required/);
+    // the borrower cancels and re-requests: the same advance, a 180-day term and a higher lender fee
+    c.setDraw({ advance: 100_000_000n, backerFee: 5_000_000n, lenderFee: 5_000_000n, term: 180n * 86_400n });
+    await expect(o.lendFund({ backingCode: code, planDigest: digest, confirm: true })).rejects.toThrow(/changed since your plan/);
+    expect(c.sends()).toBe(0);
+    // with the digest of the new plan it goes on to the send step (the mocked chain stops it there)
+    const p2 = await o.lendFund({ backingCode: code }) as { plan: Record<string, unknown> };
+    expect(p2.plan.planDigest).not.toBe(digest);
+    await expect(o.lendFund({ backingCode: code, planDigest: p2.plan.planDigest as string, confirm: true })).rejects.toThrow(/reached the send step/);
+    expect(c.sends()).toBeGreaterThan(0);
+  });
+
+  it('the schema requires planDigest to confirm a backed fund, and takes it only with a backing code', async () => {
+    const { bank, calls } = mockBank();
+    await expect(runOp(bank, 'h081_lend', { action: 'fund', backingCode, confirm: true })).rejects.toThrow(InputError);
+    await expect(runOp(bank, 'h081_lend', { action: 'fund', proofCode: 'h081-loan-proof:x', planDigest: '0123456789abcdef' })).rejects.toThrow(InputError);
+    await expect(runOp(bank, 'h081_lend', { action: 'fund', backingCode, planDigest: 'xyz', confirm: true })).rejects.toThrow(InputError);
+    await runOp(bank, 'h081_lend', { action: 'fund', backingCode, planDigest: '0123456789abcdef', confirm: true });
+    expect(calls).toEqual([['lendFundBacked', { backingCode, loanRef: undefined, minCoverBps: undefined, planDigest: '0123456789abcdef', confirm: true }]]);
+  });
+
+  it('h081_back open takes maxLenderFeeBps (0..2000) and passes it on', async () => {
+    const { bank, calls } = mockBank();
+    await runOp(bank, 'h081_back', { action: 'open', drawKeyCode: 'h081-draw-key:x', feeBps: 500, maxLenderFeeBps: 200, days: 30, maxAdvanceUsdg: '500' });
+    expect(calls[0][1]).toMatchObject({ maxLenderFeeBps: 200 });
+    await expect(runOp(bank, 'h081_back', { action: 'open', drawKeyCode: 'h081-draw-key:x', feeBps: 500, maxLenderFeeBps: 2001, days: 30, maxAdvanceUsdg: '500' })).rejects.toThrow(InputError);
   });
 });

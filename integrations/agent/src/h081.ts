@@ -692,7 +692,7 @@ export class H081 {
     if (action === 'close') throw new CodedError('not_available', 'closing a loan slot is not available in this version');
     if (action === 'status') return { status: 'done', result: await this.lendStatus(fields.loanRef as string | undefined) };
     if (!['open', 'fund', 'collect', 'claim', 'settle'].includes(action)) throw bad('action must be one of open, fund, collect, claim, settle (status: GET /v1/loans/lent)');
-    const allowed = ['pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg'];
+    const allowed = ['pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'planDigest', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg'];
     const stray = Object.keys(fields).filter((k) => fields[k] !== undefined && !allowed.includes(k));
     if (stray.length) throw bad(`unknown field(s): ${stray.join(', ')}`);
     if (action === 'fund') {

@@ -5,12 +5,13 @@
 import { sha256 } from '@noble/hashes/sha2';
 import { Connection, Keypair, PublicKey, SystemProgram, TransactionInstruction, type AccountMeta } from '@solana/web3.js';
 import { type SentTx, send } from './buffer.js';
-import { be32, concatBytes, u16le, u64le } from './field.js';
+import { be32, concatBytes, fieldOf, u16le, u64le } from './field.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID, GRACE, LOAN_TREASURY, LOCALNET_LOAN_PROGRAM_ID, MAINNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, type SlotAccount,
   type SubrogationAccount, associatedTokenAddress, decodeLedger, decodeSlot, decodeSubrogation, isSlotAccount, ledgerPda, loanTreasuryAccount,
   originationFee, slotEscrow, slotInbox, slotPda, subrogationPda, syncIx,
 } from './lender.js';
+import { pullLenderShareIx } from './ops.js';
 import { LOCALNET_POOL_PROGRAM_ID } from './program.js';
 import { createAtaIdempotentIx } from './token.js';
 
@@ -26,6 +27,9 @@ export const MAINNET_MIN_COVER_BPS = 10_000;
 export const LOCALNET_MIN_COVER_BPS = 2_000;
 export const MAX_BACKER_FEE_BPS = 2_000;
 export const MAX_LENDER_FEE_BPS = 2_000;
+/** The lender-fee cap a line gets when the backer names none (5%): the reserve covers advance + lender fee, so the cap
+ * bounds how far one draw can reach into the stake past its advance. */
+export const DEFAULT_MAX_LENDER_FEE_BPS = 500;
 export const MIN_ADVANCE = 1_000_000n;
 export const MAX_DRAW = 10_000_000_000n;
 export const MAX_OPEN_DRAWS = 8;
@@ -52,7 +56,7 @@ export const BACKER_ERROR = {
   TermsMismatch: 6053, CoverTooLow: 6054, RequestExpired: 6055, ReceiptsPending: 6056, BadVault: 6057,
 } as const;
 
-export const BACKING_ACCOUNT_SIZE = 276;
+export const BACKING_ACCOUNT_SIZE = 278;
 export const DRAW_ACCOUNT_SIZE = 178;
 
 export const DRAW_STATE = { requested: 0, funded: 1, claimed: 2, released: 3 } as const;
@@ -148,7 +152,7 @@ export function lineCapacity(vault: bigint, reserved: bigint, coverBps: number):
  * show but not to block on.
  */
 export function checkLineTerms(
-  t: { coverBps: number; feeBps: number; lenderFeeBps?: number }, opts: { allowPartialCover?: boolean; allowHighFees?: boolean } = {},
+  t: { coverBps: number; feeBps: number; lenderFeeBps?: number; maxLenderFeeBps?: number }, opts: { allowPartialCover?: boolean; allowHighFees?: boolean } = {},
 ): string[] {
   const warn: string[] = [];
   if (!Number.isInteger(t.coverBps) || t.coverBps < LOCALNET_MIN_COVER_BPS || t.coverBps > FULL_COVER_BPS) throw new Error(`cover must be ${LOCALNET_MIN_COVER_BPS}..${FULL_COVER_BPS} bps`);
@@ -159,6 +163,11 @@ export function checkLineTerms(
   if (!Number.isInteger(t.feeBps) || t.feeBps < 0 || t.feeBps > MAX_BACKER_FEE_BPS) throw new Error(`backer fee must be 0..${MAX_BACKER_FEE_BPS} bps`);
   const lf = t.lenderFeeBps ?? 0;
   if (!Number.isInteger(lf) || lf < 0 || lf > MAX_LENDER_FEE_BPS) throw new Error(`lender fee must be 0..${MAX_LENDER_FEE_BPS} bps`);
+  if (t.maxLenderFeeBps !== undefined) {
+    const m = t.maxLenderFeeBps;
+    if (!Number.isInteger(m) || m < 0 || m > MAX_LENDER_FEE_BPS) throw new Error(`the line's lender-fee cap must be 0..${MAX_LENDER_FEE_BPS} bps`);
+    if (lf > m) throw new Error(`lender fee ${lf} bps is above this line's cap of ${m} bps`);
+  }
   if (t.feeBps + lf > FEE_WARN_BPS) {
     if (!opts.allowHighFees) throw new Error(`fees of ${(t.feeBps + lf) / 100}% on the advance are above ${FEE_WARN_BPS / 100}% (pass allowHighFees to accept)`);
     warn.push(`high fees: ${(t.feeBps + lf) / 100}% of the advance`);
@@ -176,7 +185,10 @@ const r = (pubkey: PublicKey, isSigner = false): AccountMeta => ({ pubkey, isSig
 const i64le = (x: bigint) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigInt64(0, x, true); return b; };
 
 export interface BackOpenArgs {
-  nonce: bigint; coverBps: number; feeBps: number; expiry: bigint; drawKey: PublicKey; maxAdvance: bigint; maxTotal: bigint;
+  nonce: bigint; coverBps: number; feeBps: number; expiry: bigint;
+  /** the highest lender fee a request on this line may offer (default DEFAULT_MAX_LENDER_FEE_BPS) */
+  maxLenderFeeBps?: number;
+  drawKey: PublicKey; maxAdvance: bigint; maxTotal: bigint;
   /** pin the line to one lender (default: any) */
   lender?: PublicKey;
   /** require the backer's signature on every request */
@@ -189,7 +201,7 @@ export function backOpenIx(
   return ix(programId, 'back_open', [
     w(backing), r(backer, true), w(payer, true), r(mint), w(backingVault(backing, mint, tokenProgram)), r(tokenProgram), r(ASSOCIATED_TOKEN_PROGRAM_ID),
     r(SystemProgram.programId),
-  ], u64le(a.nonce), u16le(a.coverBps), u16le(a.feeBps), u64le(a.expiry), (a.lender ?? PublicKey.default).toBytes(), a.drawKey.toBytes(),
+  ], u64le(a.nonce), u16le(a.coverBps), u16le(a.feeBps), u16le(a.maxLenderFeeBps ?? DEFAULT_MAX_LENDER_FEE_BPS), u64le(a.expiry), (a.lender ?? PublicKey.default).toBytes(), a.drawKey.toBytes(),
   u64le(a.maxAdvance), u64le(a.maxTotal), new Uint8Array([a.cosign ? 1 : 0]));
 }
 
@@ -200,7 +212,7 @@ export function backRequestIx(
 ): TransactionInstruction {
   return ix(programId, 'back_request', [
     w(line.backing), w(drawPda(line.backing, a.loanRef, programId)), r(slotPda(a.loanRef, programId)), r(drawKey, true), r(line.backer, !!opts.cosign),
-    w(payer, true), r(a.payoutTo), r(backingVault(line.backing, line.asset, line.tokenProgram)), r(SystemProgram.programId),
+    w(payer, true), r(a.payoutTo), r(backingVault(line.backing, line.asset, line.tokenProgram)), r(SystemProgram.programId), r(line.asset),
   ], u64le(a.loanRef), u64le(a.advance), u16le(a.lenderFeeBps), u64le(a.term), i64le(a.fundBy));
 }
 
@@ -289,7 +301,7 @@ export const isDrawAccount = (data: Uint8Array) => hasDisc(data, DRAW_DISC) && d
 
 export interface BackingAccount {
   backer: PublicKey; drawKey: PublicKey; lender: PublicKey; asset: PublicKey; tokenProgram: PublicKey; payer: PublicKey; nonce: bigint; coverBps: number;
-  feeBps: number; expiry: bigint; maxAdvance: bigint; maxTotal: bigint; advancedTotal: bigint; reserved: bigint; openDraws: number; drawsTotal: number;
+  feeBps: number; maxLenderFeeBps: number; expiry: bigint; maxAdvance: bigint; maxTotal: bigint; advancedTotal: bigint; reserved: bigint; openDraws: number; drawsTotal: number;
   coveredOut: bigint; cosign: boolean; createdAt: bigint; bump: number;
 }
 export function decodeBacking(data: Uint8Array): BackingAccount {
@@ -297,7 +309,7 @@ export function decodeBacking(data: Uint8Array): BackingAccount {
   const x = new Reader(data);
   return {
     backer: x.key(), drawKey: x.key(), lender: x.key(), asset: x.key(), tokenProgram: x.key(), payer: x.key(), nonce: x.u64(), coverBps: x.u16(),
-    feeBps: x.u16(), expiry: x.u64(), maxAdvance: x.u64(), maxTotal: x.u64(), advancedTotal: x.u64(), reserved: x.u64(), openDraws: x.u16(),
+    feeBps: x.u16(), maxLenderFeeBps: x.u16(), expiry: x.u64(), maxAdvance: x.u64(), maxTotal: x.u64(), advancedTotal: x.u64(), reserved: x.u64(), openDraws: x.u16(),
     drawsTotal: x.u32(), coveredOut: x.u64(), cosign: x.bool(), createdAt: x.i64(), bump: x.u8(),
   };
 }
@@ -494,16 +506,30 @@ export async function releaseBacked(connection: Connection, payer: Keypair, back
 }
 
 /**
- * Permissionless default claim: syncs the inbox first in the same transaction (a share synced after the claim would be
- * taken as recovery and short-change the lender), then pays the lender out of the vault.
+ * The instructions of a permissionless default claim, in the one order that cannot be blocked: when the slot's pool
+ * escrow holds anything (anyone can create it with a spend naming the slot and no lender account, and anyone can send
+ * dust into it), (re)create the inbox and pull the escrow into it; then sync the inbox (a share synced after the
+ * claim would be taken as recovery and short-change the lender); then back_claim. back_claim refuses while the escrow
+ * or the inbox holds unsynced value, so the three must travel in one transaction.
  */
-export async function claimBacked(connection: Connection, payer: Keypair, backing: PublicKey, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID, poolProgram = LOCALNET_POOL_PROGRAM_ID): Promise<SentTx> {
+export async function claimBackedIxs(
+  connection: Connection, payer: PublicKey, backing: PublicKey, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID, poolProgram = LOCALNET_POOL_PROGRAM_ID,
+): Promise<TransactionInstruction[]> {
   const slot = await readAccount(connection, slotPda(loanRef, programId), decodeSlot);
   const sub = await readAccount(connection, subrogationPda(loanRef, programId), decodeSubrogation);
-  return send(connection, payer, [
-    syncIx(payer.publicKey, loanRef, slot.asset, slot.lender, slot.tokenProgram, programId, sub.to),
-    backClaimIx(loanRef, backing, slot, programId, poolProgram),
-  ]);
+  const tp = slot.tokenProgram;
+  const slotKey = slotPda(loanRef, programId);
+  const escrow = await connection.getAccountInfo(slotEscrow(loanRef, slot.asset, poolProgram, programId), 'confirmed');
+  const escrowed = escrow && escrow.data.length >= 72 ? Buffer.from(escrow.data).readBigUInt64LE(64) : 0n;
+  const pull = escrowed > 0n
+    ? [createAtaIdempotentIx(payer, slotKey, slot.asset, tp), pullLenderShareIx(poolProgram, slot.asset, tp, fieldOf(slotKey), loanRef, slotInbox(loanRef, slot.asset, tp, programId))]
+    : [];
+  return [...pull, syncIx(payer, loanRef, slot.asset, slot.lender, tp, programId, sub.to), backClaimIx(loanRef, backing, slot, programId, poolProgram)];
+}
+
+/** Permissionless default claim: pull the slot's pool escrow (if any), sync, then back_claim, in one transaction. */
+export async function claimBacked(connection: Connection, payer: Keypair, backing: PublicKey, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID, poolProgram = LOCALNET_POOL_PROGRAM_ID): Promise<SentTx> {
+  return send(connection, payer, await claimBackedIxs(connection, payer.publicKey, backing, loanRef, programId, poolProgram));
 }
 
 /**
@@ -538,6 +564,7 @@ export class SolanaBackedBorrower {
    */
   async request(loanRef: bigint, advance: bigint, lenderFeeBps: number, term: bigint, opts: { ttl?: bigint; backer?: Keypair; payoutTo?: PublicKey; allowHighFees?: boolean } = {}): Promise<SentTx & { draw: PublicKey; terms: BackedTerms }> {
     const l = await this.line();
+    if (lenderFeeBps > l.maxLenderFeeBps) throw new Error(`lender fee ${lenderFeeBps} bps is above this line's cap of ${l.maxLenderFeeBps} bps (the backer set it at open)`);
     if (l.feeBps + lenderFeeBps > FEE_WARN_BPS && !opts.allowHighFees) throw new Error(`fees of ${(l.feeBps + lenderFeeBps) / 100}% on the advance are above ${FEE_WARN_BPS / 100}% (pass allowHighFees to accept)`);
     const payoutTo = opts.payoutTo ?? this.payoutAccount(l);
     const pre = opts.payoutTo ? [] : [createAtaIdempotentIx(this.payer.publicKey, this.drawKey.publicKey, l.asset, l.tokenProgram)];
@@ -588,13 +615,34 @@ export class SolanaBackedBorrower {
   }
 }
 
+/** The terms a lender agrees to fund: what fund_backed's `expect` carries (with minCoverBps), and what a plan shows. */
+export interface BackedFundTerms { advance: bigint; principal: bigint; term: bigint; payoutTo: PublicKey; coverBps: number }
+
+/** The fund terms of a requested Draw on its line, as read from chain. */
+export function backedFundTerms(draw: Pick<DrawAccount, 'advance' | 'backerFee' | 'lenderFee' | 'term' | 'payoutTo'>, line: Pick<BackingAccount, 'coverBps'>): BackedFundTerms {
+  return { advance: draw.advance, principal: draw.advance + draw.backerFee + draw.lenderFee, term: draw.term, payoutTo: draw.payoutTo, coverBps: line.coverBps };
+}
+
+/**
+ * A short digest (16 hex) of the exact terms a lender is shown for one draw: backing, loan ref, advance, principal,
+ * term, payout account and cover. A plan returns it; the confirm call passes it back, and the draw is funded only if
+ * its terms on chain still give that digest. So a borrower that cancels and re-requests between the plan and the
+ * confirm (another term or lender fee at the same advance) cannot make the lender fund terms it never saw.
+ */
+export function backedTermsDigest(backing: PublicKey, loanRef: bigint, t: BackedFundTerms): string {
+  const body = concatBytes(enc('h081/backed-fund/v1'), backing.toBytes(), u64le(loanRef), u64le(t.advance), u64le(t.principal), u64le(t.term), t.payoutTo.toBytes(), u16le(t.coverBps));
+  return Buffer.from(sha256(body)).subarray(0, 8).toString('hex');
+}
+
 /**
  * The lender's side: reads the Draw and the line, checks them against what the lender accepts, and funds at exactly
- * those terms (the program refuses any change in between). `minCoverBps` defaults to full cover.
+ * those terms (the program refuses any change in between). `minCoverBps` defaults to full cover. With `expect` (the
+ * terms the lender was shown), the transaction carries those terms unchanged, not the ones read now: the SDK refuses
+ * when the Draw differs in any of them, and the program refuses a change made after this read (TermsMismatch).
  */
 export async function fundBacked(
   connection: Connection, lender: Keypair, backing: PublicKey, loanRef: bigint,
-  opts: { minCoverBps?: number; maxAdvance?: bigint; programId?: PublicKey; treasuryOwner?: PublicKey; poolProgram?: PublicKey; expect?: { advance: bigint; payoutTo: PublicKey } } = {},
+  opts: { minCoverBps?: number; maxAdvance?: bigint; programId?: PublicKey; treasuryOwner?: PublicKey; poolProgram?: PublicKey; expect?: Omit<BackedFundTerms, 'coverBps'> & { coverBps?: number } } = {},
 ): Promise<SentTx & { terms: BackedTerms; draw: DrawAccount; line: BackingAccount }> {
   const programId = opts.programId ?? LOCALNET_LOAN_PROGRAM_ID;
   const line = await readAccount(connection, backing, decodeBacking);
@@ -603,9 +651,15 @@ export async function fundBacked(
   const minCoverBps = opts.minCoverBps ?? FULL_COVER_BPS;
   if (line.coverBps < minCoverBps) throw new Error(`line cover ${line.coverBps / 100}% is below your minimum ${minCoverBps / 100}%`);
   if (opts.maxAdvance !== undefined && draw.advance > opts.maxAdvance) throw new Error(`advance ${draw.advance} is above your limit ${opts.maxAdvance}`);
-  if (opts.expect && (opts.expect.advance !== draw.advance || !opts.expect.payoutTo.equals(draw.payoutTo))) throw new Error('the draw changed since you read it');
+  const onChain = backedFundTerms(draw, line);
+  const e = opts.expect;
+  if (e && (e.advance !== onChain.advance || e.principal !== onChain.principal || e.term !== onChain.term || !e.payoutTo.equals(onChain.payoutTo)
+    || (e.coverBps !== undefined && e.coverBps !== onChain.coverBps))) {
+    throw new Error('the draw changed since you read it (advance, principal, term, payout account or cover); nothing was sent');
+  }
+  const funded: BackedFundTerms = e ? { advance: e.advance, principal: e.principal, term: e.term, payoutTo: e.payoutTo, coverBps: e.coverBps ?? onChain.coverBps } : onChain;
   const terms = backedTerms({ advance: draw.advance, feeBps: line.feeBps, lenderFeeBps: 0, coverBps: line.coverBps });
-  const principal = draw.advance + draw.backerFee + draw.lenderFee;
+  const principal = funded.principal;
   const tp = line.tokenProgram;
   const treasuryOwner = opts.treasuryOwner ?? LOAN_TREASURY;
   const pre = originationFee(draw.advance) > 0n ? [createAtaIdempotentIx(lender.publicKey, treasuryOwner, line.asset, tp)] : [];
@@ -613,7 +667,7 @@ export async function fundBacked(
     ...pre,
     fundBackedIx({
       lender: lender.publicKey, loanRef, backing, mint: line.asset, tokenProgram: tp, lenderSource: associatedTokenAddress(lender.publicKey, line.asset, tp),
-      expect: { advance: draw.advance, principal, term: draw.term, payoutTo: draw.payoutTo, coverBps: line.coverBps, minCoverBps },
+      expect: { ...funded, minCoverBps },
       treasury: loanTreasuryAccount(line.asset, tp, treasuryOwner), poolProgram: opts.poolProgram,
     }, programId),
   ]);

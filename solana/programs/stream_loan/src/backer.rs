@@ -93,6 +93,9 @@ pub struct Backing {
     pub nonce: u64,
     pub cover_bps: u16,
     pub fee_bps: u16,
+    /// the highest lender fee a request on this line may offer, set by the backer at back_open (<= MAX_LENDER_FEE_BPS).
+    /// The reserve covers advance + lender fee, so this caps how far one draw can reach into the stake past its advance.
+    pub max_lender_fee_bps: u16,
     /// the line's end: every backed loan must be due by then
     pub expiry: u64,
     pub max_advance: u64,
@@ -221,6 +224,16 @@ fn check_asset(_mint: &Pubkey) -> Result<()> {
     Ok(())
 }
 
+/// A mint that can charge a transfer fee (Token-2022 TransferFeeConfig with a rate or a maximum above 0, now or
+/// scheduled) would make stakes, advances and repayments arrive short of the amounts this program books. A
+/// TransferFeeConfig at 0 bps and maximum 0 (USDG on mainnet today) is accepted. Checked at back_open and again at
+/// back_request and fund_backed, so a rate raised later stops new draws. back_claim does not check it: refusing the
+/// claim would let the cover lapse after the claim window; a fee taken on the payout is the mint's, not the backer's.
+fn check_no_transfer_fee(mint: &AccountInfo) -> Result<()> {
+    require!(!token::mint_charges_transfer_fee(mint), LoanError::AssetNotBackable);
+    Ok(())
+}
+
 /// The payout account a backed advance goes to: a token account of the asset, not the vault, not the slot's inbox, and
 /// not owned by the lender, the slot PDA, the Backing PDA or the backer (the advance must reach the borrower).
 fn check_payout(payout: &AccountInfo, asset: &Pubkey, tp: &Pubkey, slot_key: &Pubkey, lender: &Pubkey, backing: &Backing, backing_key: &Pubkey) -> Result<()> {
@@ -257,6 +270,7 @@ pub struct BackingOpened {
     pub lender: Pubkey,
     pub cover_bps: u16,
     pub fee_bps: u16,
+    pub max_lender_fee_bps: u16,
     pub expiry: u64,
     pub max_advance: u64,
     pub max_total: u64,
@@ -338,6 +352,8 @@ pub struct BackOpenArgs {
     pub nonce: u64,
     pub cover_bps: u16,
     pub fee_bps: u16,
+    /// the highest lender fee a request may offer (0..=MAX_LENDER_FEE_BPS)
+    pub max_lender_fee_bps: u16,
     pub expiry: u64,
     pub lender: Pubkey,
     pub draw_key: Pubkey,
@@ -352,11 +368,11 @@ pub fn handle_back_open(ctx: Context<BackOpen>, args: BackOpenArgs) -> Result<()
     require!(token::is_token_program(tp), LoanError::BadTokenProgram);
     token::mint_decimals(&a.mint, tp)?;
     check_asset(a.mint.key)?;
-    // a transfer fee would make stakes, fees and payouts arrive short of the amounts this program books
-    require!(!token::mint_has_transfer_fee(&a.mint), LoanError::AssetNotBackable);
+    check_no_transfer_fee(&a.mint)?;
     let t = now_u64()?;
     require!((MIN_COVER_BPS..=MAX_COVER_BPS).contains(&args.cover_bps), LoanError::BackingTerms);
     require!(args.fee_bps <= MAX_BACKER_FEE_BPS, LoanError::BackingTerms);
+    require!(args.max_lender_fee_bps <= MAX_LENDER_FEE_BPS, LoanError::BackingTerms);
     require!(args.expiry >= t.saturating_add(MIN_TERM) && args.expiry <= t.saturating_add(MAX_LINE_TERM), LoanError::BackingTerms);
     require!(args.draw_key != Pubkey::default(), LoanError::BackingTerms);
     require!((MIN_ADVANCE..=MAX_DRAW).contains(&args.max_advance) && args.max_total >= args.max_advance, LoanError::BackingTerms);
@@ -375,6 +391,7 @@ pub fn handle_back_open(ctx: Context<BackOpen>, args: BackOpenArgs) -> Result<()
     b.nonce = args.nonce;
     b.cover_bps = args.cover_bps;
     b.fee_bps = args.fee_bps;
+    b.max_lender_fee_bps = args.max_lender_fee_bps;
     b.expiry = args.expiry;
     b.max_advance = args.max_advance;
     b.max_total = args.max_total;
@@ -382,8 +399,8 @@ pub fn handle_back_open(ctx: Context<BackOpen>, args: BackOpenArgs) -> Result<()
     b.created_at = t as i64;
     b.bump = ctx.bumps.backing;
     emit!(BackingOpened {
-        backing: backing_key, asset: b.asset, draw_key: b.draw_key, lender: b.lender, cover_bps: b.cover_bps, fee_bps: b.fee_bps, expiry: b.expiry,
-        max_advance: b.max_advance, max_total: b.max_total,
+        backing: backing_key, asset: b.asset, draw_key: b.draw_key, lender: b.lender, cover_bps: b.cover_bps, fee_bps: b.fee_bps,
+        max_lender_fee_bps: b.max_lender_fee_bps, expiry: b.expiry, max_advance: b.max_advance, max_total: b.max_total,
     });
     Ok(())
 }
@@ -399,7 +416,9 @@ pub fn handle_back_request(ctx: Context<BackRequest>, loan_ref: u64, advance: u6
     require!(b.lender == Pubkey::default() || b.lender == a.slot.lender, LoanError::LenderNotAllowed);
     require!(advance >= MIN_ADVANCE && advance <= MAX_DRAW.min(b.max_advance), LoanError::DrawTooLarge);
     require!(b.advanced_total.saturating_add(advance) <= b.max_total, LoanError::DrawTooLarge);
-    require!(lender_fee_bps <= MAX_LENDER_FEE_BPS, LoanError::BackingTerms);
+    require!(lender_fee_bps <= MAX_LENDER_FEE_BPS && lender_fee_bps <= b.max_lender_fee_bps, LoanError::BackingTerms);
+    require_keys_eq!(a.mint.key(), b.asset, LoanError::WrongAsset);
+    check_no_transfer_fee(&a.mint)?;
     let t = now_u64()?;
     require!(term >= MIN_TERM && t.saturating_add(term) <= b.expiry, LoanError::LineExpired);
     require!(fund_by > t as i64 && (fund_by as u64) <= t.saturating_add(MAX_REQUEST_TTL), LoanError::BackingTerms);
@@ -461,6 +480,7 @@ pub fn handle_fund_backed(ctx: Context<FundBacked>, loan_ref: u64, expect: Backe
     let tp = a.token_program.key;
     require_keys_eq!(*tp, b.token_program, LoanError::BadTokenProgram);
     require_keys_eq!(a.mint.key(), b.asset, LoanError::WrongAsset);
+    check_no_transfer_fee(&a.mint)?;
     require!(b.lender == Pubkey::default() || b.lender == a.lender.key(), LoanError::LenderNotAllowed);
     let t = now_u64()?;
     require!((t as i64) <= d.fund_by, LoanError::RequestExpired);
@@ -789,6 +809,8 @@ pub struct BackRequest<'info> {
     /// CHECK: the line's vault (address checked)
     pub vault: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: the line's asset (address checked against the line; its transfer fee is checked)
+    pub mint: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -918,8 +940,8 @@ mod tests {
 
     #[test]
     fn sizes() {
-        assert_eq!(BACKING_SIZE, 8 + 32 * 6 + 8 + 2 + 2 + 8 + 8 + 8 + 8 + 8 + 2 + 4 + 8 + 1 + 8 + 1);
-        assert_eq!(BACKING_SIZE, 276);
+        assert_eq!(BACKING_SIZE, 8 + 32 * 6 + 8 + 2 + 2 + 2 + 8 + 8 + 8 + 8 + 8 + 2 + 4 + 8 + 1 + 8 + 1);
+        assert_eq!(BACKING_SIZE, 278);
         assert_eq!(DRAW_SIZE, 8 + 8 + 32 * 3 + 8 * 4 + 8 + 8 + 8 + 8 + 1 + 1);
         assert_eq!(DRAW_SIZE, 178);
     }

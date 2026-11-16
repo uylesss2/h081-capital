@@ -204,7 +204,8 @@ export async function opLend(bank: BankLike, args: Args) {
     case 'fund': {
       if (present(args, 'backingCode')) {
         const minCoverBps = present(args, 'minCoverBps') ? Number(args.minCoverBps) : undefined;
-        return bank.lendFundBacked({ backingCode: String(args.backingCode).trim(), loanRef: loanRefOf(args, false), minCoverBps, confirm });
+        const planDigest = present(args, 'planDigest') ? String(args.planDigest).trim() : undefined;
+        return bank.lendFundBacked({ backingCode: String(args.backingCode).trim(), loanRef: loanRefOf(args, false), minCoverBps, planDigest, confirm });
       }
       const proofCode = String(args.proofCode ?? '').trim();
       if (!proofCode) throw new Error('proofCode (the borrower\'s "h081-loan-proof:" code) is required to fund a loan');
@@ -247,7 +248,7 @@ export async function opBack(bank: BankLike, args: Args) {
       const maxAdvance = parseAmount(args, 'maxAdvanceUsdg', USDG_DECIMALS, { baseKey: 'maxAdvance' });
       return bank.backOpen({
         nonce: present(args, 'nonce') ? bigOf(args, 'nonce') : undefined, drawKeyCode: String(args.drawKeyCode ?? ''), coverBps: present(args, 'coverBps') ? Number(args.coverBps) : undefined,
-        feeBps: Number(args.feeBps), days: Number(args.days), maxAdvance, maxTotal: optionalUsdg(args, 'maxTotal'), lender, cosign: flag(args, 'cosign'),
+        feeBps: Number(args.feeBps), maxLenderFeeBps: present(args, 'maxLenderFeeBps') ? Number(args.maxLenderFeeBps) : undefined, days: Number(args.days), maxAdvance, maxTotal: optionalUsdg(args, 'maxTotal'), lender, cosign: flag(args, 'cosign'),
         allowPartialCover: flag(args, 'allowPartialCover'), confirm,
       });
     }

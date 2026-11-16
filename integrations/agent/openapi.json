@@ -1315,6 +1315,11 @@
                     "maximum": 10000,
                     "description": "fund with backingCode: the least cover you accept (default 10000)"
                   },
+                  "planDigest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{16}$",
+                    "description": "fund with backingCode and confirm: the planDigest the plan returned; the draw is funded only at exactly those terms"
+                  },
                   "loanRef": {
                     "type": "string",
                     "pattern": "^\\d+$",
@@ -1478,6 +1483,12 @@
                     "minimum": 0,
                     "maximum": 2000,
                     "description": "open: your fee on each advance, paid first out of repayments"
+                  },
+                  "maxLenderFeeBps": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2000,
+                    "description": "open: the highest lender fee a draw may offer (default 500); the stake covers that fee too"
                   },
                   "days": {
                     "type": "number",

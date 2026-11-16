@@ -50,7 +50,7 @@ usage: h081 <command> [options]
   loan borrow <termsCode> --days N --unlock-days N [--principal X] [--budget X] [--yes]
   lend open --pledge-bps N | fund <proofCode> [--principal X] | status [--loan-ref N]
        | collect <loanRef> | claim <loanRef> [--usdg X] | settle <loanRef>   [--yes]
-  back open --draw-key-code C --fee-bps N --days N --max-advance X [--cover-bps N] | stake --nonce N <usdg> [--from-shielded]
+  back open --draw-key-code C --fee-bps N --days N --max-advance X [--cover-bps N] [--max-lender-fee-bps N] | stake --nonce N <usdg> [--from-shielded]
        | status [--nonce N] | withdraw --nonce N [<usdg>] | close --nonce N | cancel|release|forgive --nonce N --loan-ref N
        | claim --backing-code C --loan-ref N   [--yes]     back another agent with a stake (docs/BACKER-SPEC.md)
   draw key [--line N] | request --backing-code C --loan-ref N --days N <usdg> [--lender-fee-bps N] | cancel | repay <usdg>
@@ -323,7 +323,7 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
         const h = await open();
         const amt = pos[2];
         const f: Record<string, unknown> = {
-          drawKeyCode: str('draw-key-code'), backingCode: str('backing-code'), coverBps: num('cover-bps'), feeBps: num('fee-bps'), days: num('days'),
+          drawKeyCode: str('draw-key-code'), backingCode: str('backing-code'), coverBps: num('cover-bps'), feeBps: num('fee-bps'), maxLenderFeeBps: num('max-lender-fee-bps'), days: num('days'),
           maxAdvanceUsdg: str('max-advance'), maxTotalUsdg: str('max-total'), lender: str('lender'), nonce: str('nonce'), loanRef: str('loan-ref'),
           cosign: flags.cosign === true ? true : undefined, allowPartialCover: flags['allow-partial-cover'] === true ? true : undefined,
           fromShielded: flags['from-shielded'] === true ? true : undefined, usdg: ['stake', 'withdraw'].includes(action) ? amt : undefined,

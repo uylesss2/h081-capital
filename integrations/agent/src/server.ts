@@ -272,13 +272,13 @@ export const ROUTES: RouteDef[] = [
     body: obj({
       action: { type: 'string', enum: ['open', 'fund', 'collect', 'claim', 'settle'] },
       pledgeBps: prop('h081_lend', 'pledgeBps'), proofCode: prop('h081_lend', 'proofCode'), backingCode: prop('h081_lend', 'backingCode'),
-      minCoverBps: prop('h081_lend', 'minCoverBps'), loanRef: prop('h081_lend', 'loanRef'),
+      minCoverBps: prop('h081_lend', 'minCoverBps'), planDigest: prop('h081_lend', 'planDigest'), loanRef: prop('h081_lend', 'loanRef'),
       principal: prop('h081_lend', 'principal'), principalUsdg: prop('h081_lend', 'principalUsdg'), amount: prop('h081_lend', 'amount'), usdg: prop('h081_lend', 'usdg'),
       confirm: confirmJ,
     }, ['action']),
     result: 'plan, or the matching lend result',
     handle: async (c) => {
-      only(c.body, ['action', 'pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg', 'confirm']);
+      only(c.body, ['action', 'pledgeBps', 'proofCode', 'backingCode', 'minCoverBps', 'planDigest', 'loanRef', 'principal', 'principalUsdg', 'amount', 'usdg', 'confirm']);
       const action = optStr(c.body.action, 'action') ?? '';
       if (action === 'status') throw bad('status is a read: GET /v1/loans/lent');
       const { action: _a, confirm: _c, ...fields } = c.body;

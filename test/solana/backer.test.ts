@@ -7,16 +7,21 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
-import { customErrorCode, send } from '../../src/solana/index.js';
+import { customErrorCode, send, SolanaPool, SolanaWallet } from '../../src/solana/index.js';
+import { initCrypto } from '../../src/crypto.js';
+import { Account } from '../../src/client.js';
+import { randomViewingKey } from '../../src/encryption.js';
+import { TOKEN22_PROGRAM_ID } from '../../src/solana/token.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID, LOAN_TREASURY, LOCALNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, associatedTokenAddress, closeSlotIx, decodeRegistry,
   decodeSlot, decodeSubrogation, loanFundedEvents, loanInitializeIx, loanStatus, loanTreasuryAccount, openSlotIx, registryPda, safetyPoolFor, settleIx,
-  slotInbox, slotPda, subrogationPda, syncIx,
+  slotEscrow, slotInbox, slotPda, subrogationPda, syncIx,
 } from '../../src/solana/lender.js';
 import {
   BACKER_ERROR, BACKING_ACCOUNT_SIZE, DRAW_ACCOUNT_SIZE, LOCALNET_LOAN_FAST_PROGRAM_ID, SolanaBackedBorrower, SolanaBacker, backClaimIx, backOpenIx,
   backRequestIx, backSettleIx, backedClaimAmount, backedFundedEvents, backedTerms, backerKeyFor, backingClaimedEvents, backingPda, backingVault,
   claimBacked, decodeBacking, decodeDraw, drawKeyFor, drawPda, drawReleasedEvents, fundBacked, fundBackedIx, isBackedSubrogation, releaseBacked,
+  backedFundTerms, DEFAULT_MAX_LENDER_FEE_BPS,
 } from '../../src/solana/backer.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
 
@@ -136,32 +141,59 @@ function upgradeLoanProgram(so: string) {
 }
 
 /** A mint, a lender with funds, a backer key, a borrower draw key: the cast of most tests. */
-async function cast(opts: { programId?: PublicKey; lenderFunds?: bigint; backerFunds?: bigint } = {}) {
+/**
+ * A Token-2022 mint like USDG: TransferFeeConfig (authority `authority`) at `bps` / `maxFee`, and a PermanentDelegate.
+ * USDG on mainnet carries TransferFeeConfig at 0 bps, maximum 0.
+ */
+async function createFeeConfigMint(authority: Keypair, bps: number, maxFee: bigint, delegate: PublicKey = authority.publicKey): Promise<PublicKey> {
+  const mint = Keypair.generate();
+  const space = 165 + 1 + (4 + 108) + (4 + 32);
+  const fee = Buffer.alloc(10); fee.writeUInt16LE(bps, 0); fee.writeBigUInt64LE(maxFee, 2);
+  const initFee = new TransactionInstruction({
+    programId: TOKEN22_PROGRAM_ID, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }],
+    data: Buffer.concat([Buffer.from([26, 0, 1]), authority.publicKey.toBuffer(), Buffer.from([1]), authority.publicKey.toBuffer(), fee]),
+  });
+  const initDelegate = new TransactionInstruction({ programId: TOKEN22_PROGRAM_ID, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([35]), delegate.toBuffer()]) });
+  const init = Buffer.alloc(67); init[0] = 20; init[1] = 6; authority.publicKey.toBuffer().copy(init, 2);
+  await send(connection, authority, [
+    SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: mint.publicKey, lamports: await connection.getMinimumBalanceForRentExemption(space), space, programId: TOKEN22_PROGRAM_ID }),
+    initFee, initDelegate, new TransactionInstruction({ programId: TOKEN22_PROGRAM_ID, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }], data: init }),
+  ], { signers: [mint] });
+  return mint.publicKey;
+}
+/** Token-2022 SetTransferFee: the fee authority schedules a new rate (the newer fee, effective two epochs later). */
+function setTransferFeeIx(mint: PublicKey, authority: PublicKey, bps: number, maxFee: bigint) {
+  const data = Buffer.alloc(12); data[0] = 26; data[1] = 5; data.writeUInt16LE(bps, 2); data.writeBigUInt64LE(maxFee, 4);
+  return new TransactionInstruction({ programId: TOKEN22_PROGRAM_ID, keys: [{ pubkey: mint, isSigner: false, isWritable: true }, { pubkey: authority, isSigner: true, isWritable: false }], data });
+}
+
+async function cast(opts: { programId?: PublicKey; lenderFunds?: bigint; backerFunds?: bigint; feeMint?: { bps: number; maxFee: bigint } } = {}) {
   const [authority, lender, payerB, payerA, stranger] = await newKeys(5);
-  const mint = await createMint(authority);
+  const tp = opts.feeMint ? TOKEN22_PROGRAM_ID : SPL_TOKEN_PROGRAM_ID;
+  const mint = opts.feeMint ? await createFeeConfigMint(authority, opts.feeMint.bps, opts.feeMint.maxFee) : await createMint(authority);
   const backerKey = backerKeyFor(BigInt('0x' + Buffer.from(Keypair.generate().secretKey.subarray(0, 31)).toString('hex')), 1n);
   const drawKey = drawKeyFor(BigInt('0x' + Buffer.from(Keypair.generate().secretKey.subarray(0, 31)).toString('hex')), 1n);
-  const lenderAta = associatedTokenAddress(lender.publicKey, mint);
-  const backerAta = associatedTokenAddress(backerKey.publicKey, mint);
+  const lenderAta = associatedTokenAddress(lender.publicKey, mint, tp);
+  const backerAta = associatedTokenAddress(backerKey.publicKey, mint, tp);
   await send(connection, authority, [
-    createAtaIx(authority.publicKey, lender.publicKey, mint), mintToIx(mint, lenderAta, authority.publicKey, opts.lenderFunds ?? 5_000n * U),
-    createAtaIx(authority.publicKey, backerKey.publicKey, mint), mintToIx(mint, backerAta, authority.publicKey, opts.backerFunds ?? 5_000n * U),
-    createAtaIx(authority.publicKey, LOAN_TREASURY, mint), createAtaIx(authority.publicKey, drawKey.publicKey, mint),
+    createAtaIx(authority.publicKey, lender.publicKey, mint, tp), mintToIx(mint, lenderAta, authority.publicKey, opts.lenderFunds ?? 5_000n * U, tp),
+    createAtaIx(authority.publicKey, backerKey.publicKey, mint, tp), mintToIx(mint, backerAta, authority.publicKey, opts.backerFunds ?? 5_000n * U, tp),
+    createAtaIx(authority.publicKey, LOAN_TREASURY, mint, tp), createAtaIx(authority.publicKey, drawKey.publicKey, mint, tp),
   ]);
-  return { authority, lender, payerB, payerA, stranger, mint, backerKey, drawKey, lenderAta, backerAta, programId: opts.programId ?? LOAN };
+  return { authority, lender, payerB, payerA, stranger, mint, tp, backerKey, drawKey, lenderAta, backerAta, programId: opts.programId ?? LOAN };
 }
 type Cast = Awaited<ReturnType<typeof cast>>;
 
-async function openLine(c: Cast, nonce: bigint, o: { coverBps?: number; feeBps?: number; ttl?: bigint; stake?: bigint; maxAdvance?: bigint; maxTotal?: bigint; lender?: PublicKey; cosign?: boolean; allowPartialCover?: boolean } = {}) {
+async function openLine(c: Cast, nonce: bigint, o: { coverBps?: number; feeBps?: number; maxLenderFeeBps?: number; ttl?: bigint; stake?: bigint; maxAdvance?: bigint; maxTotal?: bigint; lender?: PublicKey; cosign?: boolean; allowPartialCover?: boolean } = {}) {
   const backer = new SolanaBacker(connection, c.backerKey, nonce, c.payerB, c.programId);
   const opened = await backer.open(c.mint, {
-    coverBps: o.coverBps ?? 10_000, feeBps: o.feeBps ?? 500, expiry: (await chainNow()) + (o.ttl ?? 30n * 86_400n), drawKey: c.drawKey.publicKey,
+    coverBps: o.coverBps ?? 10_000, feeBps: o.feeBps ?? 500, maxLenderFeeBps: o.maxLenderFeeBps, expiry: (await chainNow()) + (o.ttl ?? 30n * 86_400n), drawKey: c.drawKey.publicKey,
     maxAdvance: o.maxAdvance ?? 1_000n * U, maxTotal: o.maxTotal ?? 3_000n * U, lender: o.lender, cosign: o.cosign,
   }, { allowPartialCover: o.allowPartialCover, allowHighFees: true });
   cu('back_open', opened);
   if ((o.stake ?? 600n * U) > 0n) await backer.stake(c.backerAta, c.backerKey, o.stake ?? 600n * U);
   const borrower = new SolanaBackedBorrower(connection, c.drawKey, backer.backing, c.payerA, c.programId);
-  return { backer, borrower, backing: backer.backing, vault: backingVault(backer.backing, c.mint) };
+  return { backer, borrower, backing: backer.backing, vault: backingVault(backer.backing, c.mint, c.tp) };
 }
 
 beforeAll(async () => {
@@ -441,6 +473,7 @@ suite('guards', () => {
     await expectCode(open({ maxAdvance: U - 1n }), BACKER_ERROR.BackingTerms);
     await expectCode(open({ maxTotal: 5n * U }), BACKER_ERROR.BackingTerms);
     await expectCode(open({ drawKey: PublicKey.default }), BACKER_ERROR.BackingTerms);
+    await expectCode(open({ maxLenderFeeBps: 2_001 }), BACKER_ERROR.BackingTerms);
 
     const { borrower, backing } = await openLine(c, 21n, { feeBps: 0, maxAdvance: 200n * U, maxTotal: 250n * U });
     const line = { backing, backer: c.backerKey.publicKey, asset: c.mint, tokenProgram: SPL_TOKEN_PROGRAM_ID };
@@ -453,6 +486,10 @@ suite('guards', () => {
     await expectCode(req({ advance: U - 1n }), BACKER_ERROR.DrawTooLarge);
     await expectCode(req({ advance: 201n * U }), BACKER_ERROR.DrawTooLarge);
     await expectCode(req({ lenderFeeBps: 2_001 }), BACKER_ERROR.BackingTerms);
+    // the line's own lender-fee cap (default 500 bps): the draw key cannot offer more, so it cannot reach past it into the stake
+    expect((await readLine(backing)).maxLenderFeeBps).toBe(DEFAULT_MAX_LENDER_FEE_BPS);
+    await expectCode(req({ lenderFeeBps: DEFAULT_MAX_LENDER_FEE_BPS + 1 }), BACKER_ERROR.BackingTerms);
+    await expect(borrower.request(ref, 10n * U, DEFAULT_MAX_LENDER_FEE_BPS + 1, 2n * 86_400n)).rejects.toThrow(/above this line's cap/);
     await expectCode(req({ term: 86_399n }), BACKER_ERROR.LineExpired);
     await expectCode(req({ term: 31n * 86_400n }), BACKER_ERROR.LineExpired);
     await expectCode(req({ fundBy: (await chainNow()) + 8n * 86_400n }), BACKER_ERROR.BackingTerms);
@@ -467,7 +504,18 @@ suite('guards', () => {
     await borrower.request(ref, 200n * U, 0, 2n * 86_400n);
     const stale = { advance: d.advance, principal: d.advance, term: d.term, payoutTo: d.payoutTo, coverBps: 10_000, minCoverBps: 10_000 };
     await expectCode(send(connection, c.lender, [fundBackedIx({ lender: c.lender.publicKey, loanRef: ref, backing, mint: c.mint, tokenProgram: SPL_TOKEN_PROGRAM_ID, lenderSource: c.lenderAta, expect: stale })]), BACKER_ERROR.TermsMismatch);
-    await expect(fundBacked(connection, c.lender, backing, ref, { expect: { advance: 10n * U, payoutTo: d.payoutTo } })).rejects.toThrow(/changed/);
+    await expect(fundBacked(connection, c.lender, backing, ref, { expect: { advance: 10n * U, principal: 10n * U, term: d.term, payoutTo: d.payoutTo } })).rejects.toThrow(/changed/);
+    // the same advance, re-requested with another term and lender fee: the planned terms are refused by the SDK, and the
+    // program refuses them too when they reach it (fund_backed carries the planned terms, never a fresh read)
+    await borrower.cancel(ref);
+    await borrower.request(ref, 10n * U, 0, 2n * 86_400n);
+    const planned = backedFundTerms(decodeDraw((await connection.getAccountInfo(drawPda(backing, ref)))!.data), { coverBps: 10_000 });
+    await borrower.cancel(ref);
+    await borrower.request(ref, 10n * U, 400, 20n * 86_400n);
+    await expect(fundBacked(connection, c.lender, backing, ref, { expect: planned })).rejects.toThrow(/changed/);
+    await expectCode(send(connection, c.lender, [fundBackedIx({ lender: c.lender.publicKey, loanRef: ref, backing, mint: c.mint, tokenProgram: SPL_TOKEN_PROGRAM_ID, lenderSource: c.lenderAta, expect: { ...planned, minCoverBps: 10_000 } })]), BACKER_ERROR.TermsMismatch);
+    await borrower.cancel(ref);
+    await borrower.request(ref, 200n * U, 0, 2n * 86_400n);
 
     // B4: a stranger's own line requests on the same slot: it does not block this one, and the lender can cancel it
     const s = await cast();
@@ -518,6 +566,97 @@ suite('guards', () => {
     await fundBacked(connection, c.lender, backing, ref);
     const { borrower: b2 } = await openLine(c, 52n, { feeBps: 0 });
     await expectCode(b2.request(ref, 10n * U, 0, 2n * 86_400n), 6001); // AlreadyFunded
+  });
+});
+
+suite('a Token-2022 asset like USDG (TransferFeeConfig + PermanentDelegate)', () => {
+  it('TransferFeeConfig at 0 bps and maximum 0 opens and runs a whole loan; a rate raised later stops new requests and funding', async () => {
+    const c = await cast({ feeMint: { bps: 0, maxFee: 0n } });
+    const T22 = TOKEN22_PROGRAM_ID;
+    const ref = await openSlot(c.lender);
+    const { backer, borrower, backing, vault } = await openLine(c, 61n, { feeBps: 500, stake: 300n * U });
+    expect((await readLine(backing)).tokenProgram.equals(T22)).toBe(true);
+    expect(await bal(vault)).toBe(300n * U);
+    await borrower.request(ref, 200n * U, 100, 2n * 86_400n);
+    const lb = await bal(c.lenderAta);
+    await fundBacked(connection, c.lender, backing, ref);
+    const payout = associatedTokenAddress(c.drawKey.publicKey, c.mint, T22);
+    expect(await bal(payout)).toBe(200n * U - 500_000n); // advance - 0.25%, nothing withheld
+    expect(await bal(c.lenderAta)).toBe(lb - 200n * U);
+    // principal 200 + 10 backer fee + 2 lender fee; repay it all
+    await send(connection, c.authority, [mintToIx(c.mint, payout, c.authority.publicKey, 20n * U, T22)]);
+    await borrower.repay(ref, payout, c.drawKey, 212n * U);
+    expect(await bal(vault)).toBe(310n * U);
+    expect(await bal(c.lenderAta)).toBe(lb + 2n * U);
+    await send(connection, c.lender, [settleIx(c.lender.publicKey, ref)]);
+    await releaseBacked(connection, c.stranger, backing, ref);
+    await send(connection, c.lender, [closeSlotIx(c.lender.publicKey, ref, { asset: c.mint, tokenProgram: T22 }, LOAN, safetyPoolFor(LOAN))]);
+    const bb = await bal(c.backerAta);
+    await backer.close();
+    expect(await bal(c.backerAta)).toBe(bb + 310n * U);
+
+    // the fee authority schedules a rate: a request made before it cannot be funded, and no new request is accepted
+    const r1 = await openSlot(c.lender);
+    const r2 = await openSlot(c.lender);
+    const line2 = await openLine(c, 62n, { feeBps: 0, stake: 100n * U });
+    await line2.borrower.request(r1, 10n * U, 0, 2n * 86_400n);
+    await send(connection, c.authority, [setTransferFeeIx(c.mint, c.authority.publicKey, 50, 1_000_000n)]);
+    await expectCode(fundBacked(connection, c.lender, line2.backing, r1), BACKER_ERROR.AssetNotBackable);
+    await expectCode(line2.borrower.request(r2, 10n * U, 0, 2n * 86_400n), BACKER_ERROR.AssetNotBackable);
+    // the request is cancelled and the stake comes back
+    await line2.borrower.cancel(r1);
+    await line2.backer.close();
+  });
+
+  it('a mint whose TransferFeeConfig charges anything is refused at open', async () => {
+    for (const [bps, maxFee] of [[100, 1_000_000n], [0, 1n], [1, 0n]] as const) {
+      const c = await cast({ feeMint: { bps, maxFee } });
+      const b = new SolanaBacker(connection, c.backerKey, 1n, c.payerB, LOAN);
+      await expectCode(b.open(c.mint, { coverBps: 10_000, feeBps: 0, expiry: (await chainNow()) + 86_400n * 5n, drawKey: c.drawKey.publicKey, maxAdvance: U, maxTotal: U }), BACKER_ERROR.AssetNotBackable);
+    }
+  });
+});
+
+suite('the default claim cannot be blocked through the slot\'s pool escrow (fast build)', () => {
+  it('a share escrowed by a spend naming the slot, plus dust sent into the escrow: claimBacked pulls, syncs and pays in one transaction', async () => {
+    await initCrypto();
+    const pool = new SolanaPool(connection);
+    await pool.initialize(LOCALNET_UPGRADE_AUTHORITY);
+    const c = await cast({ programId: FAST });
+    const ref = await openSlot(c.lender, FAST);
+    const { borrower, backing } = await openLine(c, 71n, { feeBps: 0, stake: 200n * U, ttl: 3_600n });
+    await borrower.request(ref, 100n * U, 0, 3n);
+    await fundBacked(connection, c.lender, backing, ref, { programId: FAST });
+    // anyone with a shielded note: a grant pledged to this slot, reclaimed by a spend sent without the lender account
+    const [ownerKp, agentKp] = await newKeys(2);
+    await send(connection, c.authority, [createAtaIx(c.authority.publicKey, ownerKp.publicKey, c.mint), mintToIx(c.mint, associatedTokenAddress(ownerKp.publicKey, c.mint), c.authority.publicKey, 50n * U)]);
+    const owner = new SolanaWallet(Account.random(), pool, ownerKp);
+    const agent = new SolanaWallet(Account.random(), pool, agentKp);
+    await owner.deposit(c.mint, 50n * U);
+    const now = await pool.now();
+    await owner.grant(c.mint, [{ to: agent.address, amount: 20n * U, streamRate: 1n * U, streamStart: now - 1_000n, pledge: { lender: slotPda(ref, FAST), loanRef: ref, pledgeBps: 4_000n, lenderViewPub: randomViewingKey().pub } }]);
+    await owner.sync();
+    const target = owner.grantedAllowances().filter((a) => a.allowance.remaining > 0n)[0];
+    const reclaim = await owner.prepareSpend(target, target.allowance.remaining, owner.address);
+    await owner.submitSpend({ ...reclaim, accounts: { ...reclaim.accounts, lenderToken: undefined } });
+    const escrow = slotEscrow(ref, c.mint, pool.programId, FAST);
+    const share = await bal(escrow);
+    expect(share).toBeGreaterThan(0n);
+    // and dust straight into the escrow
+    await send(connection, c.authority, [mintToIx(c.mint, escrow, c.authority.publicKey, 1n)]);
+    await waitUntil((await readSlot(ref, FAST)).expiry + 2n);
+    // sync + back_claim alone (what the SDK sent before) is refused while the escrow holds anything
+    const slot = await readSlot(ref, FAST);
+    await expectCode(send(connection, c.stranger, [syncIx(c.stranger.publicKey, ref, c.mint, c.lender.publicKey, SPL_TOKEN_PROGRAM_ID, FAST, (await readSub(ref, FAST)).to), backClaimIx(ref, backing, slot, FAST)]), BACKER_ERROR.ReceiptsPending);
+    const lb = await bal(c.lenderAta);
+    const tx = await claimBacked(connection, c.stranger, backing, ref, FAST, pool.programId);
+    cu('pull + sync + back_claim', tx);
+    expect(await bal(escrow)).toBe(0n);
+    // the pulled share and the dust repay the lender first; the stake pays the rest of its due
+    const ev = backingClaimedEvents(tx.logs)[0];
+    expect(ev.amount).toBe(100n * U - share - 1n);
+    expect(await bal(c.lenderAta)).toBe(lb + 100n * U);
+    expect(decodeDraw((await connection.getAccountInfo(drawPda(backing, ref, FAST)))!.data).state).toBe('claimed');
   });
 });
 

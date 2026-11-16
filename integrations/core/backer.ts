@@ -8,7 +8,7 @@
 import { Keypair, PublicKey, TransactionInstruction, type Connection } from '@solana/web3.js';
 import { send } from '../../src/solana/buffer.js';
 import {
-  BACKER_ERROR, FULL_COVER_BPS, MAX_DRAW, MIN_ADVANCE, SolanaBackedBorrower, SolanaBacker, type BackingAccount, backedLoanView, backedTerms, backerKeyFor, backingPda,
+  BACKER_ERROR, DEFAULT_MAX_LENDER_FEE_BPS, FULL_COVER_BPS, MAX_DRAW, backedFundTerms, backedTermsDigest, MIN_ADVANCE, SolanaBackedBorrower, SolanaBacker, type BackingAccount, backedLoanView, backedTerms, backerKeyFor, backingPda,
   backingStatus, backingVault, backSettleIx, checkLineTerms, claimBacked, decodeBacking, decodeDraw, drawKeyFor, drawPda, fundBacked, isBackingAccount, minCoverFor,
 } from '../../src/solana/backer.js';
 import { associatedTokenAddress, decodeSlot, slotPda } from '../../src/solana/lender.js';
@@ -83,13 +83,14 @@ export class BackerOps {
   async prepare(): Promise<this> { this.tp ??= await this.h.tokenProgram(); return this; }
 
   async open(req: {
-    nonce?: bigint; drawKeyCode: string; coverBps?: number; feeBps: number; days: number; maxAdvance: bigint; maxTotal?: bigint; lender?: PublicKey; cosign?: boolean;
+    nonce?: bigint; drawKeyCode: string; coverBps?: number; feeBps: number; maxLenderFeeBps?: number; days: number; maxAdvance: bigint; maxTotal?: bigint; lender?: PublicKey; cosign?: boolean;
     allowPartialCover?: boolean; confirm?: boolean;
   }) {
     const dk = decodeDrawKeyCode(this.h.loanCodeContext, req.drawKeyCode);
     const coverBps = req.coverBps ?? FULL_COVER_BPS;
     if (coverBps < minCoverFor(this.programId)) throw new Error(`cover must be at least ${minCoverFor(this.programId) / 100}% on this network. Nothing was sent.`);
-    const warnings = checkLineTerms({ coverBps, feeBps: req.feeBps }, { allowPartialCover: req.allowPartialCover, allowHighFees: true });
+    const maxLenderFeeBps = req.maxLenderFeeBps ?? DEFAULT_MAX_LENDER_FEE_BPS;
+    const warnings = checkLineTerms({ coverBps, feeBps: req.feeBps, maxLenderFeeBps }, { allowPartialCover: req.allowPartialCover, allowHighFees: true });
     if (!(req.days >= 1 && req.days <= 180)) throw new Error('days must be 1..180 (the line\'s life). Nothing was sent.');
     if (req.maxAdvance < MIN_ADVANCE || req.maxAdvance > MAX_DRAW) throw new Error(`maxAdvance must be ${this.u(MIN_ADVANCE)}..${this.u(MAX_DRAW)}. Nothing was sent.`);
     const maxTotal = req.maxTotal ?? req.maxAdvance;
@@ -100,12 +101,15 @@ export class BackerOps {
     const expiry = (await this.now()) + BigInt(Math.round(req.days * 86_400));
     const terms = {
       action: 'open', nonce, backing: b.backing.toBase58(), backerKey: b.key.publicKey.toBase58(), drawKey: dk.drawKey.toBase58(), coverBps, coverPercent: coverBps / 100,
-      feeBps: req.feeBps, expiry, maxAdvance: req.maxAdvance, maxAdvanceUsdg: fromUnits(req.maxAdvance, this.h.decimals), maxTotal, maxTotalUsdg: fromUnits(maxTotal, this.h.decimals),
+      feeBps: req.feeBps, maxLenderFeeBps, expiry, maxAdvance: req.maxAdvance, maxAdvanceUsdg: fromUnits(req.maxAdvance, this.h.decimals), maxTotal, maxTotalUsdg: fromUnits(maxTotal, this.h.decimals),
       lenderPin: req.lender?.toBase58() ?? null, cosign: !!req.cosign, warnings, privacy: BACKED_PRIVACY,
+      lenderFeeCap: `a request may offer its lender at most ${maxLenderFeeBps / 100}% of the advance; the stake covers that fee too`,
+      selfFundingGuard: req.lender || req.cosign ? 'on: a lender pin or your co-sign is required for every draw'
+        : 'off: without a lender pin or co-sign, the borrower could fund its own draw from a second wallet, default, and claim the stake (advance + lender fee); pin a lender or set cosign if that matters',
       risk: `if the borrower defaults, the stake pays the lender up to ${coverBps / 100}% of what it is due; you then get the borrower's later repayments until that payout is recovered`,
     };
     if (!req.confirm) return plan(terms, 'Call h081_back again with action "open", the same fields and confirm: true; then stake with action "stake".');
-    await b.open(this.h.usdg, { coverBps, feeBps: req.feeBps, expiry, drawKey: dk.drawKey, maxAdvance: req.maxAdvance, maxTotal, lender: req.lender, cosign: req.cosign }, { allowPartialCover: req.allowPartialCover, allowHighFees: true });
+    await b.open(this.h.usdg, { coverBps, feeBps: req.feeBps, maxLenderFeeBps, expiry, drawKey: dk.drawKey, maxAdvance: req.maxAdvance, maxTotal, lender: req.lender, cosign: req.cosign }, { allowPartialCover: req.allowPartialCover, allowHighFees: true });
     return {
       sent: true, ...terms, backingCode: encodeBackingCode(this.h.loanCodeContext, { backing: b.backing, loanRef: 0n }),
       next: 'stake USDG behind the line (h081_back action "stake"), then hand backingCode to the borrower',
@@ -155,7 +159,7 @@ export class BackerOps {
       if (!st) continue;
       lines.push({
         nonce: n, backing: b.backing.toBase58(), backingCode: encodeBackingCode(this.h.loanCodeContext, { backing: b.backing, loanRef: 0n }),
-        staked: st.staked, free: st.free, capacity: st.capacity, reserved: st.line.reserved, coverBps: st.line.coverBps, feeBps: st.line.feeBps, expiry: st.line.expiry,
+        staked: st.staked, free: st.free, capacity: st.capacity, reserved: st.line.reserved, coverBps: st.line.coverBps, feeBps: st.line.feeBps, maxLenderFeeBps: st.line.maxLenderFeeBps, expiry: st.line.expiry,
         openDraws: st.line.openDraws, coveredOut: st.line.coveredOut, advancedTotal: st.line.advancedTotal,
         draws: st.draws.map((d) => ({ loanRef: d.loanRef, state: d.state, advance: d.advance, backerFee: d.backerFee, lenderFee: d.lenderFee, reserve: d.reserve, claimed: d.claimed })),
       });
@@ -218,6 +222,7 @@ export class BackerOps {
     if (!slotInfo) throw new Error(`loan slot #${req.loanRef} does not exist (the lender opens it with h081_lend action "open"). Nothing was sent.`);
     const slot = decodeSlot(slotInfo.data);
     if (slot.funded) throw new Error(`loan slot #${req.loanRef} is already funded. Nothing was sent.`);
+    if (req.lenderFeeBps > l.maxLenderFeeBps) throw new Error(`lenderFeeBps ${req.lenderFeeBps} is above this line's cap of ${l.maxLenderFeeBps} (the backer set it). Nothing was sent.`);
     const t = backedTerms({ advance: req.advance, feeBps: l.feeBps, lenderFeeBps: req.lenderFeeBps, coverBps: l.coverBps });
     const warnings = checkLineTerms({ coverBps: l.coverBps, feeBps: l.feeBps, lenderFeeBps: req.lenderFeeBps }, { allowPartialCover: true, allowHighFees: req.allowHighFees });
     const term = BigInt(Math.round(req.days * 86_400));
@@ -285,15 +290,19 @@ export class BackerOps {
     if (!st) throw new Error('that line does not exist on chain');
     const loan = ref ? await backedLoanView(this.h.connection, c.backing, ref, this.programId) : undefined;
     return {
-      backing: c.backing.toBase58(), coverBps: st.line.coverBps, feeBps: st.line.feeBps, maxAdvance: st.line.maxAdvance, free: st.free, capacity: st.capacity, expiry: st.line.expiry,
+      backing: c.backing.toBase58(), coverBps: st.line.coverBps, feeBps: st.line.feeBps, maxLenderFeeBps: st.line.maxLenderFeeBps, maxAdvance: st.line.maxAdvance, free: st.free, capacity: st.capacity, expiry: st.line.expiry,
       loan: loan && { loanRef: ref, draw: loan.draw?.state ?? null, principal: loan.slot?.principal ?? null, repaid: loan.slot?.repaid ?? null, expiry: loan.slot?.expiry ?? null, toBacker: loan.toBacker, toLender: loan.toLender },
     };
   }
 
   // ---------------------------------------------------------------- lender
 
-  /** h081_lend fund with a backing code: funds the draw at exactly its on-chain terms; H081_MAX_LEND applies. */
-  async lendFund(req: { backingCode: string; loanRef?: bigint; minCoverBps?: number; confirm?: boolean }) {
+  /**
+   * h081_lend fund with a backing code: funds the draw at exactly its on-chain terms; H081_MAX_LEND applies. The plan
+   * returns the exact terms and their `planDigest`; the confirm call must pass that digest back, and the terms it
+   * stands for are what the transaction carries (the program refuses the fund if the Draw no longer has them).
+   */
+  async lendFund(req: { backingCode: string; loanRef?: bigint; minCoverBps?: number; planDigest?: string; confirm?: boolean }) {
     const c = decodeBackingCode(this.h.loanCodeContext, req.backingCode);
     const ref = req.loanRef ?? c.loanRef;
     if (!ref) throw new Error('the backing code names no loan slot; ask the borrower for the code its request returned (or pass loanRef). Nothing was sent.');
@@ -307,18 +316,27 @@ export class BackerOps {
     if (l.coverBps < minCoverBps) throw new Error(`the line covers ${l.coverBps / 100}% of your due, below your minimum ${minCoverBps / 100}% (pass minCoverBps to accept less). Nothing was sent.`);
     const max = this.h.config.maxLend;
     if (max !== undefined && d.advance > max) throw new Error(`over the operator ceiling H081_MAX_LEND (${this.u(max)} per loan). Nothing was sent.`);
+    if (d.state !== 'requested') throw new Error(`the draw on loan slot #${ref} is ${d.state}, not waiting for a lender. Nothing was sent.`);
     const t = backedTerms({ advance: d.advance, feeBps: l.feeBps, lenderFeeBps: 0, coverBps: l.coverBps });
     const due = d.advance + d.lenderFee;
+    const fundTerms = backedFundTerms(d, l);
+    const planDigest = backedTermsDigest(c.backing, ref, fundTerms);
     const p = {
       action: 'fund', kind: 'backed', loanRef: ref, backing: c.backing.toBase58(), advance: d.advance, advanceUsdg: fromUnits(d.advance, this.h.decimals),
       youAreDue: due, youAreDueUsdg: fromUnits(due, this.h.decimals), lenderFee: d.lenderFee, backerFeeFirst: d.backerFee, termDays: Number(d.term) / 86_400,
       covered: d.reserve, coveredUsdg: fromUnits(d.reserve, this.h.decimals), uncovered: due > d.reserve ? due - d.reserve : 0n, coverBps: l.coverBps,
       borrowerReceives: t.toPayout, payoutTo: d.payoutTo.toBase58(), fundBy: d.fundBy,
+      terms: { advance: fundTerms.advance, principal: fundTerms.principal, term: fundTerms.term, payoutTo: fundTerms.payoutTo.toBase58(), coverBps: fundTerms.coverBps },
+      planDigest,
       risk: 'the borrower is an anonymous per-line key: repayment is its own; on default the stake pays your shortfall up to the cover. The backer is paid its fee from repayments before you',
     };
-    if (!req.confirm) return plan(p, 'Call h081_lend again with action "fund", the same backingCode and confirm: true to lend exactly this.');
+    if (!req.confirm) return plan(p, `Call h081_lend again with action "fund", the same backingCode, planDigest "${planDigest}" and confirm: true to lend exactly this.`);
+    if (!req.planDigest) throw new Error(`planDigest is required to fund a backed draw: call h081_lend fund without confirm first, check the terms, then confirm with the planDigest it returns (now "${planDigest}"). Nothing was sent.`);
+    if (req.planDigest.trim().toLowerCase() !== planDigest) {
+      throw new Error(`the draw on loan slot #${ref} changed since your plan (its terms now give planDigest "${planDigest}"): read the new plan before lending. Nothing was sent.`);
+    }
     const tx = await fundBacked(this.h.connection, this.h.signer, c.backing, ref, {
-      minCoverBps, programId: this.programId, treasuryOwner: this.h.config.loanTreasury, poolProgram: this.h.config.poolProgramId, expect: { advance: d.advance, payoutTo: d.payoutTo },
+      minCoverBps, programId: this.programId, treasuryOwner: this.h.config.loanTreasury, poolProgram: this.h.config.poolProgramId, expect: fundTerms,
     });
     return { sent: true, ...p, signature: tx.signature, next: 'h081_lend action "status" shows repayments; on a default anyone may send h081_back action "claim" with this backingCode' };
   }

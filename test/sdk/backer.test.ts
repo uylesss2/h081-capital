@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import {
-  BACKER_ERROR, BACKING_ACCOUNT_SIZE, DRAW_ACCOUNT_SIZE, FULL_COVER_BPS, LOCALNET_LOAN_FAST_PROGRAM_ID, backClaimIx, backOpenIx, backRequestIx, backSettleIx,
+  BACKER_ERROR, BACKING_ACCOUNT_SIZE, DEFAULT_MAX_LENDER_FEE_BPS, DRAW_ACCOUNT_SIZE, FULL_COVER_BPS, backedFundTerms, backedTermsDigest, LOCALNET_LOAN_FAST_PROGRAM_ID, backClaimIx, backOpenIx, backRequestIx, backSettleIx,
   backWithdrawIx, backedClaimAmount, backedTerms, backerKeyFor, backerTimes, backingPda, backingVault, checkLineTerms, decodeBacking, decodeDraw, drawKeyFor, drawPda,
   fundBackedIx, isBackedSlot, lineCapacity, releaseReason, routingDone,
 } from '../../src/solana/backer.js';
@@ -48,6 +48,24 @@ describe('backed-line math (shared vectors with backer.rs)', () => {
     expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 800, lenderFeeBps: 500 })).toThrow(/above 10%/);
     expect(() => checkLineTerms({ coverBps: 1999, feeBps: 0 }, { allowPartialCover: true })).toThrow();
     expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 2001 })).toThrow();
+    // the line's lender-fee cap
+    expect(DEFAULT_MAX_LENDER_FEE_BPS).toBe(500);
+    expect(checkLineTerms({ coverBps: 10_000, feeBps: 0, lenderFeeBps: 500, maxLenderFeeBps: 500 })).toEqual([]);
+    expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 0, lenderFeeBps: 501, maxLenderFeeBps: 500 })).toThrow(/above this line's cap/);
+    expect(() => checkLineTerms({ coverBps: 10_000, feeBps: 0, maxLenderFeeBps: 2001 })).toThrow(/cap must be/);
+  });
+  it('the fund-terms digest changes with every term a lender is shown', () => {
+    const backing = Keypair.generate().publicKey, payoutTo = Keypair.generate().publicKey;
+    const t = backedFundTerms({ advance: 500n, backerFee: 25n, lenderFee: 15n, term: 86_400n, payoutTo }, { coverBps: 10_000 });
+    expect(t).toEqual({ advance: 500n, principal: 540n, term: 86_400n, payoutTo, coverBps: 10_000 });
+    const d = backedTermsDigest(backing, 3n, t);
+    expect(d).toMatch(/^[0-9a-f]{16}$/);
+    expect(backedTermsDigest(backing, 3n, { ...t })).toBe(d);
+    for (const other of [
+      backedTermsDigest(backing, 4n, t), backedTermsDigest(Keypair.generate().publicKey, 3n, t), backedTermsDigest(backing, 3n, { ...t, term: 86_401n }),
+      backedTermsDigest(backing, 3n, { ...t, principal: 541n }), backedTermsDigest(backing, 3n, { ...t, advance: 501n }),
+      backedTermsDigest(backing, 3n, { ...t, payoutTo: Keypair.generate().publicKey }), backedTermsDigest(backing, 3n, { ...t, coverBps: 9_999 }),
+    ]) expect(other).not.toBe(d);
   });
 });
 
@@ -69,7 +87,9 @@ describe('instructions and accounts', () => {
   const backing = backingPda(backer, 3n);
   it('encode the program\'s argument layouts', () => {
     const open = backOpenIx(backer, payer, mint, { nonce: 3n, coverBps: 10_000, feeBps: 500, expiry: 99n, drawKey: dk, maxAdvance: 1n, maxTotal: 2n, cosign: true });
-    expect(open.data.length).toBe(8 + 8 + 2 + 2 + 8 + 32 + 32 + 8 + 8 + 1);
+    expect(open.data.length).toBe(8 + 8 + 2 + 2 + 2 + 8 + 32 + 32 + 8 + 8 + 1);
+    expect(Buffer.from(open.data).readUInt16LE(8 + 8 + 2 + 2)).toBe(DEFAULT_MAX_LENDER_FEE_BPS); // max_lender_fee_bps follows fee_bps
+    expect(Buffer.from(backOpenIx(backer, payer, mint, { nonce: 3n, coverBps: 10_000, feeBps: 500, maxLenderFeeBps: 120, expiry: 99n, drawKey: dk, maxAdvance: 1n, maxTotal: 2n }).data).readUInt16LE(20)).toBe(120);
     expect(Buffer.from(open.data.subarray(0, 8)).equals(disc('global:back_open'))).toBe(true);
     expect(open.keys[0].pubkey.equals(backing)).toBe(true);
     expect(open.keys[4].pubkey.equals(backingVault(backing, mint))).toBe(true);
@@ -77,6 +97,8 @@ describe('instructions and accounts', () => {
     expect(req.data.length).toBe(8 + 8 + 8 + 2 + 8 + 8);
     expect(req.keys[1].pubkey.equals(drawPda(backing, 5n))).toBe(true);
     expect(req.keys[4].isSigner).toBe(false);
+    expect(req.keys.length).toBe(10);
+    expect(req.keys[9].pubkey.equals(mint)).toBe(true); // the asset, for the transfer-fee check
     const fund = fundBackedIx({ lender: payer, loanRef: 5n, backing, mint, tokenProgram: SPL_TOKEN_PROGRAM_ID, lenderSource: payer, expect: { advance: 1n, principal: 2n, term: 3n, payoutTo: dk, coverBps: 10_000, minCoverBps: 10_000 } });
     expect(fund.data.length).toBe(8 + 8 + 8 + 8 + 8 + 32 + 2 + 2);
     expect(fund.keys.length).toBe(16);
@@ -90,10 +112,11 @@ describe('instructions and accounts', () => {
     const b = Buffer.alloc(BACKING_ACCOUNT_SIZE);
     disc('account:Backing').copy(b, 0);
     backer.toBuffer().copy(b, 8); dk.toBuffer().copy(b, 40); mint.toBuffer().copy(b, 104);
-    let o = 8 + 32 * 6; b.writeBigUInt64LE(3n, o); o += 8; b.writeUInt16LE(10_000, o); o += 2; b.writeUInt16LE(500, o); o += 2; b.writeBigUInt64LE(77n, o); o += 8;
+    let o = 8 + 32 * 6; b.writeBigUInt64LE(3n, o); o += 8; b.writeUInt16LE(10_000, o); o += 2; b.writeUInt16LE(500, o); o += 2; b.writeUInt16LE(300, o); o += 2; b.writeBigUInt64LE(77n, o); o += 8;
     o += 8 * 3; b.writeBigUInt64LE(515n, o); o += 8; b.writeUInt16LE(2, o);
     const l = decodeBacking(b);
-    expect([l.backer.equals(backer), l.drawKey.equals(dk), l.asset.equals(mint), l.nonce, l.coverBps, l.feeBps, l.expiry, l.reserved, l.openDraws]).toEqual([true, true, true, 3n, 10_000, 500, 77n, 515n, 2]);
+    expect([l.backer.equals(backer), l.drawKey.equals(dk), l.asset.equals(mint), l.nonce, l.coverBps, l.feeBps, l.maxLenderFeeBps, l.expiry, l.reserved, l.openDraws]).toEqual([true, true, true, 3n, 10_000, 500, 300, 77n, 515n, 2]);
+    expect(BACKING_ACCOUNT_SIZE).toBe(278);
     const d = Buffer.alloc(DRAW_ACCOUNT_SIZE);
     disc('account:Draw').copy(d, 0); d.writeBigUInt64LE(9n, 8); backing.toBuffer().copy(d, 16); d[DRAW_ACCOUNT_SIZE - 2] = 2;
     const dr = decodeDraw(d);

@@ -25,7 +25,7 @@ export const h081AllowanceDelegate = (agent: AgentLike, input: { allowanceId: st
 export const h081AllowanceReclaim = (agent: AgentLike, input: { allowanceId: string; confirm?: boolean }) => run(agent, 'h081_allowance_reclaim', input);
 
 export const h081Lend = (agent: AgentLike, input: {
-  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close' | 'sweep'; pledgeBps?: number; proofCode?: string; backingCode?: string; minCoverBps?: number; loanRef?: string;
+  action: 'open' | 'fund' | 'status' | 'claim' | 'collect' | 'settle' | 'close' | 'sweep'; pledgeBps?: number; proofCode?: string; backingCode?: string; minCoverBps?: number; planDigest?: string; loanRef?: string;
   principal?: string; principalUsdg?: string; amount?: string; usdg?: string; confirm?: boolean;
 }) => run(agent, 'h081_lend', input);
 
@@ -34,7 +34,7 @@ export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: 
 /** Backed lines: the backer side (docs/BACKER-SPEC.md). Writes return the plan unless confirm: true. */
 export const h081Back = (agent: AgentLike, input: {
   action: 'open' | 'stake' | 'status' | 'withdraw' | 'close' | 'cancel' | 'release' | 'forgive' | 'claim'; drawKeyCode?: string; backingCode?: string; coverBps?: number; feeBps?: number;
-  days?: number; maxAdvance?: string; maxAdvanceUsdg?: string; maxTotal?: string; maxTotalUsdg?: string; lender?: string; cosign?: boolean; allowPartialCover?: boolean;
+  maxLenderFeeBps?: number; days?: number; maxAdvance?: string; maxAdvanceUsdg?: string; maxTotal?: string; maxTotalUsdg?: string; lender?: string; cosign?: boolean; allowPartialCover?: boolean;
   fromShielded?: boolean; nonce?: string; loanRef?: string; amount?: string; usdg?: string; confirm?: boolean;
 }) => run(agent, 'h081_back', input);
 
