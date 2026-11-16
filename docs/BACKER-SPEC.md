@@ -289,8 +289,10 @@ deposit volume), a pinned lender hints at who the backer is, and the lender is n
   backed lines it is 442,376 B. That is **+121,656 B (≈ 119 KB)**, about 0.62 SOL locked at 5,080 lamports/byte (about
   0.85 SOL at 6,960 lamports/byte). The first build, with nine instructions, was +140,672 B. Merging cancel, release
   and forgive into `back_settle`, and withdraw and close into `back_withdraw`, saved 19 KB. The earlier 45-75 KB
-  estimate was low, as the overpay cap's was. Measure the mainnet build (`build-phase2-mainnet.sh`) before asking for
-  the go.
+  estimate was low, as the overpay cap's was. A `--features mainnet` build of scratch copies (declare_id and the
+  treasury placeholder swapped, never deployable) gives 320,656 B before and **442,552 B after (+121,896 B)**. The
+  extend needed is 442,552 B minus the current mainnet ProgramData capacity; read that capacity and rebuild with
+  `build-phase2-mainnet.sh` before asking for the go.
 - **Deploy buffer**: about the program size in rent, temporary and refunded.
 - **Per line**: Backing ≈ 0.00205 SOL + vault ≈ 0.0015-0.002 SOL, both refunded at close.
 - **Per draw**: Draw ≈ 0.00155 SOL (refunded) + Subrogation ≈ 0.00114 SOL (paid by the lender, kept).

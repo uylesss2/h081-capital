@@ -29,6 +29,10 @@ const U = 1_000_000n;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const funder = Keypair.generate();
 
+// Compute units of the backed-line transactions on this validator, written to solana/compute-units-backer.json.
+const CU: Record<string, number> = {};
+const cu = (name: string, tx: { computeUnits?: number }) => { CU[name] = Math.max(CU[name] ?? 0, tx.computeUnits ?? 0); console.log(`${name}: compute units ${tx.computeUnits}`); };
+
 async function fundSol(...keys: PublicKey[]) {
   for (const k of keys) {
     const sig = await connection.requestAirdrop(k, 10 * LAMPORTS_PER_SOL);
@@ -150,10 +154,11 @@ type Cast = Awaited<ReturnType<typeof cast>>;
 
 async function openLine(c: Cast, nonce: bigint, o: { coverBps?: number; feeBps?: number; ttl?: bigint; stake?: bigint; maxAdvance?: bigint; maxTotal?: bigint; lender?: PublicKey; cosign?: boolean; allowPartialCover?: boolean } = {}) {
   const backer = new SolanaBacker(connection, c.backerKey, nonce, c.payerB, c.programId);
-  await backer.open(c.mint, {
+  const opened = await backer.open(c.mint, {
     coverBps: o.coverBps ?? 10_000, feeBps: o.feeBps ?? 500, expiry: (await chainNow()) + (o.ttl ?? 30n * 86_400n), drawKey: c.drawKey.publicKey,
     maxAdvance: o.maxAdvance ?? 1_000n * U, maxTotal: o.maxTotal ?? 3_000n * U, lender: o.lender, cosign: o.cosign,
   }, { allowPartialCover: o.allowPartialCover, allowHighFees: true });
+  cu('back_open', opened);
   if ((o.stake ?? 600n * U) > 0n) await backer.stake(c.backerAta, c.backerKey, o.stake ?? 600n * U);
   const borrower = new SolanaBackedBorrower(connection, c.drawKey, backer.backing, c.payerA, c.programId);
   return { backer, borrower, backing: backer.backing, vault: backingVault(backer.backing, c.mint) };
@@ -215,6 +220,7 @@ suite('three wallets, the happy path', () => {
     const q = await borrower.quote(500n * U, 300);
     expect([q.backerFee, q.lenderFee, q.principal, q.reserve, q.lenderDue, q.uncovered]).toEqual([25n * U, 15n * U, 540n * U, 515n * U, 515n * U, 0n]);
     const req = await borrower.request(ref, 500n * U, 300, 2n * 86_400n, { ttl: 3_600n });
+    cu('back_request (+ payout ATA idempotent)', req);
     const draw = decodeDraw((await connection.getAccountInfo(req.draw, 'confirmed'))!.data);
     expect((await connection.getAccountInfo(req.draw))!.data.length).toBe(DRAW_ACCOUNT_SIZE);
     expect([draw.state, draw.advance, draw.backerFee, draw.lenderFee, draw.reserve, draw.term]).toEqual(['requested', 500n * U, 25n * U, 15n * U, 515n * U, 2n * 86_400n]);
@@ -224,6 +230,7 @@ suite('three wallets, the happy path', () => {
     const treasury = loanTreasuryAccount(c.mint);
     const [lb, tb] = [await bal(c.lenderAta), await bal(treasury)];
     const funded = await fundBacked(connection, c.lender, backing, ref);
+    cu('fund_backed (+ treasury ATA idempotent)', funded);
     expect(await bal(payout)).toBe(500n * U - 1_250_000n); // advance - 0.25%
     expect(await bal(treasury)).toBe(tb + 1_250_000n);
     expect(await bal(c.lenderAta)).toBe(lb - 500n * U);
@@ -244,7 +251,7 @@ suite('three wallets, the happy path', () => {
 
     // repay 300 (fee 25 to the vault, 275 to the lender), then 240 (all to the lender) and 10 more (borrower excess)
     await send(connection, c.authority, [mintToIx(c.mint, payout, c.authority.publicKey, 100n * U)]);
-    await borrower.repay(ref, payout, c.drawKey, 300n * U);
+    cu('transfer + sync (fee to the vault, rest to the lender)', await borrower.repay(ref, payout, c.drawKey, 300n * U));
     expect(await bal(vault)).toBe(625n * U);
     expect(await bal(c.lenderAta)).toBe(lb - 500n * U + 275n * U);
     await borrower.repay(ref, payout, c.drawKey, 250n * U);
@@ -259,6 +266,7 @@ suite('three wallets, the happy path', () => {
     await send(connection, c.lender, [settleIx(c.lender.publicKey, ref)]);
     const payerBefore = await connection.getBalance(c.payerA.publicKey);
     const rel = await releaseBacked(connection, c.stranger, backing, ref);
+    cu('back_settle (release + close Draw)', rel);
     expect(drawReleasedEvents(rel.logs)[0]).toMatchObject({ reason: 1, forgone: 0n, closed: true });
     expect(await connection.getAccountInfo(req.draw)).toBeNull();
     expect(await connection.getBalance(c.payerA.publicKey)).toBeGreaterThan(payerBefore);
@@ -269,7 +277,7 @@ suite('three wallets, the happy path', () => {
     expect(await connection.getAccountInfo(slotPda(ref))).toBeNull();
     // the backer closes the line: stake + fee back, both rents to its payer
     const [bb, pb] = [await bal(c.backerAta), await connection.getBalance(c.payerB.publicKey)];
-    await backer.close();
+    cu('back_withdraw close (+ backer ATA idempotent)', await backer.close());
     expect(await bal(c.backerAta)).toBe(bb + 625n * U);
     expect(await connection.getAccountInfo(backing)).toBeNull();
     expect(await connection.getAccountInfo(vault)).toBeNull();
@@ -297,6 +305,7 @@ suite('default (fast test build: grace 2 s, claim window 5 s, recovery horizon 5
     // sync + claim in one transaction: the 7 pays more of the fee, then the lender gets its whole due (515) from the stake
     const lb = await bal(c.lenderAta);
     const tx = await claimBacked(connection, c.stranger, backing, ref, FAST);
+    cu('sync + back_claim', tx);
     const ev = backingClaimedEvents(tx.logs)[0];
     expect(backedClaimAmount(540n * U, 25n * U, 17n * U, 17n * U, 515n * U, 617n * U)).toBe(515n * U);
     expect([ev.amount, ev.held, ev.feeForfeited]).toEqual([515n * U, false, 8n * U]);
@@ -512,7 +521,9 @@ suite('guards', () => {
   });
 });
 
-afterAll(() => undefined);
+afterAll(() => {
+  if (Object.keys(CU).length >= 6) writeFileSync(resolve(SOLANA_DIR, 'compute-units-backer.json'), JSON.stringify({ measured: new Date().toISOString(), rpc: RPC, computeUnits: CU }, null, 2) + '\n');
+});
 // terms used above, cross-checked against the shared math
 it('the worked example of the spec', () => {
   expect(backedTerms({ advance: 500n * U, feeBps: 500, lenderFeeBps: 300, coverBps: 10_000 })).toMatchObject({ principal: 540n * U, reserve: 515n * U, toPayout: 498_750_000n });
