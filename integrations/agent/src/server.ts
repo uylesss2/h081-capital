@@ -347,7 +347,7 @@ export const ROUTES: RouteDef[] = [
   {
     method: 'POST', path: '/v1/reputation/attest', auth: true, write: true, summary: 'Prover: have the relayer attest repaid loans',
     body: obj({ selfSign: prop('h081_reputation_attest', 'selfSign'), confirm: confirmJ }),
-    result: 'plan, or {attested, failed, via, signatures}',
+    result: 'plan, or {queued, attested, failed, via, signatures, note}',
     handle: async (c) => {
       only(c.body, ['selfSign', 'confirm']);
       return out(await c.h.reputationAttest({ ...wo(c), selfSign: c.body.selfSign === true }));

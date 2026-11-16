@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { REP_LOAN_KEY_BASE } from '../../integrations/core/reputation.js';
 import { loanPk } from '../../src/crypto.js';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -60,13 +60,13 @@ const NO_CIRCUITS = 'C:/nonexistent/h081-lend-circuits';
 
 type Conn = ReturnType<typeof fakeConnection>;
 
-async function openAgent(opts: { maxLend?: bigint; walletUsdg?: bigint; lamports?: number; circuits?: string; signer?: Keypair } = {}) {
+async function openAgent(opts: { maxLend?: bigint; walletUsdg?: bigint; lamports?: number; circuits?: string; signer?: Keypair; cacheDir?: string } = {}) {
   const signer = opts.signer ?? Keypair.generate();
   const conn = fakeConnection(signer, { now: NOW, walletUsdg: opts.walletUsdg ?? USD(500), lamports: opts.lamports });
   conn.accounts.set(registryPda(LOAN).toBase58(), { owner: LOAN, data: Buffer.concat([Buffer.alloc(8), u64(3n)]), executable: false, lamports: 1 });
   const bank = await H081Bank.open({
     config: testConfig({ maxLend: opts.maxLend }), signer, accountSk: deriveAccountSk(signer),
-    connection: conn as unknown as Connection, prover: new FlatDirProver(opts.circuits ?? NO_CIRCUITS), cacheDir: null,
+    connection: conn as unknown as Connection, prover: new FlatDirProver(opts.circuits ?? NO_CIRCUITS), cacheDir: opts.cacheDir ?? null,
   });
   vi.spyOn(bank.owner, 'sync').mockResolvedValue(undefined);
   vi.spyOn(bank.lender(), 'sync').mockResolvedValue(undefined);
@@ -510,5 +510,46 @@ describe('a loan between two agents (mocked SDK, real codes)', () => {
     expect((await runOp(A.bank, 'h081_lend', { action: 'settle', loanRef: '3' }) as { plan: { warning: string } }).plan.warning).toMatch(/repaid; settling closes it/);
     expect(await runOp(A.bank, 'h081_lend', { action: 'settle', loanRef: '3', confirm: true })).toMatchObject({ sent: true });
     expect(settle).toHaveBeenCalledOnce();
+  });
+});
+
+describe('borrow picks a loan key the chain has not seen (private reputation)', () => {
+  it('an empty cache dir plus existing loan-key grants (one spent, one past a gap) still yields a fresh key; the cache learns all three', async () => {
+    const A = await openAgent({ walletUsdg: USD(500) });
+    const cacheDir = mkdtempSync(join(tmpdir(), 'h081-loankeys-'));
+    const B = await openAgent({ walletUsdg: 0n, cacheDir });
+    const both = [A.conn, B.conn];
+    const ref = 3n;
+    vi.spyOn(A.bank.lender(), 'openSlot').mockImplementation(async () => { putSlot(both, slotData({ loanRef: ref, lender: A.signer.publicKey })); return ref; });
+    const opened = await runOp(A.bank, 'h081_lend', { action: 'open', pledgeBps: 4000, confirm: true }) as { termsCode: string };
+
+    // B's own earlier grants, as its synced pool log shows them: loan key 0 (fully drawn, so spent) and loan key 3
+    vi.spyOn(B.bank, 'sync').mockResolvedValue(undefined as never);
+    const sk = B.bank.account.keys.sk, ownerPk = B.bank.account.keys.pk;
+    const p = pledged(A.bank);
+    const earlier = (k: number, spent: boolean): SolOwnedAllowance => {
+      const a: Allowance = { ...p.a, agentPk: loanPk(sk, k), rho: BigInt(100 + k), policy: { ...p.a.policy, ownerPk } };
+      return { allowance: a, commitment: allowanceCommitment(a), index: 10 + k, spent, views: p.note.views, mint: USDG };
+    };
+    for (const x of [earlier(0, true), earlier(3, false)]) B.bank.owner.allowances.set(x.commitment, x);
+    expect(readdirSync(cacheDir).filter((f) => f.includes('loankeys'))).toEqual([]);
+
+    vi.spyOn(B.bank.owner, 'balance').mockReturnValue(USD(200));
+    const grant = vi.spyOn(B.bank.owner, 'grant').mockResolvedValue({ tx: tx('sigGrant'), proof: {} as never, allowances: [], total: 0n, totalSalt: 0n, lenderPayloads: [undefined] });
+    const bPayout = getAssociatedTokenAddressSync(USDG, B.signer.publicKey, false, TOKEN_2022_PROGRAM_ID);
+    const q = pledged(A.bank, { payout: bPayout });
+    const owned: SolOwnedAllowance = { allowance: q.a, commitment: q.note.commitment, index: 5, spent: false, views: q.note.views, lender: q.note.lender, lenderKey: slotPda(ref, LOAN), mint: USDG };
+    const fresh = B.bank.agent(REP_LOAN_KEY_BASE + 1);
+    vi.spyOn(fresh.wallet, 'sync').mockResolvedValue(undefined);
+    vi.spyOn(fresh.wallet, 'agentAllowances').mockReturnValue([owned]);
+    vi.spyOn(fresh.wallet, 'proveStream').mockImplementation(async (_o, bounds) => ({
+      proof: { proof: q.proof, publicSignals: [], raw: { proof: {}, publicSignals: [] } }, args: { ...q.args, minRemaining: bounds.minRemaining, audience: bounds.audience },
+    }));
+    await runOp(B.bank, 'h081_loan_borrow', { termsCode: opened.termsCode, budgetUsdg: '100', days: 30, unlockDays: 30, principalUsdg: '40' });
+    // not loan key 0 (what an empty cache alone would pick) and not 3: the first key no grant used
+    expect(grant.mock.calls[0][1][0].to).toEqual(fresh.account.address);
+    expect(fresh.account.keys.pk).toBe(loanPk(sk, 1));
+    const file = readdirSync(cacheDir).find((f) => f.includes('loankeys'))!;
+    expect(JSON.parse(readFileSync(join(cacheDir, file), 'utf8'))).toEqual({ keys: [0, 1, 3] });
   });
 });

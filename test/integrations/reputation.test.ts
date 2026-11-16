@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { Keypair, PublicKey, type Connection } from '@solana/web3.js';
 import { initCrypto, loanPk, randomField, repLeaf } from '../../src/crypto.js';
@@ -16,9 +16,12 @@ import {
 import { be32, fieldOf } from '../../src/solana/field.js';
 import { LOCALNET_REP_PROGRAM_ID, REP_TREE_SIZE, repTreePda, snapshotOf, type RepAttestedEvent } from '../../src/solana/reputation.js';
 import {
-  CODE_KIND, PREFIX_KIND, decodeRepCode, decodeRepRequest, encodeRepCode, encodeRepRequest, encodeRepSig, repPresentationMessage, type CodeContext,
+  CODE_KIND, PREFIX_KIND, decodeRepCode, decodeRepRequest, encodeRepCode, encodeRepRequest, encodeRepSig, repPresentationMessage, type CodeContext, type RepThresholds,
 } from '../../integrations/core/codes.js';
-import { proveReputation, reputationRequest, verifyReputation, type RepEnv, REP_MAX_SETS_PER_DAY } from '../../integrations/core/reputation.js';
+import {
+  checkProbeCap, proveReputation, reputationAttest, reputationRequest, verifyReputation, type RepAttestResult, type RepEnv, REP_MAX_SETS_PER_DAY,
+  REP_MAX_SETS_PER_DAY_ALL,
+} from '../../integrations/core/reputation.js';
 import type { H081Config } from '../../integrations/core/constants.js';
 
 const U = 1_000_000n;
@@ -239,5 +242,87 @@ describe.skipIf(!haveArtifacts)('prove and verify (dev setup)', () => {
   it('another account cannot prove from these loans', async () => {
     const e = envFor(0x999n, w);
     await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1 })).rejects.toThrow(/ReputationUnreachable/);
+  });
+
+  it(`fresh audience names do not reset the cap: after ${REP_MAX_SETS_PER_DAY_ALL} sets across audiences a 5th audience is refused before proving (no cache dir: kept in memory)`, async () => {
+    const e = { ...envFor(master, w), cacheDir: undefined };
+    for (let i = 0; i < REP_MAX_SETS_PER_DAY_ALL; i++) checkProbeCap(e, audienceOf(`acme-${1 + (i % 4)}`), set(i + 1));
+    const prove = vi.spyOn(e.prover, 'prove');
+    await expect(proveReputation(e, { audience: 'acme-5', minLoans: 1, minVolume: '25' })).rejects.toThrow(/across all audiences/);
+    expect(prove).not.toHaveBeenCalled();
+  }, 300_000);
+});
+
+/** Threshold set number i (distinct for each i). */
+const set = (i: number): RepThresholds => ({ minLoans: i, minVolume: 0n, minLenders: 0, minSpanDays: 0, minMonths: 0, monthFloor: 0n });
+
+describe('the probing cap (prover side)', () => {
+  const master = 0x4242n;
+  const fresh = () => envFor(master, world(master));
+
+  it(`5 different audience names on one day: ${REP_MAX_SETS_PER_DAY_ALL} distinct sets in all, then refused; a set already proven today stays free`, () => {
+    const e = fresh();
+    const names = ['acme-1', 'acme-2', 'acme-3', 'acme-4', 'acme-5'];
+    let n = 0;
+    // two sets per audience: the 9th distinct set (acme-5's second) is refused although acme-5 has had only one
+    for (const name of names) {
+      for (let j = 0; j < 2; j++) {
+        n++;
+        if (n <= REP_MAX_SETS_PER_DAY_ALL) checkProbeCap(e, audienceOf(name), set(n));
+        else expect(() => checkProbeCap(e, audienceOf(name), set(n))).toThrow(new RegExp(`already proved ${REP_MAX_SETS_PER_DAY_ALL} different reputation thresholds today across all audiences`));
+      }
+    }
+    expect(n).toBe(10);
+    // repeating a set some audience already got today adds nothing new, so it is allowed for another audience too
+    checkProbeCap(e, audienceOf('acme-5'), set(3));
+    // the next day starts over
+    checkProbeCap(e, audienceOf('acme-5'), set(9), undefined, Date.now() + 86_400_000);
+  });
+
+  it(`one bindTo key under fresh audience names gets at most ${REP_MAX_SETS_PER_DAY} distinct sets a day`, () => {
+    const e = fresh();
+    const key = 0xb1dn;
+    for (let i = 1; i <= REP_MAX_SETS_PER_DAY; i++) checkProbeCap(e, audienceOf(`desk-${i}`), set(i), key);
+    expect(() => checkProbeCap(e, audienceOf('desk-9'), set(9), key)).toThrow(/the key this proof would be bound to already received/);
+    // another key (or a fresh session key, which is not passed) is not held back by it
+    checkProbeCap(e, audienceOf('desk-9'), set(9), 0xc0ffeen);
+  });
+
+  it('without a cache dir the log is kept in memory for the process (never skipped); a deleted cache file does not reset it', () => {
+    const e = fresh();
+    const mem = { ...e, cacheDir: undefined };
+    for (let i = 1; i <= REP_MAX_SETS_PER_DAY; i++) checkProbeCap(mem, audienceOf('one-desk'), set(i));
+    expect(() => checkProbeCap({ ...e, cacheDir: undefined }, audienceOf('one-desk'), set(5))).toThrow(/this audience already received/);
+    // the same signer with a cache dir whose file is gone still sees what this process proved
+    const dir = mkdtempSync(join(tmpdir(), 'h081-probe-'));
+    expect(() => checkProbeCap({ ...e, cacheDir: dir }, audienceOf('one-desk'), set(5))).toThrow(/this audience already received/);
+  });
+});
+
+describe('reputationAttest (borrower side) hands loans to the relayer queue', () => {
+  it('posts each loan once, in random order; 202 = queued (attested by the sweep), a refusal is reported; an older relayer that attests at once still works', async () => {
+    const posted: string[] = [];
+    const e: RepEnv = {
+      ...envFor(0x77n, world(0x77n)),
+      fetch: (async (_u: string, init?: RequestInit) => {
+        const ref = (JSON.parse(String(init!.body)) as { loanRef: string }).loanRef;
+        posted.push(ref);
+        if (ref === '9') return new Response(JSON.stringify({ error: { code: 'below_floor', message: 'too small' } }), { status: 402 });
+        if (ref === '8') return new Response(JSON.stringify({ signature: 'sigOld', loanRef: ref }), { status: 200 });
+        return new Response(JSON.stringify({ queued: true, loanRef: ref, note: 'queued' }), { status: 202 });
+      }) as typeof fetch,
+    };
+    const refs = Array.from({ length: 12 }, (_, i) => BigInt(i + 10));
+    const plan = await reputationAttest(e, { loanRefs: refs });
+    expect(plan).toMatchObject({ sent: false, plan: { via: expect.stringMatching(/queue/) } });
+    expect(posted).toEqual([]);
+    const r = await reputationAttest(e, { loanRefs: [...refs, 8n, 9n], confirm: true }) as RepAttestResult;
+    expect([...posted].sort()).toEqual([...refs, 8n, 9n].map(String).sort());
+    expect(posted).not.toEqual([...refs, 8n, 9n].map(String)); // shuffled (12! orders: the given one is ~2e-9 likely)
+    expect([...r.queued].sort()).toEqual(refs.map(String).sort());
+    expect(r.attested).toEqual(['8']);
+    expect(r.signatures).toEqual(['sigOld']);
+    expect(r.failed).toEqual([{ loanRef: '9', error: 'too small' }]);
+    expect(r.note).toMatch(/next sweep/);
   });
 });

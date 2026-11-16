@@ -202,15 +202,27 @@ export function rebuildRepTree(events: RepAttestedEvent[], onChain?: RepTreeAcco
  * Fetches everything (not just the caller's loans), so the request reveals nothing beyond the IP and the timing.
  */
 export async function fetchRepEvents(connection: Connection, programId = LOCALNET_REP_PROGRAM_ID, version = 0): Promise<RepAttestedEvent[]> {
+  return (await fetchRepEventsSince(connection, programId, version)).events;
+}
+
+/**
+ * The RepAttested events of transactions newer than signature `until` (all of them without it), oldest first, and the
+ * newest signature seen (the next call's `until`; undefined when there was nothing new). Lets a long-lived reader
+ * top its list up with only the new transactions instead of refetching the whole history.
+ */
+export async function fetchRepEventsSince(
+  connection: Connection, programId = LOCALNET_REP_PROGRAM_ID, version = 0, until?: string,
+): Promise<{ events: RepAttestedEvent[]; newest?: string }> {
   const tree = repTreePda(programId, version);
   const sigs: ConfirmedSignatureInfo[] = [];
   let before: string | undefined;
   for (;;) {
-    const page = await connection.getSignaturesForAddress(tree, { before, limit: 1000 }, 'confirmed');
+    const page = await connection.getSignaturesForAddress(tree, { before, until, limit: 1000 }, 'confirmed');
     sigs.push(...page);
     if (page.length < 1000) break;
     before = page[page.length - 1].signature;
   }
+  const newest = sigs[0]?.signature;
   const out: RepAttestedEvent[] = [];
   for (const s of sigs.reverse()) {
     if (s.err) continue;
@@ -218,7 +230,7 @@ export async function fetchRepEvents(connection: Connection, programId = LOCALNE
     if (!tx?.meta || tx.meta.err) continue;
     out.push(...repEventsOfLogs(tx.meta.logMessages ?? [], programId).filter((e) => e.version === version));
   }
-  return out;
+  return { events: out, newest };
 }
 
 /** The checked leaf set: events (from a snapshot when given, else the chain), the rebuilt tree, the on-chain tree. */

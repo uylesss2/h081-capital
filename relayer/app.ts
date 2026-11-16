@@ -54,8 +54,12 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
       + `fee ${solana.feeBps} bps to treasury ${solana.feeOwner.toBase58()}, ${cap}${note}, create-account surcharge ${surcharges}`);
     log(`solana: verifying keys from ${s.circuitsDir}: ${Object.entries(verifier.vkeySha256).map(([k, v]) => `${k} ${v}`).join(', ')}`);
     if (s.rep) {
-      rep = new RepRelayer({ connection, payer, repProgramId: new PublicKey(s.rep.programId), loanProgramId: new PublicKey(s.rep.loanProgramId), minPrincipal: s.rep.minPrincipal, log });
-      log(`rep: rep_registry ${s.rep.programId}, attests repaid loans of at least ${s.rep.minPrincipal} base units from ${payer.publicKey.toBase58()}; no proving endpoint`);
+      rep = new RepRelayer({
+        connection, payer, repProgramId: new PublicKey(s.rep.programId), loanProgramId: new PublicKey(s.rep.loanProgramId), minPrincipal: s.rep.minPrincipal,
+        sweepEveryMin: s.rep.sweepEveryMin || undefined, log,
+      });
+      log(`rep: rep_registry ${s.rep.programId}, queues attests of repaid loans of at least ${s.rep.minPrincipal} base units and sweeps them from ${payer.publicKey.toBase58()}`
+        + ` (${s.rep.sweepEveryMin ? `every ${s.rep.sweepEveryMin} min in a long-running server` : 'no timer'}${s.rep.cronSecret ? ', and on GET /v1/rep/sweep' : ''}); no proving endpoint`);
     }
     if (cfg.x402) {
       // an x402-only problem never takes the free relay API down: a deliberate refusal (ConfigError) still
@@ -71,6 +75,7 @@ export async function buildRelayer(cfg: RelayerConfig, log: (line: string) => vo
   return {
     evm, solana, limiter: new RateLimiter({ perMinute: cfg.perMinute, burst: cfg.burst }), trustProxy: cfg.trustProxy,
     corsOrigins: cfg.corsOrigins, log: (line) => log(`${new Date().toISOString()} ${line}`), x402, publicBase: cfg.x402?.resourceBase, rep,
+    repCronSecret: cfg.solana?.rep?.cronSecret,
   };
 }
 

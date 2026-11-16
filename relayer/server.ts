@@ -6,11 +6,13 @@
 //   GET  /v1/x402/catalog      the paid services (free)
 //   POST /v1/x402/solana/relay-priority, POST /v1/x402/solana/preflight, GET /v1/x402/loans/market,
 //   POST /v1/x402/prove/disclose   paid (x402): 402 + PAYMENT-REQUIRED without a PAYMENT-SIGNATURE header
-//   GET  /v1/rep/leaves, GET /v1/rep/roots, POST /v1/rep/attest { loanRef }   private reputation (rep.ts); 503 rep_disabled when off
+//   GET  /v1/rep/leaves, GET /v1/rep/roots, POST /v1/rep/attest { loanRef } (202: queued for the sweep),
+//   GET  /v1/rep/sweep (Authorization: Bearer <CRON_SECRET>)   private reputation (rep.ts); 503 rep_disabled when off
 // Errors: { error: { code, message } } with 400 (malformed), 402 (fee not acceptable, or payment required /
 // invalid / not settled), 404, 405, 409 (stale or already spent, payment replayed), 413 (body too large),
 // 422 (simulation failed), 429 (rate limited, Retry-After), 503 (chain disabled, busy, x402_disabled,
 // facilitator_unavailable, service_disabled), other 5xx.
+import { timingSafeEqual } from 'node:crypto';
 import { createServer, type RequestListener, type Server } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import { RelayError, toRelayError } from './errors.js';
@@ -43,8 +45,16 @@ export interface RelayerServerOptions {
   /** the public origin of this relayer (catalog URLs when x402 is disabled); default https://api.h081.xyz */
   publicBase?: string;
   /** private reputation (rep_registry); undefined = the /v1/rep routes answer 503 rep_disabled */
-  rep?: Pick<RepRelayer, 'leaves' | 'roots' | 'attest' | 'info'>;
+  rep?: Pick<RepRelayer, 'leaves' | 'roots' | 'enqueue' | 'info'> & Partial<Pick<RepRelayer, 'sweep'>>;
+  /** the bearer secret of GET /v1/rep/sweep (Vercel sends CRON_SECRET); undefined = that route answers 503 */
+  repCronSecret?: string;
 }
+
+const bearerMatches = (got: string | undefined, secret: string) => {
+  const a = Buffer.from(got ?? '');
+  const b = Buffer.from(`Bearer ${secret}`);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
 
 export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
@@ -109,19 +119,28 @@ export function createRelayerHandler(opts: RelayerServerOptions): RequestListene
         }
         return opts.x402.handle(req, res, service, url, key);
       }
-      if (path === '/v1/rep/leaves' || path === '/v1/rep/roots' || path === '/v1/rep/attest') {
+      if (path === '/v1/rep/leaves' || path === '/v1/rep/roots' || path === '/v1/rep/attest' || path === '/v1/rep/sweep') {
         const want = path === '/v1/rep/attest' ? 'POST' : 'GET';
         if (req.method !== want) return fail(res, new RelayError(405, 'method', `${want} only`), { allow: want });
         if (!opts.rep) return fail(res, new RelayError(503, 'rep_disabled', 'private reputation is not enabled on this relayer'));
-        if (path === '/v1/rep/leaves') return json(res, 200, await opts.rep.leaves());
-        if (path === '/v1/rep/roots') return json(res, 200, await opts.rep.roots());
+        if (path === '/v1/rep/sweep') {
+          if (!opts.repCronSecret || !opts.rep.sweep) return fail(res, new RelayError(503, 'service_disabled', 'the reputation sweep cron is not configured (CRON_SECRET)'));
+          const auth = req.headers.authorization;
+          if (!bearerMatches(Array.isArray(auth) ? auth[0] : auth, opts.repCronSecret)) return fail(res, new RelayError(401, 'unauthorized', 'cron only'));
+          const out = await opts.rep.sweep();
+          opts.log?.(`rep sweep ${JSON.stringify(out)}`);
+          return json(res, 200, out);
+        }
+        // every route takes a limiter token: the leaf list is served from memory, but a flood must not turn into RPC load
         const wait = opts.limiter.take(clientKey(req, !!opts.trustProxy));
         if (wait > 0) return fail(res, new RelayError(429, 'rate_limited', `retry in ${Math.ceil(wait / 1000)} s`), { 'retry-after': String(Math.ceil(wait / 1000)) });
+        if (path === '/v1/rep/leaves') return json(res, 200, await opts.rep.leaves());
+        if (path === '/v1/rep/roots') return json(res, 200, await opts.rep.roots());
         const body = await readBody(req, 4096);
         try {
-          const out = await opts.rep.attest(body);
-          opts.log?.(`rep attest ok ${JSON.stringify(out)}`);
-          return json(res, 200, out);
+          const out = await opts.rep.enqueue(body);
+          opts.log?.(`rep attest queued ${out.loanRef}`);
+          return json(res, 202, out);
         } catch (e) {
           const err = toRelayError(e);
           opts.log?.(`rep attest ${err.status} ${err.code} ${err.message.slice(0, 200)}`);

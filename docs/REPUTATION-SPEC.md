@@ -135,10 +135,23 @@ must be attested while its slot is open. Callers:
 
 1. **Lender:** `bank.lendClose` attests a repaid, unattested loan before `close_slot` (the lender is already public on
    the slot; it links nothing new).
-2. **Relayer:** `POST /v1/rep/attest {loanRef}` (the borrower's bank calls it) and `RepRelayer.sweep()` for a cron. The
-   relayer's hot wallet signs and pays.
+2. **Relayer:** `POST /v1/rep/attest {loanRef}` (the borrower's bank calls it) only checks the loan and **queues** it
+   (202); nothing is sent then. The sweep (every `RELAYER_REP_SWEEP_MIN` minutes in the long-running server, or the cron
+   route `GET /v1/rep/sweep` with `CRON_SECRET`) attests every queued loan together with every other repaid,
+   unattested loan of at least the floor, in loanRef order. The relayer's hot wallet signs and pays. The bank posts a
+   borrower's loans in random order.
 3. **Never the borrower's wallet** by default: as signer and fee payer it would link the loan to the borrower on chain.
    `reputationAttest({ selfSign: true })` exists and says what it links.
+
+**What queueing fixes and what is left.** Sent on request, a borrower's attests for loans X, Y and Z would land as a
+burst outside the sweep cadence, which clusters them on chain for anyone watching. Queued, they land inside a sweep
+alongside every other repaid loan, ordered by loanRef, so the chain shows nothing about who asked. What remains: the
+**relayer operator** (its request log) sees one client (an IP) name loans X, Y and Z within one call, which ties them
+together off chain. That is an operator-trust link, like the `payout_to` launch gate in section 10 item 2 is an on-chain
+one, and it is not closed here. It goes away when no request is needed at all: the sweep already attests every eligible
+loan without being asked, so a borrower who trusts the sweep to run can skip `reputationAttest` (its loans then show as
+`pending` in `reputationStatus` until the next sweep). Fixing it inside the request path needs requests spread over time
+from unrelated network paths (minutes to hours apart), which a tool call cannot do; not built.
 
 Accepted and documented: a hostile lender, or any client older than this branch (agent 0.1.x / mcp-plugin 0.2.x
 `lendClose`, the current site bundle, the house fleet's own close flow), can close a repaid loan without attesting it,
@@ -194,11 +207,18 @@ Bank (`integrations/core/reputation.ts`, delegated from `H081Bank`):
 
 - `borrow` pledges to a fresh loan key (virtual sub-account index `1000 + k`, so pay, reclaim and balance see it)
   unless `agentIndex` names a legacy sub-account; used keys are cached (`<cache>/...loankeys-<signer>.json`) before the
-  grant, and recovery scans slots and events with a gap limit of 20.
+  grant, and recovery scans slots and events with a gap limit of 20. Before it picks a key, `borrow` also adds every key
+  the account's own grants (in the synced pool log, spent ones included) already used, scanning 20 past the highest, so
+  a lost cache dir, a restore on another machine, or a second process on the same signer never reuses a loan key (two
+  Slots with one `agent_pk` would be linked on chain). Two processes that both borrow at the same moment, before either
+  grant lands, can still pick the same key: run one borrower per signer at a time.
 - `reputationRequest` → `h081-rep-ask:` (thresholds rounded UP to the ladder; optional `bindTo`).
 - `proveReputation({request} | {audience, thresholds})` → `h081-rep:` and, when the request binds no key, an
   `h081-rep-sig:` presentation from a fresh session key. Thresholds snap DOWN when given directly. The prover refuses a
-  fifth distinct threshold set per audience per UTC day (probing). Local proof only, verified locally before it is
+  fifth distinct threshold set per audience per UTC day, a fifth per `bindTo` key (from the request or the caller), and a
+  ninth across all audiences (`REP_MAX_SETS_PER_DAY_ALL`): a verifier that knows the prover through its own channel
+  cannot binary-search the record by asking under fresh audience names. A set already proven today is free again. The
+  log is kept in the cache dir, and in memory for the life of the process when there is none (never skipped). Local proof only, verified locally before it is
   handed out.
 - `verifyReputation(code, {request} | {audience, nonce}, presentation?, allowBearer?, onChain?)` checks, in order:
   frame, kind, network tag; audience, nonce and thresholds against the request; the binding (request key, or the
@@ -223,10 +243,11 @@ Ladder: loans 1, 2, 3, 5, 8, 12, 16; volume 0 and 1 / 2.5 / 5 × 10^k USDG; lend
 | `@h081lll/agent` | `reputationRequest`, `proveReputation`, `verifyReputation`, `reputation`, `reputationAttest`; `checkCode` reads kinds 7-9; `CIRCUIT_MB` gains `disclose` and `reputation` |
 | CLI | `h081 rep ask \| prove \| verify \| attest \| status` |
 | local API | `POST /v1/reputation/{request,prove,verify,attest}`, `GET /v1/reputation`; `openapi.json` regenerated |
-| relayer | `GET /v1/rep/leaves`, `GET /v1/rep/roots`, `POST /v1/rep/attest`, `RepRelayer.sweep()`; `RELAYER_REP_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` (default 10 USDG). No proving route. No free verify route (owner decision) |
+| relayer | `GET /v1/rep/leaves` (incremental, single-flight), `GET /v1/rep/roots`, `POST /v1/rep/attest` (202, queued), `GET /v1/rep/sweep` (cron, `CRON_SECRET`) and a sweep timer in `main.ts`; every rep route takes a rate-limit token; `RELAYER_REP_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` (default 10 USDG), `RELAYER_REP_SWEEP_MIN` (default 15). No proving route. No free verify route (owner decision) |
 
 Not built here (other repo or deploy config): the site (code kinds in `src/lib/live/codes.ts`, a LiveBank panel, a
-docs page, a `drive-live-localnet.mjs` check), and the Vercel cron entry that calls `sweep()`.
+docs page, a `drive-live-localnet.mjs` check), and the Vercel cron entry that calls `GET /v1/rep/sweep` (with
+`CRON_SECRET` set on the relayer project).
 
 ## 7. Codes (v2 frame, base58)
 
@@ -301,6 +322,15 @@ constraints (with an N = 8 browser option); padding cannot add lenders or period
 (cap a line at the backer's stake); `reputationStatus` warns about legacy-key loans; release-checklist line and offset
 test for stream_loan upgrades; rent model in section 14.
 
+### 9.4 Second review (resolved on this branch)
+
+| Finding | Resolution |
+|---|---|
+| `borrow` chose the loan key from the local cache only: a lost cache, a restore elsewhere, or two processes on one signer reused key 0 and linked two Slots by `agent_pk` | Before choosing, `borrow` adds every key the account's own grants already used (synced pool log, spent grants included; gap limit 20). Tested with an empty cache dir and grants under keys 0 (spent) and 3: the borrow takes key 1 and the cache learns 0, 1, 3. Left: two borrows at the same instant on one signer (section 5). |
+| The probing cap was per audience (presNullifier) and did nothing without a cache dir | Also at most 4 sets per `bindTo` key and 8 across all audiences per day; the log is kept in memory when there is no cache dir, and merged with the file when there is one. Tested with 5 audience names on one day. |
+| Attests sent back to back on request clustered one borrower's loans on chain by timing | The relayer queues (202) and the sweep attests in loanRef order with every other repaid loan; the bank posts in random order. The operator-side link that remains is in section 3.3. |
+| Every attest dropped the relayer's leaf cache, so the next `GET /v1/rep/leaves` refetched every attest transaction; GETs took no rate-limit token and concurrent misses each refetched | The leaf list is kept and topped up with `getSignaturesForAddress(tree, { until })` (only new transactions), with a full rebuild only when the rebuilt root does not match; one refresh in flight; every rep route takes a token. Tested: two attests then three GETs cost one incremental fetch of the two new transactions. |
+
 ## 10. Privacy (honest)
 
 Hidden from the verifier: which loans, the exact count and volume, the lenders, the dates beyond the span and periods,
@@ -319,7 +349,9 @@ stated thresholds, and clustering is possible:
 3. **Signer and fee payer** of the attest: solved for H081 clients (relayer or lender), not for third-party attesters.
 4. **Per-audience linkability** by `presNullifier`, by design. Colluding audiences can still intersect results by
    timing and thresholds.
-5. **Threshold probing**: the ladder plus at most 4 distinct sets per audience per day (prover side).
+5. **Threshold probing**: the ladder plus at most 4 distinct sets per audience and per `bindTo` key per day, and 8
+   across all audiences (prover side). Eight ladder steps still narrow a value down; the cap bounds the rate, not the end
+   result over many days.
 6. **Root timing**: the root dates the proof to after a given attest. Minor.
 7. **Proof rental**: an agent can prove for a buyer with the buyer's `bindTo`. Cryptography cannot stop it; the
    nullifier gives each audience "one reputation per account".

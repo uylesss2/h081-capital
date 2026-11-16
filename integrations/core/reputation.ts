@@ -3,18 +3,23 @@
 // Rules this module keeps (each one closes a hole found in review):
 //   - the borrower never signs an attest: its wallet as signer / fee payer would link the loan to it on chain. Attests
 //     go through the relayer (POST /v1/rep/attest) or the lender (lendClose); `reputationAttest` refuses to self-sign
-//     unless told `selfSign: true`, and then says what it links.
+//     unless told `selfSign: true`, and then says what it links. The relayer only QUEUES a request (202): its sweep
+//     attests every repaid loan together, in loanRef order, so the on-chain timing does not cluster one borrower's
+//     loans. The relayer operator still sees one client name them (docs/REPUTATION-SPEC.md 3.3); requests go out in
+//     random order.
 //   - a proof is bound by default: bindTo = the verifier's own binding from the request, else a fresh session key whose
 //     signature ("h081-rep-sig:" code) the prover hands over only when presenting. A code with bindTo 0 is a bearer
 //     token and verifyReputation refuses it unless `allowBearer`.
 //   - thresholds snap DOWN to the public ladder when proving (UP when asking), and the prover refuses more than
-//     REP_MAX_SETS_PER_DAY distinct threshold sets per audience per day (probing).
+//     REP_MAX_SETS_PER_DAY distinct threshold sets per audience (and per bindTo key) per day, and more than
+//     REP_MAX_SETS_PER_DAY_ALL across all audiences (fresh audience names do not reset it), so nobody can
+//     binary-search the exact record. Without a cache dir the log lives in memory for the life of the process.
 //   - every verifier-facing result carries `statement` (a lower bound on repaid loans; says nothing about defaults)
 //     and `setup` (beta: single-party trusted setup until a multi-party ceremony runs).
 //   - nothing proves remotely: the witness holds the account secret.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import * as snarkjs from 'snarkjs';
 import { ed25519 } from '@noble/curves/ed25519';
 import { Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction, ComputeBudgetProgram } from '@solana/web3.js';
@@ -37,8 +42,10 @@ import {
 import { CIRCUIT_HASHES, type H081Config } from './constants.js';
 import { fromUnits, toUnits } from './units.js';
 
-/** Distinct threshold sets one account may prove to one audience per day (limits binary-searching the volume). */
+/** Distinct threshold sets one account may prove to one audience (or one bindTo key) per day (limits binary-searching the volume). */
 export const REP_MAX_SETS_PER_DAY = 4;
+/** Distinct threshold sets one account may prove per day across ALL audiences: a verifier that knows the prover cannot reset the cap with fresh audience names. */
+export const REP_MAX_SETS_PER_DAY_ALL = 8;
 /** Default lifetime of a proof (and of a request). */
 export const REP_DEFAULT_TTL_SEC = 600;
 /** Base of the virtual sub-account indices that stand for loan keys in the bank (index = REP_LOAN_KEY_BASE + k). */
@@ -189,20 +196,44 @@ function presentationsFile(env: RepEnv): string | undefined {
   return env.cacheDir ? join(env.cacheDir, `${env.config.cluster}-rep-presentations-${env.signer.publicKey.toBase58()}.json`) : undefined;
 }
 
-/** Refuses a 5th distinct threshold set for one audience (presNullifier) in one UTC day; records the set otherwise. */
-function checkProbeCap(env: RepEnv, nf: bigint, t: RepThresholds): void {
+interface ProbeEntry { nf: string; day: number; key: string; bind?: string }
+/** The presentation log when there is no cache dir: kept for the life of the process, never skipped. */
+const probeLogs = new Map<string, ProbeEntry[]>();
+
+/**
+ * The probing cap. Refuses, in one UTC day: a 5th distinct threshold set for one audience (presNullifier), a 5th for one
+ * bindTo key (when the request or the caller names one), and a 9th across all audiences. A set already proven today
+ * costs nothing again. Records the set otherwise. Exported for tests.
+ */
+export function checkProbeCap(env: RepEnv, nf: bigint, t: RepThresholds, bindTo?: bigint, now = Date.now()): void {
   const file = presentationsFile(env);
-  const day = Math.floor(Date.now() / 86_400_000);
-  let log: Array<{ nf: string; day: number; key: string }> = [];
-  if (file && existsSync(file)) { try { log = JSON.parse(readFileSync(file, 'utf8')); } catch { log = []; } }
-  log = log.filter((e) => e.day >= day - 1);
-  const key = thresholdsKey(t), id = nf.toString(16);
-  const sets = new Set(log.filter((e) => e.nf === id && e.day === day).map((e) => e.key));
-  if (!sets.has(key) && sets.size >= REP_MAX_SETS_PER_DAY) {
+  const mem = `${env.config.cluster}|${env.signer.publicKey.toBase58()}`;
+  const day = Math.floor(now / 86_400_000);
+  // the saved log and this process's own log, merged: a deleted or unwritable cache dir never resets the cap
+  let saved: ProbeEntry[] = [];
+  if (file && existsSync(file)) { try { const j = JSON.parse(readFileSync(file, 'utf8')); if (Array.isArray(j)) saved = j; } catch { /* unreadable: the in-memory log still counts */ } }
+  const seen = new Set<string>();
+  const log = [...saved, ...(probeLogs.get(mem) ?? [])].filter((e) => {
+    const k = `${e.nf}|${e.day}|${e.key}|${e.bind ?? ''}`;
+    if (e.day < day - 1 || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const today = log.filter((e) => e.day === day);
+  const key = thresholdsKey(t), id = nf.toString(16), bind = bindTo ? bindTo.toString(16) : undefined;
+  const over = (entries: ProbeEntry[], cap: number) => { const sets = new Set(entries.map((e) => e.key)); return !sets.has(key) && sets.size >= cap; };
+  if (over(today.filter((e) => e.nf === id), REP_MAX_SETS_PER_DAY)) {
     throw new Error(`this audience already received ${REP_MAX_SETS_PER_DAY} different reputation thresholds from this account today; proving another set would let it narrow down your exact volume. Nothing was proven.`);
   }
-  log.push({ nf: id, day, key });
-  if (file) { try { mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, JSON.stringify(log)); } catch (e) { env.log(`could not save the presentation log: ${(e as Error).message}`); } }
+  if (bind && over(today.filter((e) => e.bind === bind), REP_MAX_SETS_PER_DAY)) {
+    throw new Error(`the key this proof would be bound to already received ${REP_MAX_SETS_PER_DAY} different reputation thresholds from this account today (under any audience name); proving another set would let it narrow down your exact volume. Nothing was proven.`);
+  }
+  if (over(today, REP_MAX_SETS_PER_DAY_ALL)) {
+    throw new Error(`this account already proved ${REP_MAX_SETS_PER_DAY_ALL} different reputation thresholds today across all audiences; one verifier asking under several audience names could narrow down your exact volume. Try again tomorrow, or repeat a set already proven today. Nothing was proven.`);
+  }
+  log.push({ nf: id, day, key, ...(bind ? { bind } : {}) });
+  probeLogs.set(mem, log);
+  if (file) { try { mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, JSON.stringify(log)); } catch (e) { env.log(`could not save the presentation log (kept in memory): ${(e as Error).message}`); } }
 }
 
 export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audience?: string; request?: string; bindTo?: string; expiresInSec?: number }): Promise<ProveReputationResult> {
@@ -254,7 +285,8 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
     throw e;
   }
   const { input, publicSignals } = reputationInput({ masterSk: env.accountSk, loans: chosen, tree, req: asked, assetF, audience, nonce, expiry, bindTo });
-  checkProbeCap(env, publicSignals.presNullifier, asked);
+  // a session key is fresh per proof and says nothing; a key from the request or the caller is capped like an audience
+  checkProbeCap(env, publicSignals.presNullifier, asked, binding === 'session-key' ? undefined : bindTo);
   env.log(`proving reputation over ${chosen.length} loans (about 3-15 s)`);
   const result = await env.prover.prove('reputation', input as never);
   const vkey = vkeyOf(env);
@@ -427,11 +459,19 @@ export async function reputationStatus(env: RepEnv): Promise<ReputationStatus> {
 }
 
 export interface RepAttestPlan { sent: false; dryRun: true; plan: { action: 'attest'; loans: string[]; via: string; note: string }; next: string }
-export interface RepAttestResult { sent: true; attested: string[]; failed: Array<{ loanRef: string; error: string }>; via: string; signatures: string[] }
+export interface RepAttestResult {
+  sent: true;
+  /** handed to the relayer's queue: its next sweep attests them together with every other repaid loan */
+  queued: string[];
+  /** attested now (selfSign, or a relayer that still attests on request) */
+  attested: string[];
+  failed: Array<{ loanRef: string; error: string }>; via: string; signatures: string[]; note?: string;
+}
 
 /**
- * Asks for this account's repaid, unattested loans to be attested. Via the relayer by default (it signs and pays; your
- * wallet never appears). `selfSign: true` sends from this wallet instead and links each loan to it on chain.
+ * Asks for this account's repaid, unattested loans to be attested. Via the relayer by default: it queues them and its
+ * sweep attests them with every other repaid loan, signing and paying itself (your wallet never appears, and the attests
+ * are not timed by your request). `selfSign: true` sends from this wallet now instead and links each loan to it on chain.
  */
 export async function reputationAttest(env: RepEnv, opts: { confirm?: boolean; selfSign?: boolean; loanRefs?: bigint[] } = {}): Promise<RepAttestPlan | RepAttestResult> {
   const program = programOf(env);
@@ -441,7 +481,9 @@ export async function reputationAttest(env: RepEnv, opts: { confirm?: boolean; s
     refs = [];
     for (const x of slots) if (!x.legacy && x.funded && x.repaid >= x.principal && !(await isAttested(env.connection, x.loanRef, program))) refs.push(x.loanRef);
   }
-  const via = opts.selfSign ? 'this wallet (links each loan to it on chain)' : env.relayerUrl ? 'the relayer (it signs and pays; your wallet does not appear)' : 'none';
+  const via = opts.selfSign
+    ? 'this wallet (links each loan to it on chain)'
+    : env.relayerUrl ? "the relayer's queue (its next sweep attests them with every other repaid loan; it signs and pays; your wallet does not appear)" : 'none';
   if (!opts.selfSign && !env.relayerUrl) throw new Error('no relayer is configured, and attesting from this wallet would link each loan to it on chain. Configure H081_RELAYER_URL, ask the lender to close the loan (it attests first), or pass selfSign: true to accept the link. Nothing was sent.');
   if (!opts.confirm) {
     return {
@@ -450,8 +492,11 @@ export async function reputationAttest(env: RepEnv, opts: { confirm?: boolean; s
       next: 'nothing was sent. Call again with confirm: true to attest.',
     };
   }
-  const attested: string[] = [], failed: RepAttestResult['failed'] = [], signatures: string[] = [];
-  for (const ref of refs) {
+  const queued: string[] = [], attested: string[] = [], failed: RepAttestResult['failed'] = [], signatures: string[] = [];
+  // random order: the order of the requests says nothing about the order the loans were taken in
+  const order = [...refs];
+  for (let i = order.length - 1; i > 0; i--) { const j = randomInt(i + 1); [order[i], order[j]] = [order[j], order[i]]; }
+  for (const ref of order) {
     try {
       if (opts.selfSign) {
         const { sendLegacy } = await import('../../src/solana/send.js');
@@ -460,12 +505,16 @@ export async function reputationAttest(env: RepEnv, opts: { confirm?: boolean; s
         const res = await env.fetch(`${env.relayerUrl!.replace(/\/$/, '')}/v1/rep/attest`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ loanRef: ref.toString() }), signal: AbortSignal.timeout(60_000),
         });
-        const body = (await res.json().catch(() => ({}))) as { signature?: string; error?: string };
-        if (!res.ok) throw new Error(body.error ?? `relayer answered HTTP ${res.status}`);
+        const body = (await res.json().catch(() => ({}))) as { signature?: string; queued?: boolean; error?: string | { message?: string } };
+        if (!res.ok) throw new Error((typeof body.error === 'object' ? body.error?.message : body.error) ?? `relayer answered HTTP ${res.status}`);
+        if (body.queued) { queued.push(ref.toString()); continue; }
         if (body.signature) signatures.push(body.signature);
       }
       attested.push(ref.toString());
     } catch (e) { failed.push({ loanRef: ref.toString(), error: (e as Error).message }); }
   }
-  return { sent: true, attested, failed, via, signatures };
+  return {
+    sent: true, queued, attested, failed, via, signatures,
+    ...(queued.length ? { note: "queued loans are attested by the relayer's next sweep (h081_reputation_status shows them as pending until then); a lender closing one first still erases it" } : {}),
+  };
 }

@@ -160,7 +160,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     '"h081-rep:" code and, unless the request binds a key, a separate "h081-rep-sig:" `presentation` to give the verifier only when you ' +
     'present (whoever holds both can use the code until it expires, at most a day). Counts only loans repaid under this account\'s loan keys ' +
     'and attested (h081_reputation_status, h081_reputation_attest). The proof is made locally (the account secret is in the witness; no ' +
-    'service proves for you) and takes 3-15 s; at most 4 different threshold sets per verifier per day. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
+    'service proves for you) and takes 3-15 s; at most 4 different threshold sets per verifier (and per bound key) per day, and 8 across all verifiers. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
   h081_verify_reputation:
     'Check an "h081-rep:" code: against the `request` code you issued (or your `audience` name and the `nonce` you issued), the ' +
     'presenter binding (the request\'s bindTo, or the `presentation` signature; unbound bearer codes are refused unless `allowBearer`), the ' +
@@ -169,7 +169,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'accepted nonces until they expire. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
   h081_reputation_attest:
     'Get this agent\'s repaid, not yet attested loans into the reputation tree (rep_registry attest, one leaf per loan, once). The relayer ' +
-    'sends and pays: attesting from the agent wallet would link each loan to it on chain, so that needs `selfSign: true` and says so. ' +
+    'queues them and its next sweep attests them together with every other repaid loan, signing and paying itself (results list them as ' +
+    '`queued`): attesting from the agent wallet would link each loan to it on chain, so that needs `selfSign: true` and says so. ' +
     'A lender that closes a loan before it is attested erases it for good (H081 lenders attest before closing). WITHOUT `confirm: true` it ' +
     'sends NOTHING and returns the plan. ' + REP_DEPLOY,
   h081_reputation_status:

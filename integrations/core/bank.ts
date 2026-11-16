@@ -52,10 +52,10 @@ import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
 import {
-  REP_LOAN_KEY_BASE, type RepEnv, type ThresholdArgs, proveReputation as repProve, reputationAttest as repAttest,
+  REP_GAP_LIMIT, REP_LOAN_KEY_BASE, type RepEnv, type ThresholdArgs, proveReputation as repProve, reputationAttest as repAttest,
   reputationRequest as repRequest, reputationStatus as repStatus, verifyReputation as repVerify,
 } from './reputation.js';
-import { loanSk } from '../../src/crypto.js';
+import { loanPk, loanSk } from '../../src/crypto.js';
 import { attestIx, isAttested } from '../../src/solana/reputation.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
@@ -385,11 +385,35 @@ export class H081Bank {
     } catch (e) { this.log(`could not save the loan key list: ${(e as Error).message}`); }
   }
 
-  /** The next unused loan key index. */
+  /** The next unused loan key index (borrow runs seedLoanKeysFromChain first: the cache alone is not enough). */
   private nextLoanKey(): number {
     let k = 0;
     while (this.loanKeySet.has(k)) k++;
     return k;
+  }
+
+  /**
+   * Adds every loan key this account already granted to (its own grants in the synced pool log, spent ones included)
+   * to the cache, scanning k = 0.. up to REP_GAP_LIMIT past the highest one known. Without it a lost cache dir, a
+   * restore on another machine, or a second process (MCP and CLI) on one signer would reuse a loan key and put the
+   * same agent_pk on two Slots, linking those loans on chain. Local after sync (no extra RPC). Returns what it added.
+   */
+  private seedLoanKeysFromChain(): number[] {
+    const mine = this.account.keys.pk;
+    const granted = new Set<bigint>();
+    for (const a of this.owner.allowances.values()) if (a.allowance.policy.ownerPk === mine) granted.add(a.allowance.agentPk);
+    const found: number[] = [];
+    let hi = Math.max(-1, ...this.loanKeySet);
+    for (let k = 0; k <= hi + REP_GAP_LIMIT; k++) {
+      if (!granted.has(loanPk(this.accountSk, k))) continue;
+      if (!this.loanKeySet.has(k)) found.push(k);
+      hi = Math.max(hi, k);
+    }
+    if (found.length) {
+      this.log(`found ${found.length} loan key(s) in this account's grants that the local cache did not list; the next loan uses a fresh one`);
+      this.rememberLoanKeys(found);
+    }
+    return found;
   }
 
   /** Remembers that sub-account `i` holds something this account may not own (a delegated child), across restarts. */
@@ -1402,7 +1426,7 @@ export class H081Bank {
     // The key is recorded before the grant, so a crash after it still finds the allowance.
     let i: number;
     if (rules.agentIndex !== undefined) i = rules.agentIndex;
-    else { const k = this.nextLoanKey(); this.rememberLoanKeys([k]); i = REP_LOAN_KEY_BASE + k; }
+    else { this.seedLoanKeysFromChain(); const k = this.nextLoanKey(); this.rememberLoanKeys([k]); i = REP_LOAN_KEY_BASE + k; }
     const a = this.agent(i);
     const now = await this.pool.now();
     const secs = BigInt(Math.max(1, Math.round(rules.unlockDays * 86400)));

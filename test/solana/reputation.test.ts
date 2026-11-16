@@ -210,7 +210,7 @@ describe('rep_registry: verify_reputation (dev setup keys)', () => {
 });
 
 describe('relayer: attest for borrowers, the sweep, and the leaf snapshot (rpc 8899)', () => {
-  it('attests on request from its own wallet, refuses below its floor or twice, sweeps the rest, and serves a leaf list clients accept', async () => {
+  it('queues an attest request (nothing sent then), refuses below its floor, sweeps queued and unasked loans together from its own wallet, and serves a leaf list clients accept', async () => {
     const hot = Keypair.generate();
     await fund(hot.publicKey, 2);
     const rep = new RepRelayer({ connection, payer: hot, repProgramId: LOCALNET_REP_PROGRAM_ID, loanProgramId: LOCALNET_LOAN_PROGRAM_ID, minPrincipal: 10n * U, cacheMs: 0 });
@@ -221,20 +221,23 @@ describe('relayer: attest for borrowers, the sweep, and the leaf snapshot (rpc 8
       const j = async (r: Response | Promise<Response>): Promise<any> => (await r).json();
       const post = (loanRef: string) => fetch(`${url}/v1/rep/attest`, { method: 'POST', body: JSON.stringify({ loanRef }) });
       const r14 = await post('14');
-      expect(r14.status).toBe(200);
-      const sig = (await j(r14)).signature as string;
-      // the borrower's wallet is nowhere in the transaction: only the relayer's hot wallet signs and pays
-      const tx = await connection.getTransaction(sig, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
-      expect(tx!.transaction.message.staticAccountKeys[0].equals(hot.publicKey)).toBe(true);
-      expect(tx!.transaction.signatures).toHaveLength(1);
-      expect((await post('14')).status).toBe(409);
+      expect(r14.status).toBe(202);
+      expect((await j(r14)).queued).toBe(true);
+      // queued, not sent: the attest's timing on chain is the sweep's, not this request's
+      expect(await isAttested(connection, 14n)).toBe(false);
       expect((await j(post('16'))).error.code).toBe('below_floor');
       expect((await j(post('5'))).error.code).toBe('not_funded');
       expect((await j(post('11'))).error.code).toBe('no_slot');
       expect((await post('x')).status).toBe(400);
-      // the sweep finds 15 (20 USDG) and skips 16 (below the floor) and everything already attested
+      // the sweep sends 14 (asked for) and 15 (20 USDG, nobody asked) together in loanRef order, and skips 16 (below the floor)
       const swept = await rep.sweep();
-      expect(swept.attested).toEqual(['15']);
+      expect(swept.attested).toEqual(['14', '15']);
+      // the borrower's wallet is nowhere in the transaction: only the relayer's hot wallet signs and pays
+      const tx = await connection.getTransaction(swept.signatures[0], { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      expect(tx!.transaction.message.staticAccountKeys[0].equals(hot.publicKey)).toBe(true);
+      expect(tx!.transaction.signatures).toHaveLength(1);
+      expect(await isAttested(connection, 14n)).toBe(true);
+      expect((await post('14')).status).toBe(409);
       expect(await isAttested(connection, 16n)).toBe(false);
       expect((await rep.sweep()).attested).toEqual([]);
       // the served leaf list rebuilds the on-chain root, and a bank-side client accepts it as a snapshot

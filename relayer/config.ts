@@ -83,7 +83,7 @@ export interface RelayerConfig {
     /** pinned sha256 per relay circuit's verifying key (RELAYER_VKEY_SHA256_<NAME>) */
     vkeySha256: Partial<Record<RelayCircuit, string>>;
     /** private reputation (rep_registry): leaves/roots routes, relayed attests and the sweep; absent = off */
-    rep?: { programId: string; loanProgramId: string; minPrincipal: bigint };
+    rep?: { programId: string; loanProgramId: string; minPrincipal: bigint; sweepEveryMin: number; cronSecret?: string };
   };
   x402?: X402Config;
 }
@@ -226,8 +226,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return cfg;
 }
 
-/** RELAYER_REP_PROGRAM_ID turns private reputation on; RELAYER_REP_LOAN_PROGRAM_ID (default: mainnet stream_loan) and
- * RELAYER_REP_MIN_PRINCIPAL (default 10 USDG in base units: the floor below which the hot wallet does not pay to attest). */
+/** RELAYER_REP_PROGRAM_ID turns private reputation on; RELAYER_REP_LOAN_PROGRAM_ID (default: mainnet stream_loan),
+ * RELAYER_REP_MIN_PRINCIPAL (default 10 USDG in base units: the floor below which the hot wallet does not pay to attest),
+ * RELAYER_REP_SWEEP_MIN (default 15: minutes between sweeps of the long-running server; 0 = only the cron route) and
+ * CRON_SECRET (the bearer secret of GET /v1/rep/sweep, which Vercel's cron sends). */
 function repConfig(env: Record<string, string | undefined>): NonNullable<RelayerConfig['solana']>['rep'] {
   const id = env.RELAYER_REP_PROGRAM_ID?.trim();
   if (!id) return undefined;
@@ -238,7 +240,11 @@ function repConfig(env: Record<string, string | undefined>): NonNullable<Relayer
   if (floor && !/^\d+$/.test(floor)) throw new ConfigError('RELAYER_REP_MIN_PRINCIPAL must be an amount in base units');
   const minPrincipal = floor ? BigInt(floor) : 10_000_000n;
   if (minPrincipal < 1_000_000n) throw new ConfigError('RELAYER_REP_MIN_PRINCIPAL below 1 USDG: rep_registry refuses such loans anyway, and a low floor lets wash loans drain the hot wallet');
-  return { programId: new PublicKey(id).toBase58(), loanProgramId: new PublicKey(loan).toBase58(), minPrincipal };
+  const every = env.RELAYER_REP_SWEEP_MIN?.trim();
+  if (every && !/^\d{1,4}$/.test(every)) throw new ConfigError('RELAYER_REP_SWEEP_MIN must be a whole number of minutes (0 = off)');
+  const sweepEveryMin = every ? Number(every) : 15;
+  const cronSecret = env.CRON_SECRET?.trim() || undefined;
+  return { programId: new PublicKey(id).toBase58(), loanProgramId: new PublicKey(loan).toBase58(), minPrincipal, sweepEveryMin, ...(cronSecret ? { cronSecret } : {}) };
 }
 
 const list = (v: string | undefined) => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);

@@ -1960,7 +1960,7 @@
         },
         "responses": {
           "200": {
-            "description": "ok: plan, or {attested, failed, via, signatures}",
+            "description": "ok: plan, or {queued, attested, failed, via, signatures, note}",
             "content": {
               "application/json": {
                 "schema": {
