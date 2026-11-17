@@ -171,7 +171,7 @@ describe('readers: Subrogation kind and the lender\'s position on a backed loan'
     // advance 500, fee 25, lender fee 15: principal 540, lender due 515
     const slot = { loanRef: 1n, lender: PublicKey.default, funded: true, settled: false, asset: PublicKey.default, tokenProgram: PublicKey.default, principal: 540n, repaid: 10n, minRemaining: 0n, minRate: 0n, pledgeBps: 0n, expiry: 1_000n, agentPk: 0n, fundedAt: 0n, payoutTo: PublicKey.default, streamStart: 0n, bump: 255 };
     const draw = { backerFee: 25n, claimed: 0n };
-    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_001n, 0n, 2n)).toEqual({ lenderDue: 515n, backerFee: 25n, toBacker: 10n, toLender: 0n, coverPaid: 0n, lenderShortfall: 0n });
+    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_001n, 0n, 2n)).toEqual({ lenderDue: 515n, backerFee: 25n, toBacker: 10n, toLender: 0n, coverPaid: 0n, lenderShortfall: 0n, drawClosed: false });
     // after expiry + grace: the lender is short its whole due; 30 unsynced in the inbox would pay the fee's last 15 first
     expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_003n, 0n, 2n).lenderShortfall).toBe(515n);
     expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_003n, 30n, 2n)).toMatchObject({ toBacker: 25n, toLender: 15n, lenderShortfall: 500n });
@@ -180,8 +180,13 @@ describe('readers: Subrogation kind and the lender\'s position on a backed loan'
     expect(claimed).toMatchObject({ toBacker: 110n, toLender: 0n, coverPaid: 515n, lenderShortfall: 0n });
     // 20% cover: the lender keeps the uncovered rest as its shortfall
     expect(backedLenderPosition(slot, { owed: 113n, paid: 10n }, { backerFee: 25n, claimed: 103n }, 1_003n, 0n, 2n).lenderShortfall).toBe(412n);
-    // settled or repaid: no shortfall; without the Draw, the Subrogation's owed stands for the fee
+    // settled: no shortfall
     expect(backedLenderPosition({ ...slot, settled: true }, { owed: 25n, paid: 10n }, draw, 1_003n, 0n, 2n).lenderShortfall).toBe(0n);
-    expect(backedLenderPosition({ ...slot, repaid: 540n }, { owed: 25n, paid: 25n }, undefined, 1_003n, 0n, 2n)).toMatchObject({ lenderDue: 515n, toLender: 515n, lenderShortfall: 0n });
+    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_003n, 0n, 2n).drawClosed).toBe(false);
+    // claimed, then the Draw closed at the recovery horizon (owed cut to paid): the fee and the cover paid are gone from
+    // chain, so nothing is guessed (a guess from owed would call a lender paid 3 + 100 of 103 short by 90)
+    const closed = backedLenderPosition({ ...slot, principal: 108n, repaid: 18n }, { owed: 15n, paid: 15n }, undefined, 1_003n, 0n, 2n);
+    expect(closed).toEqual({ lenderDue: null, backerFee: null, toBacker: 15n, toLender: 3n, coverPaid: null, lenderShortfall: null, drawClosed: true });
+    expect(backedLenderPosition({ ...slot, repaid: 540n }, { owed: 25n, paid: 25n }, undefined, 1_003n, 0n, 2n)).toMatchObject({ toLender: 515n, lenderShortfall: null, drawClosed: true });
   });
 });

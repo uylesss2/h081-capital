@@ -451,13 +451,22 @@ repayment before expiry and a minimum fee paid.
   - The lending suite on the new `.so`: `node scripts/solana-backer-localnet.mjs restart` (pool + the new
     `stream_loan.so` on 18899), then `STIPEND_LOAN_RPC=http://127.0.0.1:18899 npx vitest run --config
     vitest.solana-loan.config.ts`: `lending.test.ts` 31 passed; `lend-localnet.test.ts` failed in its `beforeAll` when run
-    right after `lending.test.ts` on the same validator (a fresh deposit read back a shielded balance of 0; nothing
-    this change touches) and passed 5 of 5 alone on a fresh validator (`... npx vitest run
-    test/integrations/lend-localnet.test.ts --config vitest.solana-loan.config.ts`).
-  - The staking suite on 18899: `STAKING_RPC_PORT=18899 STAKING_FAUCET_PORT=18901 STAKING_GOSSIP_PORT=18902
-    STAKING_DYNAMIC_PORTS=18910-18990 STAKING_LEDGER=/home/<user>/… STAKING_STAGE=… STAKING_LOG=… node
-    scripts/solana-staking-localnet.mjs restart`, then `STAKING_RPC=http://127.0.0.1:18899 npx vitest run --config
-    vitest.staking.config.ts`: 39 passed (the two backed-loan tests included).
+    right after `lending.test.ts` on the same validator (a fresh deposit read back a shielded balance of 0) and passed
+    5 of 5 alone on a fresh validator (`... npx vitest run test/integrations/lend-localnet.test.ts --config
+    vitest.solana-loan.config.ts`). The previous commit (0d65477), run the same way on a fresh 18899 validator, fails
+    the same `beforeAll` with the same assertion, so the ordering failure predates this change (not investigated
+    further). (In that checkout `lending.test.ts`'s migration test also failed, only because its gitignored
+    `target-so` had no `stream_loan_legacy.so`.)
+  - The staking suite on 18899, from PowerShell (Git Bash rewrites `/home/...` values into Windows paths before they
+    reach WSL; there, set `MSYS2_ENV_CONV_EXCL='STAKING_'` first):
+    ```
+    $env:STAKING_RPC_PORT='18899'; $env:STAKING_FAUCET_PORT='18901'; $env:STAKING_GOSSIP_PORT='18902'
+    $env:STAKING_DYNAMIC_PORTS='18910-18990'; $env:STAKING_LEDGER='/home/joseph/stipend-private-backer-staking-ledger'
+    $env:STAKING_STAGE='/home/joseph/stipend-private-backer-staking-so'; $env:STAKING_LOG='/home/joseph/stipend-private-backer-staking.log'
+    $env:STAKING_RPC='http://127.0.0.1:18899'
+    node scripts/solana-staking-localnet.mjs restart; npx vitest run --config vitest.staking.config.ts; node scripts/solana-staking-localnet.mjs stop
+    ```
+    39 passed (the two backed-loan tests included).
   - `npm test`: 463 passed, 49 failed, 8 skipped. The 49 are all in `test/e2e` (the EVM contracts on hardhat:
     "invalid proof", "not insured"); a clean checkout of the previous commit fails the same 49 with the same
     `build/circuits`, so they are not from this change. Everything else passes (`test/integrations`, `test/relayer`,
@@ -493,9 +502,13 @@ repayment before expiry and a minimum fee paid.
   - the x402 `loans-market` (`relayer/x402/loans.ts`): every loan gets `kind` (`stream` / `backed`) and `subrogation`
     (`{kind, label, to, owed, paid}` or null), a backed loan also `backed` (`lenderDue`, `backerFee`, `toBacker`,
     `toLender`, `coverPaid`, `lenderShortfall`), and `counts.backed`. Subrogations, their `safety_config` accounts and
-    the Draws are read in batches of 100. `shortfall` stays stream_loan's rule and says so;
+    the Draws are read in batches of 100. `shortfall` stays stream_loan's rule and says so. Once a backed loan's Draw
+    is closed (released after the loan ended, or at the recovery horizon, which cuts `owed` to `paid`) the fee and the
+    cover paid are no longer on chain: `backed.drawClosed` is true and `lenderDue`, `backerFee`, `coverPaid` and
+    `lenderShortfall` are null, never guessed;
   - `lendStatus` (`integrations/core/bank.ts`): the same `kind`, `subrogation` and `backed`; for a backed loan
-    `shortfall` is the lender's own (`lenderShortfall`). `h081_lend claim` refuses a backed loan and points to
+    `shortfall` is the lender's own (`lenderShortfall`), or stream_loan's rule with a `backed.note` once the Draw is
+    closed (the localnet flow checks this after the release). `h081_lend claim` refuses a backed loan and points to
     `h081_back claim`; the `settle` plan warns that settling before the default claim forfeits the cover (back_claim needs
     an unsettled loan); `loanQuote` notes a backed slot;
   - `SolanaLoanLenderWallet.close` names a backed Subrogation by `subrogationKindOf`.

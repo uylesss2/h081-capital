@@ -371,30 +371,45 @@ export async function subrogationKinds(
   return subs.map((_, i) => subrogationKindOf(infos[i], programId, slots?.[i]));
 }
 
-/** The lender's side of a backed loan: what it is due, what it got from repayments and from the cover, what is still short. */
+/**
+ * The lender's side of a backed loan: what it is due, what it got from repayments and from the cover, what is still
+ * short. The fee and the cover paid live only in the Draw: once it is closed (released after the loan ended, or after
+ * the recovery horizon, which also cuts the Subrogation's owed to paid) they are no longer on chain, and `lenderDue`,
+ * `backerFee`, `coverPaid` and `lenderShortfall` are null (`drawClosed`). A reader then shows the program's shortfall
+ * and says the lender's own figure is unknown, never a guess.
+ */
 export interface BackedLenderPosition {
-  /** principal - backer fee (= advance + lender fee) */
-  lenderDue: bigint;
-  backerFee: bigint;
+  /** principal - backer fee (= advance + lender fee); null once the Draw is closed */
+  lenderDue: bigint | null;
+  backerFee: bigint | null;
   /** receipts that went (or, unsynced, will go) to the backer's vault: fee first, then recovery of a cover payout */
   toBacker: bigint;
   /** receipts credited (or, unsynced, to be credited) to the lender: repaid - what went to the backer */
   toLender: bigint;
-  /** what back_claim paid the lender from the stake */
-  coverPaid: bigint;
+  /** what back_claim paid the lender from the stake; null once the Draw is closed */
+  coverPaid: bigint | null;
   /**
-   * Once expiry + grace has passed with the loan unpaid and unsettled: lenderDue - toLender - coverPaid; 0 otherwise.
-   * stream_loan's own shortfall (principal - repaid) also counts the backer's fee and ignores the cover already paid.
+   * Once expiry + grace has passed with the loan unpaid and unsettled: lenderDue - toLender - coverPaid; 0 otherwise;
+   * null once the Draw is closed. stream_loan's own shortfall (principal - repaid) also counts the backer's fee and
+   * ignores the cover already paid.
    */
-  lenderShortfall: bigint;
+  lenderShortfall: bigint | null;
+  /** the Draw is gone: the fee and the cover paid can no longer be read */
+  drawClosed: boolean;
 }
 export function backedLenderPosition(
   slot: SlotAccount, sub: Pick<SubrogationAccount, 'owed' | 'paid'> | undefined, draw: Pick<DrawAccount, 'backerFee' | 'claimed'> | undefined, now: bigint,
   pending = 0n, grace = GRACE,
 ): BackedLenderPosition {
-  // the Draw closes only once nothing more can reach the vault; without it, the Subrogation's owed is the fee (a claim raises it)
-  const backerFee = draw?.backerFee ?? sub?.owed ?? 0n;
-  const coverPaid = draw?.claimed ?? 0n;
+  const subPaid0 = sub?.paid ?? 0n;
+  const toLender0 = (slot.repaid > subPaid0 ? slot.repaid - subPaid0 : 0n);
+  if (!draw) {
+    const subLeft0 = sub && sub.owed > sub.paid ? sub.owed - sub.paid : 0n;
+    const toB = pending < subLeft0 ? pending : subLeft0;
+    return { lenderDue: null, backerFee: null, toBacker: subPaid0 + toB, toLender: toLender0 + (pending - toB), coverPaid: null, lenderShortfall: null, drawClosed: true };
+  }
+  const backerFee = draw.backerFee;
+  const coverPaid = draw.claimed;
   const lenderDue = slot.principal > backerFee ? slot.principal - backerFee : 0n;
   const subPaid = sub?.paid ?? 0n;
   const subLeft = sub && sub.owed > sub.paid ? sub.owed - sub.paid : 0n;
@@ -403,7 +418,7 @@ export function backedLenderPosition(
   const toLender = (slot.repaid > subPaid ? slot.repaid - subPaid : 0n) + (pending - pendingToBacker);
   const late = slot.funded && !slot.settled && slot.expiry !== 0n && now > slot.expiry + grace && slot.repaid + pending < slot.principal;
   const got = toLender + coverPaid;
-  return { lenderDue, backerFee, toBacker, toLender, coverPaid, lenderShortfall: late && lenderDue > got ? lenderDue - got : 0n };
+  return { lenderDue, backerFee, toBacker, toLender, coverPaid, lenderShortfall: late && lenderDue > got ? lenderDue - got : 0n, drawClosed: false };
 }
 
 /** The draws of a line, by one getProgramAccounts (discriminator + backing at offset 16). */

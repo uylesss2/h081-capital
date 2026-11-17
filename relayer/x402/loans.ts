@@ -32,7 +32,14 @@ export interface LoanView {
    */
   subrogation: { kind: SubrogationKind; label: string; to: string; owed: string; paid: string } | null;
   /** a backed loan: the lender's due (principal - backer fee), the cover the stake paid, and what the lender is still short */
-  backed?: { backing: string; backerFee: string; lenderDue: string; toBacker: string; toLender: string; coverPaid: string; lenderShortfall: string };
+  /**
+   * Once the Draw is closed (drawClosed) the fee and the cover paid are no longer on chain: backerFee, lenderDue,
+   * coverPaid and lenderShortfall are null then, and only stream_loan's `shortfall` stands.
+   */
+  backed?: {
+    backing: string; backerFee: string | null; lenderDue: string | null; toBacker: string; toLender: string; coverPaid: string | null;
+    lenderShortfall: string | null; drawClosed: boolean;
+  };
 }
 
 export interface LoanMarketSnapshot {
@@ -158,9 +165,10 @@ export class LoanMarketReader {
       let backedView: LoanView['backed'];
       if (backed) {
         const p = backedLenderPosition(s, sub, x?.draw, now);
+        const str = (v: bigint | null) => (v === null ? null : v.toString());
         backedView = {
-          backing: sub?.safetyConfig.toBase58() ?? '', backerFee: p.backerFee.toString(), lenderDue: p.lenderDue.toString(), toBacker: p.toBacker.toString(),
-          toLender: p.toLender.toString(), coverPaid: p.coverPaid.toString(), lenderShortfall: p.lenderShortfall.toString(),
+          backing: sub?.safetyConfig.toBase58() ?? '', backerFee: str(p.backerFee), lenderDue: str(p.lenderDue), toBacker: p.toBacker.toString(),
+          toLender: p.toLender.toString(), coverPaid: str(p.coverPaid), lenderShortfall: str(p.lenderShortfall), drawClosed: p.drawClosed,
         };
       }
       loans.push({

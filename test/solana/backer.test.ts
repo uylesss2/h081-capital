@@ -774,6 +774,13 @@ suite('H081Bank backed flow through the agent operations (fast build; shielded s
     await waitUntil((await readSlot(BigInt(loanRef), FAST)).expiry + 2n + 5n + 5n + 1n);
     await op(B, 'h081_back', { action: 'release', nonce, loanRef }); // permissionless on chain; the op names the line by B's nonce
     expect(await connection.getAccountInfo(drawPda(backing, BigInt(loanRef), FAST))).toBeNull();
+    // with the Draw gone (the Subrogation cut to owed = paid) the fee and the cover paid are no longer on chain: status
+    // shows stream_loan's shortfall and no lender figure, not a guess (a guess from owed would say the lender is short 90)
+    v = await status();
+    expect(v.subrogation).toMatchObject({ kind: 'backer', owed: 15n * U, paid: 15n * U });
+    expect(v.backed).toMatchObject({ drawState: null, lenderDue: null, coverPaid: null, lenderShortfall: null, toBacker: 15n * U, toLender: 3n * U });
+    expect(v.backed!.note).toMatch(/draw is closed/);
+    expect(v.shortfall).toBe(108n * U - 18n * U);
     const bWallet = await bal(ata(bKp.publicKey));
     expect((await op(B, 'h081_back', { action: 'close', nonce, confirm: true })).sent).toBe(true);
     expect(await bal(ata(bKp.publicKey))).toBe(bWallet + 165n * U);

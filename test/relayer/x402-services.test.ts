@@ -135,11 +135,13 @@ describe('loan market reader', () => {
     expect(backed).toMatchObject({ loanRef: '4', kind: 'backed', pledgeBps: 0, shortfall: '530000000' });
     expect(backed.subrogation).toEqual({ kind: 'backer', label: 'backer fee / recovery', to: vault.toBase58(), owed: '525000000', paid: '10000000' });
     // the lender's own figures: due 515, nothing from repayments (the 10 went to the backer's fee), 515 from the stake
-    expect(backed.backed).toEqual({ backing: backing.toBase58(), backerFee: '25000000', lenderDue: '515000000', toBacker: '10000000', toLender: '0', coverPaid: '515000000', lenderShortfall: '0' });
+    expect(backed.backed).toEqual({ backing: backing.toBase58(), backerFee: '25000000', lenderDue: '515000000', toBacker: '10000000', toLender: '0', coverPaid: '515000000', lenderShortfall: '0', drawClosed: false });
     expect(slashed).toMatchObject({ loanRef: '5', kind: 'stream', shortfall: '900' });
     expect(slashed.subrogation).toEqual({ kind: 'slash', label: 'safety-pool slash recovery', to: recovery.toBase58(), owed: '900', paid: '0' });
     expect(slashed.backed).toBeUndefined();
     expect(noSub).toMatchObject({ loanRef: '6', kind: 'backed', subrogation: null });
+    // no Draw on chain: the lender's own figures are unknown, never guessed
+    expect(noSub.backed).toMatchObject({ drawClosed: true, lenderDue: null, coverPaid: null, lenderShortfall: null });
     expect(JSON.stringify(backed)).not.toMatch(/slash/i);
   });
 

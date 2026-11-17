@@ -252,8 +252,10 @@ export interface LendSlotView {
   subrogation?: { kind: SubrogationKind; label: string; to: string; owed: bigint; paid: bigint };
   /** a backed loan as its lender sees it: the backer's fee is paid first, the stake covers a default */
   backed?: {
-    backing: string; drawState: string | null; lenderDue: bigint; lenderDueUsdg: string; backerFee: bigint; toBacker: bigint; toLender: bigint;
-    coverPaid: bigint; coverPaidUsdg: string; lenderShortfall: bigint; lenderShortfallUsdg: string;
+    backing: string; drawState: string | null; lenderDue: bigint | null; lenderDueUsdg: string | null; backerFee: bigint | null; toBacker: bigint; toLender: bigint;
+    coverPaid: bigint | null; coverPaidUsdg: string | null; lenderShortfall: bigint | null; lenderShortfallUsdg: string | null;
+    /** set once the Draw is closed: the fee and the cover paid are gone from chain, so the lender's own figures are null */
+    note?: string;
   };
 }
 export interface LendSentResult {
@@ -1726,12 +1728,19 @@ export class H081Bank {
     const draw = dInfo && dInfo.owner.equals(pid) && isDrawAccount(dInfo.data) ? decodeDraw(dInfo.data) : undefined;
     const p = backedLenderPosition(s, sub, draw, now, pending, backerTimes(pid).grace);
     const d = this.decimals;
+    const u = (x: bigint | null) => (x === null ? null : fromUnits(x, d));
     view.backed = {
-      backing: backing?.toBase58() ?? '', drawState: draw?.state ?? null, lenderDue: p.lenderDue, lenderDueUsdg: fromUnits(p.lenderDue, d), backerFee: p.backerFee,
-      toBacker: p.toBacker, toLender: p.toLender, coverPaid: p.coverPaid, coverPaidUsdg: fromUnits(p.coverPaid, d), lenderShortfall: p.lenderShortfall,
-      lenderShortfallUsdg: fromUnits(p.lenderShortfall, d),
+      backing: backing?.toBase58() ?? '', drawState: draw?.state ?? null, lenderDue: p.lenderDue, lenderDueUsdg: u(p.lenderDue), backerFee: p.backerFee,
+      toBacker: p.toBacker, toLender: p.toLender, coverPaid: p.coverPaid, coverPaidUsdg: u(p.coverPaid), lenderShortfall: p.lenderShortfall,
+      lenderShortfallUsdg: u(p.lenderShortfall),
+      ...(p.drawClosed ? { note: 'the draw is closed, so the backer fee and any cover paid are no longer on chain: shortfall is stream_loan\'s figure (principal - repaid), not the lender\'s own' } : {}),
     };
-    view.shortfall = p.lenderShortfall;
+    // with the Draw gone the lender's own figure is unknown: stream_loan's rule (with this program's grace) rather than a guess
+    if (p.lenderShortfall !== null) view.shortfall = p.lenderShortfall;
+    else {
+      const paid = s.repaid + pending;
+      view.shortfall = !s.settled && s.expiry !== 0n && now > s.expiry + backerTimes(pid).grace && paid < s.principal ? s.principal - paid : 0n;
+    }
   }
 
   /**
