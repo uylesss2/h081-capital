@@ -197,7 +197,7 @@ describe.skipIf(!LOCAL)('prove solvency on localnet (rpc 28899)', () => {
     expect(stale.doesNotSay[0]).toMatch(/still proves against the CURRENT root/);
   });
 
-  it('junk mint: the default caps let a worthless asset back a claim (assetSound false); caps 0 and a drained vault fix it; default caps 0 block new vaults', async () => {
+  it('junk mint: the default caps let a worthless asset back a claim (assetSound false); caps 0 and a drained vault do NOT lower the floor below the vault peak; default caps 0 block new vaults', async () => {
     // the attacker: its own mint, the default caps (10 units), a deposit, a self-grant to its reserve key, a disclose proof
     const junk = await createMint(junkKey);
     await fund(junkKey, junk, junkKey.publicKey, 10n * U);

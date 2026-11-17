@@ -306,7 +306,7 @@ Where it lives:
 | reserve key | `integrations/core/keys.ts` `deriveReserveSk(keypair, derivation)` |
 | request / prove / verify / reserve | `integrations/core/solvency.ts`, wired in `H081Bank` (`balance().reserve`) |
 | four operations | `integrations/core/{schemas,operations}.ts`; MCP, Agent Kit (`actions/solvency.ts`), `@h081lll/agent` (SDK, `h081 solvency`, `/v1/solvency/*`) |
-| tests | `test/integrations/solvency.test.ts` (codes, vectors, ladder, cap, one test per refusal over a real disclose proof), `test/integrations/solvency-surfaces.test.ts`, `test/solana/solvency.test.ts` (`npm run test:solana:solvency`, private validator on rpc 28899) |
+| tests | `test/integrations/solvency.test.ts` (codes, vectors, ladder, cap, the historical asset floor, one test per refusal over a real disclose proof, including `not_in_field`, `vkey_missing`, `pool_unavailable` and a mocked `on_chain_rejected`), `test/integrations/solvency-surfaces.test.ts`, `test/solana/solvency.test.ts` (`npm run test:solana:solvency`, private validator on rpc 28899) |
 
 Measured on localnet (`solana/compute-units-solvency.json`): the one-transaction simulated check is **821 bytes**
 (limit 1,232) and uses about **118k-121k CU** (117,731, 119,231 and 120,731 in three runs; the file keeps the latest); it ran with a fee payer whose key the test never held, and that payer's balance

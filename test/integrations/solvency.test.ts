@@ -4,6 +4,8 @@
 // No validator: the pool's root ring, the AssetCap accounts and the vaults are served by a fake connection.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -470,6 +472,47 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     expect((hu.connection as unknown as { getSignaturesForAddress: { mock: { calls: unknown[] } } }).getSignaturesForAddress.mock.calls).toHaveLength(0);
     // an RPC that refuses getProgramAccounts fails closed
     expect((await v(present(), {}, host(Keypair.generate(), { ...chainOk(), capsFail: true }))).reason).toBe('asset_floor_unavailable');
+  });
+
+  it('refuses a public input outside the field, a missing vkey, and an unreadable pool, each by name', async () => {
+    const v = (code: string, h: SolvencyHost) => verifySolvency(h, code, { request: req.code, now: NOW });
+    // args re-signed by the wallet with the root set to 2^256 - 1 (>= FIELD): refused before Groth16
+    const big = argsOf(); big.fill(0xff, 0, 32);
+    expect((await v(present({ args: big }), fresh())).reason).toBe('not_in_field');
+    // a build-tree prover whose disclose vkey is not on disk (never fetched into a build tree)
+    const noVkey = { paths: () => ({ vkey: join(tmpdir(), `h081-no-such-dir-${Date.now()}`, 'disclose.vkey.json') }) } as unknown as Prover;
+    expect((await v(present(), host(Keypair.generate(), chainOk(), { prover: noVkey }))).reason).toBe('vkey_missing');
+    // the pool account is missing, or the read throws: never a pass
+    const gone = host(Keypair.generate(), chainOk());
+    (gone.connection as unknown as { getAccountInfo: unknown }).getAccountInfo = vi.fn(async () => null);
+    expect(await v(present(), gone)).toMatchObject({ ok: false, reason: 'pool_unavailable', message: expect.stringMatching(/not found/) });
+    const down = host(Keypair.generate(), chainOk());
+    (down.connection as unknown as { getAccountInfo: unknown }).getAccountInfo = vi.fn(async () => { throw new Error('503'); });
+    expect(await v(present(), down)).toMatchObject({ ok: false, reason: 'pool_unavailable', message: expect.stringMatching(/503/) });
+  });
+
+  it('the simulated on-chain check runs ONE unsigned simulation and maps a program error to on_chain_rejected', async () => {
+    const sim = (value: { err: unknown; logs: string[]; unitsConsumed: number }) => {
+      const h = host(Keypair.generate(), chainOk());
+      const c = h.connection as unknown as Record<string, unknown>;
+      c.getLatestBlockhash = vi.fn(async () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 1 }));
+      c.simulateTransaction = vi.fn(async (_tx: unknown, o: { sigVerify: boolean; replaceRecentBlockhash: boolean }) => {
+        expect(o).toMatchObject({ sigVerify: false, replaceRecentBlockhash: true });
+        return { context: { slot: 1 }, value };
+      });
+      return h;
+    };
+    const payer = Keypair.generate().publicKey.toBase58();
+    const good = sim({ err: null, logs: [], unitsConsumed: 118_000 });
+    expect(await verifySolvency(good, present(), { request: req.code, now: NOW, onChain: 'simulate', feePayer: payer })).toMatchObject({ ok: true, onChain: { mode: 'simulate', ok: true, computeUnits: 118_000 } });
+    expect((good.connection as unknown as { simulateTransaction: { mock: { calls: unknown[] } } }).simulateTransaction.mock.calls).toHaveLength(1);
+    const bad = sim({ err: { InstructionError: [3, { Custom: 6007 }] }, logs: ['Program log: AnchorError ... custom program error: 0x1777'], unitsConsumed: 9000 });
+    const r = await verifySolvency(bad, present(), { request: req.code, now: NOW, onChain: 'simulate', feePayer: payer });
+    expect(r).toMatchObject({ ok: false, reason: 'on_chain_rejected', onChain: { ok: false, error: 'UnknownRoot' } });
+    // an RPC failure during the simulation is on_chain_unavailable, not a pass and not a rejection
+    const off = sim({ err: null, logs: [], unitsConsumed: 0 });
+    (off.connection as unknown as Record<string, unknown>).simulateTransaction = vi.fn(async () => { throw new Error('429'); });
+    expect((await verifySolvency(off, present(), { request: req.code, now: NOW, onChain: 'simulate', feePayer: payer })).reason).toBe('on_chain_unavailable');
   });
 
   it('the simulated on-chain check needs a funded fee payer and never signs', async () => {
