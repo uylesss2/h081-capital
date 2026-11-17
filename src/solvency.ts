@@ -153,6 +153,8 @@ export interface VaultTx {
   post: ReadonlyArray<{ accountIndex: number; amount: string }>;
   /** top-level and inner instructions: parsed ({type, info}) or raw (accounts) */
   ixs: ReadonlyArray<{ programId: string; parsed?: unknown; accounts?: readonly string[] }>;
+  /** the transaction failed: its state changes, inflows included, were rolled back */
+  failed?: boolean;
 }
 
 /** Token instructions that never credit the account they name. */
@@ -164,16 +166,19 @@ const NO_INFLOW = new Set([
 /**
  * The most `vault` held at any point inside one transaction: max(before, after, before + every inflow). Inflows are
  * counted without the outflows, so a deposit taken out again in the same transaction still counts. `createdHere`: the
- * vault had no token balance before (the transaction that created it). Throws on what it cannot read (an unparsed
- * token instruction naming the vault, a token instruction type it does not know): the caller fails closed.
+ * vault had no token balance before (the transaction that created it). A failed transaction moved nothing: only its
+ * balances count. `before` / `after` let the caller check that consecutive transactions join up (no gap). Throws on
+ * what it cannot read (no balance after, an unparsed token instruction naming the vault, a token instruction type it
+ * does not know): the caller fails closed.
  */
-export function vaultTxPeak(vault: string, tx: VaultTx): { peak: bigint; createdHere: boolean } {
+export function vaultTxPeak(vault: string, tx: VaultTx): { peak: bigint; createdHere: boolean; before?: bigint; after: bigint } {
   const i = tx.keys.indexOf(vault);
   if (i < 0) throw new Error(`a transaction in the vault's history does not name the vault ${vault}`);
   const amt = (xs: VaultTx['pre']) => { const b = xs.find((x) => x.accountIndex === i); return b ? BigInt(b.amount) : undefined; };
-  const before = amt(tx.pre), after = amt(tx.post) ?? 0n;
+  const before = amt(tx.pre), after = amt(tx.post);
+  if (after === undefined) throw new Error(`a transaction in the vault's history shows no token balance for the vault ${vault} after it`);
   let inflow = 0n;
-  for (const ix of tx.ixs) {
+  for (const ix of tx.failed ? [] : tx.ixs) {
     if (!TOKEN_PROGRAM_IDS.includes(ix.programId)) continue;
     const p = ix.parsed as { type?: string; info?: Record<string, unknown> } | undefined;
     if (!p || typeof p !== 'object' || !p.info) {
@@ -187,7 +192,7 @@ export function vaultTxPeak(vault: string, tx: VaultTx): { peak: bigint; created
     else if (p.type === 'transfer' || p.type === 'transferChecked' || p.type === 'mintTo' || p.type === 'mintToChecked' || NO_INFLOW.has(String(p.type))) continue;
     else if (Object.values(info).includes(vault)) throw new Error(`a token instruction "${p.type}" names the vault ${vault}; its effect on the balance is not known here`);
   }
-  return { peak: max(before ?? 0n, after, (before ?? 0n) + inflow), createdHere: before === undefined };
+  return { peak: max(before ?? 0n, after, (before ?? 0n) + inflow), createdHere: before === undefined, ...(before === undefined ? {} : { before }), after };
 }
 
 /** The one-sentence statement a valid presentation supports (spec section 6). */

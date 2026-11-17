@@ -296,12 +296,13 @@ async function discloseVkey(host: SolvencyHost): Promise<{ vkey?: unknown; reaso
 /** Most signatures one verify reads for one vault's new history; beyond it the floor is unknown (fails closed). */
 export const VAULT_HISTORY_MAX = 10_000;
 
-interface VaultPeak { vault: string; newest: string; peak: string }
+interface VaultPeak { vault: string; newest: string; peak: string; /** the vault's balance after `newest` (the next read must start from it) */ last: string }
 
 /** A jsonParsed transaction as the pure vaultTxPeak reads it. */
 function vaultTxOf(tx: ParsedTransactionWithMeta | null, sig: string): VaultTx {
   if (!tx?.meta) throw new Error(`the RPC did not return transaction ${sig} with its metadata`);
   if (tx.meta.innerInstructions == null) throw new Error(`the RPC did not return the inner instructions of ${sig}`);
+  if (tx.meta.preTokenBalances == null || tx.meta.postTokenBalances == null) throw new Error(`the RPC did not return the token balances of ${sig}`);
   const ixOf = (ix: ParsedInstruction | PartiallyDecodedInstruction) =>
     'parsed' in ix ? { programId: ix.programId.toBase58(), parsed: ix.parsed } : { programId: ix.programId.toBase58(), accounts: ix.accounts.map((a) => a.toBase58()) };
   const bal = (xs: TokenBalance[] | null | undefined) =>
@@ -310,17 +311,19 @@ function vaultTxOf(tx: ParsedTransactionWithMeta | null, sig: string): VaultTx {
     keys: tx.transaction.message.accountKeys.map((k) => k.pubkey.toBase58()),
     pre: bal(tx.meta.preTokenBalances), post: bal(tx.meta.postTokenBalances),
     ixs: [...tx.transaction.message.instructions, ...tx.meta.innerInstructions.flatMap((x) => x.instructions)].map(ixOf),
+    failed: tx.meta.err != null,
   };
 }
 
 /**
  * The most `vault` ever held (spec 2.1): every transaction since its creation, read once and remembered (the history
- * is append-only, so later calls read only what is new). Throws when the history cannot be read in full or does not
- * reach the vault's creation (a pruned RPC): the caller fails closed.
+ * is append-only, so later calls read only what is new). Throws when the history cannot be read in full, does not
+ * reach the vault's creation (a pruned RPC), or has a gap (a transaction's balance before is not the previous one's
+ * balance after: a lossy index): the caller fails closed.
  */
 async function vaultPeak(host: SolvencyHost, vault: PublicKey): Promise<bigint> {
   const key = vault.toBase58();
-  const saved = readStore<VaultPeak>(host, 'vault-peaks').filter((e) => e.vault === key).at(-1);
+  const saved = readStore<VaultPeak>(host, 'vault-peaks').filter((e) => e.vault === key && typeof e.last === 'string').at(-1);
   const sigs: string[] = [];
   for (let before: string | undefined; ;) {
     const page = await host.connection.getSignaturesForAddress(vault, { limit: 1000, ...(before ? { before } : {}), ...(saved ? { until: saved.newest } : {}) }, 'confirmed');
@@ -334,20 +337,27 @@ async function vaultPeak(host: SolvencyHost, vault: PublicKey): Promise<bigint> 
     throw new Error(`the RPC returned no history for the vault ${key}`);
   }
   let peak = saved ? BigInt(saved.peak) : 0n;
-  let oldestCreated = false;
+  const rows: ReturnType<typeof vaultTxPeak>[] = []; // newest first, as listed
   for (let i = 0; i < sigs.length; i += 50) {
     const chunk = sigs.slice(i, i + 50);
     const txs = await host.connection.getParsedTransactions(chunk, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-    chunk.forEach((sig, j) => {
-      const r = vaultTxPeak(key, vaultTxOf(txs[j] ?? null, sig));
-      if (r.peak > peak) peak = r.peak;
-      if (i + j === sigs.length - 1) oldestCreated = r.createdHere;
-    });
+    chunk.forEach((sig, j) => rows.push(vaultTxPeak(key, vaultTxOf(txs[j] ?? null, sig))));
   }
-  // newest first: the last one read must be the vault's creation, or the history was cut short
-  if (!saved && !oldestCreated) throw new Error(`the RPC's history of the vault ${key} does not reach its creation`);
+  // oldest first, each transaction must start where the previous one ended; the oldest is the creation (or starts
+  // where the remembered read ended)
+  const chain = [...rows].reverse();
+  let prev: bigint | undefined = saved ? BigInt(saved.last) : undefined;
+  chain.forEach((r, k) => {
+    if (k === 0 && !saved) {
+      if (!r.createdHere) throw new Error(`the RPC's history of the vault ${key} does not reach its creation`);
+    } else if (r.createdHere || r.before !== prev) {
+      throw new Error(`the RPC's history of the vault ${key} has a gap (a balance of ${r.before ?? 'none'} follows ${prev})`);
+    }
+    prev = r.after;
+    if (r.peak > peak) peak = r.peak;
+  });
   const others = readStore<VaultPeak>(host, 'vault-peaks').filter((e) => e.vault !== key);
-  writeStore(host, 'vault-peaks', [...others, { vault: key, newest: sigs[0], peak: peak.toString() }]);
+  writeStore(host, 'vault-peaks', [...others, { vault: key, newest: sigs[0], peak: peak.toString(), last: String(prev) }]);
   return peak;
 }
 

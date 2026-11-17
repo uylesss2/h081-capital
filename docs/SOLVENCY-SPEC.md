@@ -113,8 +113,11 @@ assetSound = bound > assetFloor
 ```
 
 The history read fails closed (`asset_floor_unavailable`): when the RPC returns no history, when the oldest
-transaction is not the vault's creation (a pruned RPC), when a token instruction naming the vault cannot be read, or
-when more than 10,000 new transactions would have to be read.
+transaction is not the vault's creation (a pruned RPC), when the history has a gap (a transaction's balance before is
+not the previous one's balance after, a lossy index), when token balances are missing, when a token instruction naming
+the vault cannot be read, or when more than 10,000 new transactions would have to be read. A failed transaction counts
+by its balances only (its inflows were rolled back). Anyone can force that refusal on a verifier with no remembered
+peak (10,000+ transactions naming a vault, or an unreadable token instruction): it fails closed, never open.
 
 `verifySolvency` reads the AssetCap accounts (`getProgramAccounts` with a size filter; no instruction closes an AssetCap,
 only buffers close, so a vault made for an attack stays visible) and their vaults, and returns
