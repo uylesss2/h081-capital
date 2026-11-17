@@ -31,10 +31,17 @@ export const h081Lend = (agent: AgentLike, input: {
 
 export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: string; toAddressCode: string }) => run(agent, 'h081_transfer', input);
 
-export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer };
+export const h081SolvencyRequest = (agent: AgentLike, input: { min?: string; minUsdg?: string; label?: string; expectWallet?: string; maxRootAge?: number; ttlMinutes?: number }) => run(agent, 'h081_solvency_request', input);
+export const h081ProveSolvency = (agent: AgentLike, input: { request: string; amount?: string; amountUsdg?: string; confirm?: boolean }) => run(agent, 'h081_prove_solvency', input);
+export const h081VerifySolvency = (agent: AgentLike, input: { code: string; request: string; onChain?: 'none' | 'simulate' | 'send'; allowUnboundAsset?: boolean; feePayer?: string }) => run(agent, 'h081_verify_solvency', input);
+export const h081SolvencyReserve = (agent: AgentLike, input: { release?: boolean; confirm?: boolean } = {}) => run(agent, 'h081_solvency_reserve', input);
+
+export const METHODS = { h081BankDeposit, h081BankWithdraw, h081BankBalance, h081LoanQuote, h081LoanBorrow, h081Stake, h081ProtocolInfo, h081Pay, h081AllowanceGrant, h081AllowanceDelegate, h081AllowanceReclaim, h081Lend, h081Transfer,
+  h081SolvencyRequest, h081ProveSolvency, h081VerifySolvency, h081SolvencyReserve };
 export const METHOD_OF: Record<OpName, keyof typeof METHODS> = {
   h081_bank_deposit: 'h081BankDeposit', h081_bank_withdraw: 'h081BankWithdraw', h081_bank_balance: 'h081BankBalance', h081_loan_quote: 'h081LoanQuote',
   h081_loan_borrow: 'h081LoanBorrow', h081_stake: 'h081Stake', h081_protocol_info: 'h081ProtocolInfo', h081_pay: 'h081Pay',
   h081_allowance_grant: 'h081AllowanceGrant', h081_allowance_delegate: 'h081AllowanceDelegate', h081_allowance_reclaim: 'h081AllowanceReclaim',
   h081_lend: 'h081Lend', h081_transfer: 'h081Transfer',
+  h081_solvency_request: 'h081SolvencyRequest', h081_prove_solvency: 'h081ProveSolvency', h081_verify_solvency: 'h081VerifySolvency', h081_solvency_reserve: 'h081SolvencyReserve',
 };

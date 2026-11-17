@@ -13,8 +13,8 @@ import type { CircuitName } from '../../../src/prover.js';
 import { H081Bank, type BalanceView, type RelayTerms } from '../../core/bank.js';
 import { missingCircuits } from '../../core/circuits.js';
 import {
-  ADDRESS_PREFIX, type CodeContext, KEY_PREFIX, PROOF_PREFIX, TERMS_PREFIX, decodeAddressCode, decodeKeyCode, decodeLoanProof,
-  decodeLoanTerms, encodeAddressCode,
+  ADDRESS_PREFIX, type CodeContext, KEY_PREFIX, PROOF_PREFIX, SOLVENCY_ASK_PREFIX, SOLVENCY_PREFIX, TERMS_PREFIX, decodeAddressCode, decodeKeyCode, decodeLoanProof,
+  decodeLoanTerms, decodeSolvencyCode, decodeSolvencyRequest, encodeAddressCode,
 } from '../../core/codes.js';
 import { AGENT_CIRCUITS, MAINNET, type H081Config, configFromEnv, rpcHost } from '../../core/constants.js';
 import { CodedError, classify, classifySend } from '../../core/errors.js';
@@ -34,7 +34,7 @@ export const VERSION = '0.1.2';
 export const FUNDING_NEEDED = { deposit: '0.05', withdraw: '0.05', allow: '0.15', lend: '0.15' } as const;
 
 /** Download size of each circuit's files (MB, rounded). The agent set is about 98 MB in all. */
-export const CIRCUIT_MB: Partial<Record<CircuitName, number>> = { transact: 15, grant: 51, spend: 19, stream: 12 };
+export const CIRCUIT_MB: Partial<Record<CircuitName, number>> = { transact: 15, grant: 51, spend: 19, stream: 12, disclose: 11 };
 
 /** The queue holds at most this many waiting writes; more get `busy`. */
 export const QUEUE_MAX = 8;
@@ -121,6 +121,7 @@ const SELF_LINK = 'Sending back to the wallet that deposited links the two.';
 const KINDS: Record<string, string> = {
   h081_bank_deposit: 'deposit', h081_bank_withdraw: 'withdraw', h081_pay: 'pay', h081_transfer: 'transfer', h081_allowance_grant: 'allow',
   h081_allowance_reclaim: 'reclaim', h081_lend: 'lend', h081_loan_borrow: 'borrow', h081_stake: 'stake',
+  h081_prove_solvency: 'solvency-prove', h081_solvency_reserve: 'solvency-release',
 };
 
 const bad = (message: string) => new CodedError('bad_request', message);
@@ -145,7 +146,10 @@ export function loanContext(config: H081Config): CodeContext {
   return { cluster: config.cluster, program: config.loanProgramId.toBase58(), mint: config.usdgMint.toBase58() };
 }
 
-const PREFIX_KIND_NAME: Record<string, string> = { [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof' };
+const PREFIX_KIND_NAME: Record<string, string> = {
+  [ADDRESS_PREFIX]: 'address', [KEY_PREFIX]: 'key', [TERMS_PREFIX]: 'loan-terms', [PROOF_PREFIX]: 'loan-proof',
+  [SOLVENCY_ASK_PREFIX]: 'solvency-request', [SOLVENCY_PREFIX]: 'solvency',
+};
 
 /** Checks any "h081-*:" code against `config`: its kind, its network and whether it is valid there. Offline, no key needed. */
 export function checkCode(config: H081Config, code: string): CodeCheck {
@@ -159,6 +163,8 @@ export function checkCode(config: H081Config, code: string): CodeCheck {
     [KEY_PREFIX]: { kind: 'key', ctx: pool, decode: decodeKeyCode },
     [TERMS_PREFIX]: { kind: 'loan-terms', ctx: loan, decode: decodeLoanTerms },
     [PROOF_PREFIX]: { kind: 'loan-proof', ctx: loan, decode: decodeLoanProof },
+    [SOLVENCY_ASK_PREFIX]: { kind: 'solvency-request', ctx: pool, decode: decodeSolvencyRequest },
+    [SOLVENCY_PREFIX]: { kind: 'solvency', ctx: pool, decode: decodeSolvencyCode },
   };
   const k = prefix ? kinds[prefix] : undefined;
   if (!k) return { kind: null, network: null, valid: false, reason: prefix ? `"${prefix}" is not a code this bank reads` : 'not an H081 code (it should start with "h081-")' };
@@ -728,6 +734,75 @@ export class H081 {
         warnings: action === 'request_unstake' ? ['Unstaking has a 30-day cooldown.'] : [], details: { action, ...(o.h081 !== undefined ? { h081: String(o.h081) } : {}) },
       }),
       run: (bank) => runOp(bank, 'h081_stake', args),
+    }, o);
+  }
+
+  // ---- prove solvency in one line (docs/SOLVENCY-SPEC.md). The default pre-deal step: the party carrying the risk asks,
+  // the other proves (locally, over its reserve), the asker verifies, then they deal only with the wallet the proof names.
+
+  /** Asker: an "h081-solvency-ask:" request for at least `min` USDG. Sends nothing, reads nothing. */
+  async solvencyRequest(o: { min: string; label?: string; expectWallet?: string; maxRootAge?: number; ttlMinutes?: number }): Promise<unknown> {
+    const args: Args = { minUsdg: String(o.min), ...Object.fromEntries(Object.entries({ label: o.label, expectWallet: o.expectWallet, maxRootAge: o.maxRootAge, ttlMinutes: o.ttlMinutes }).filter(([, v]) => v !== undefined)) };
+    validateArgs('h081_solvency_request', args);
+    return plain(await runOp(await this.bank(), 'h081_solvency_request', args));
+  }
+
+  /**
+   * Agent: answers a request with an "h081-solvency:" code, proven locally over the reserve. When the reserve is missing or
+   * too small the top-up is a plan unless `confirm` (then it goes through the write queue and the idempotency record).
+   * With a large enough reserve nothing is sent and the code comes back at once (status "done").
+   */
+  async proveSolvency(request: string, o: WriteOptions & { amount?: string } = {}): Promise<Outcome> {
+    const code = this.requireCode(request, SOLVENCY_ASK_PREFIX, 'request');
+    const args: Args = { request: code, ...(o.amount !== undefined ? { amountUsdg: String(o.amount) } : {}) };
+    validateArgs('h081_prove_solvency', args);
+    if (!o.confirm) {
+      const r = plain<Record<string, unknown>>(await runOp(await this.bank(), 'h081_prove_solvency', args));
+      if (r.sent !== false) return { status: 'done', result: r };
+      return {
+        status: 'plan', result: this.planOf({
+          op: 'solvency reserve top-up', usdg: (r.plan as { topUpUsdg?: string } | undefined)?.topUpUsdg, fee: '0', solNeeded: '0.1', circuit: 'grant, disclose', circuits: ['grant', 'spend', 'disclose'],
+          publicOnChain: ['that the agent wallet made a grant'], sentBy: 'agent key',
+          warnings: ['This sets the amount aside as a reserve the proof is made over; it stays yours (release it with /v1/solvency/reserve/release). The proof itself is made locally and sends nothing.'],
+          details: r,
+        }),
+      };
+    }
+    return this.write({
+      route: 'solvency-prove', op: 'h081_prove_solvency', args, usdg: o.amount,
+      plan: async () => { throw new Error('unreachable'); },
+      run: (bank) => runOp(bank, 'h081_prove_solvency', { ...args, confirm: true }),
+    }, o);
+  }
+
+  /** Asker: checks an "h081-solvency:" code against its own request. RPC reads only; onChain "send" needs confirm. */
+  async verifySolvency(code: string, o: { request: string; onChain?: 'none' | 'simulate' | 'send'; allowUnboundAsset?: boolean; feePayer?: string; confirm?: boolean }): Promise<unknown> {
+    const c = this.requireCode(code, SOLVENCY_PREFIX, 'code');
+    const request = this.requireCode(o.request, SOLVENCY_ASK_PREFIX, 'request');
+    const args: Args = { code: c, request, ...Object.fromEntries(Object.entries({ onChain: o.onChain, allowUnboundAsset: o.allowUnboundAsset, feePayer: o.feePayer }).filter(([, v]) => v !== undefined)) };
+    validateArgs('h081_verify_solvency', args);
+    if (o.onChain === 'send' && o.confirm !== true) {
+      throw bad('onChain "send" sends a transaction that puts the reserve key, the bound and the audience on chain for good; pass confirm: true (CLI: --yes) to do it, or use onChain "simulate" (nothing is sent)');
+    }
+    return plain(await runOp(await this.bank(), 'h081_verify_solvency', args));
+  }
+
+  /** Agent: the reserve (read-only). */
+  async solvencyReserve(): Promise<unknown> {
+    return plain(await runOp(await this.bank(), 'h081_solvency_reserve', {}));
+  }
+
+  /** Agent: takes the reserve back into the shielded balance (plan unless confirm). */
+  async releaseReserve(o: WriteOptions = {}): Promise<Outcome> {
+    const args: Args = { release: true };
+    return this.write({
+      route: 'solvency-release', op: 'h081_solvency_reserve', args,
+      plan: async () => this.planOf({
+        op: 'solvency reserve release', fee: '0', solNeeded: '0.02', circuit: 'spend', circuits: ['spend'], publicOnChain: ['that the agent wallet sent a bank transaction'], sentBy: 'agent key',
+        warnings: ['Solvency proofs already handed out keep verifying until their pool root is older than the asker allows.'],
+        details: plain(await runOp(await this.bank(), 'h081_solvency_reserve', args)),
+      }),
+      run: (bank) => runOp(bank, 'h081_solvency_reserve', { ...args, confirm: true }),
     }, o);
   }
 

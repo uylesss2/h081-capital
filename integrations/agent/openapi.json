@@ -1613,6 +1613,425 @@
         }
       }
     },
+    "/v1/solvency/request": {
+      "post": {
+        "operationId": "postSolvencyRequest",
+        "summary": "Asker: make an h081-solvency-ask: request (the default step before a deal where you carry risk)",
+        "description": "Sends nothing, reads nothing. The minimum is rounded UP to the 1 / 2.5 / 5 ladder. Send the code to the counterparty; check its answer with POST /v1/solvency/verify and this request.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "min": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "the least the counterparty must prove it holds (decimal USDG)"
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "description": "a short name for you, shown to the prover (at most 32 bytes)"
+                  },
+                  "expectWallet": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "only this wallet may answer (default: anyone; the answer names its wallet either way)"
+                  },
+                  "maxRootAge": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1023,
+                    "description": "how many pool operations old the proof may be (default 32)"
+                  },
+                  "ttlMinutes": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 1440,
+                    "description": "how long the request is valid (default 30, at most a day)"
+                  }
+                },
+                "required": [
+                  "min"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {code, min, minUsdg, expiresAt, maxRootAge, expectWallet, label, verifierKey, next, handshake}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/solvency/prove": {
+      "post": {
+        "operationId": "postSolvencyProve",
+        "summary": "Agent: answer a request with an h081-solvency: code (local proof over the reserve)",
+        "description": "The proof is made locally (no service proves for you) and sends nothing. When the reserve is missing or too small the top-up (one grant, about 0.1 SOL) is a plan unless confirm: true. A valid code does NOT say the funds are locked, exclusive, the whole balance, or anything about debts.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "the asker's \"h081-solvency-ask:\" code"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?$",
+                    "description": "reserve size if a top-up is needed (decimal USDG); default the requested minimum"
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "required": [
+                  "request"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan (a top-up is needed), or {code, bound, boundUsdg, wallet, root, reserveId, selfCheck, statement, doesNotSay, next}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/solvency/verify": {
+      "post": {
+        "operationId": "postSolvencyVerify",
+        "summary": "Asker: check an h081-solvency: code against your own request",
+        "description": "RPC reads only (onChain \"simulate\" adds one simulated transaction; nothing is signed or sent). ok means one note held at least the bound at a recent pool root, presented by the wallet named: deal only with that wallet. Every result lists what the proof does NOT say.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "description": "the counterparty's \"h081-solvency:\" code"
+                  },
+                  "request": {
+                    "type": "string",
+                    "description": "your own \"h081-solvency-ask:\" request it answers"
+                  },
+                  "onChain": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "simulate"
+                    ],
+                    "description": "none (default) or simulate (one simulated verify_disclosure transaction; nothing sent)"
+                  },
+                  "allowUnboundAsset": {
+                    "type": "boolean",
+                    "description": "accept a bound a non-USDG vault could back (the statement then says SOME asset); default false"
+                  },
+                  "feePayer": {
+                    "type": "string",
+                    "pattern": "^[1-9A-HJ-NP-Za-km-z]{32,44}$",
+                    "description": "simulate only: any funded wallet to pay the simulated rent and fee (default this agent's wallet; no key is used)"
+                  }
+                },
+                "required": [
+                  "code",
+                  "request"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: {ok, reason?, message?, statement, wallet, bound, boundUsdg, root, rootAge, assetSound, assetFloor, onChain?, doesNotSay}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/solvency/reserve": {
+      "get": {
+        "operationId": "getSolvencyReserve",
+        "summary": "Agent: the solvency reserve (read-only)",
+        "responses": {
+          "200": {
+            "description": "ok: {reserve: {id, remaining, remainingUsdg} | null, others, totalUsdg, note}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Success"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
+    "/v1/solvency/reserve/release": {
+      "post": {
+        "operationId": "postSolvencyReserveRelease",
+        "summary": "Agent: take the reserve back into the shielded balance",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "required with confirm: true; a retry with the same key and body returns the first result"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirm": {
+                    "type": "boolean",
+                    "description": "true: send it (needs the Idempotency-Key header). Missing or false: return the plan and send nothing"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok: plan, or {signatures, released, shielded}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Success"
+                    },
+                    {
+                      "properties": {
+                        "status": {
+                          "enum": [
+                            "plan",
+                            "sent"
+                          ]
+                        },
+                        "result": {
+                          "oneOf": [
+                            {
+                              "$ref": "#/components/schemas/Plan"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "415": {
+            "$ref": "#/components/responses/E415"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500"
+          },
+          "501": {
+            "$ref": "#/components/responses/E501"
+          },
+          "502": {
+            "$ref": "#/components/responses/E502"
+          },
+          "503": {
+            "$ref": "#/components/responses/E503"
+          }
+        }
+      }
+    },
     "/v1/codes/check": {
       "post": {
         "operationId": "postCodesCheck",
@@ -1626,7 +2045,7 @@
                 "properties": {
                   "code": {
                     "type": "string",
-                    "description": "an \"h081-address:\", \"h081-loan-terms:\", \"h081-loan-proof:\" or \"h081-key:\" code"
+                    "description": "an \"h081-address:\", \"h081-loan-terms:\", \"h081-loan-proof:\", \"h081-solvency-ask:\", \"h081-solvency:\" or \"h081-key:\" code"
                   }
                 },
                 "required": [

@@ -23,16 +23,20 @@ export const INSTRUCTIONS =
   'shielded balance, h081_allowance_delegate carves a child (never looser than its parent) out of an allowance this agent ' +
   'holds, and h081_allowance_reclaim takes back what is left; h081_transfer pays from the main shielded balance to an "h081-address:" ' +
   'code (sent by the agent key when called); without confirm: true the three allowance tools, and h081_lend open, ' +
-  'fund, settle and close, only return the plan and send nothing. ' + NOTICE;
+  'fund, settle and close, only return the plan and send nothing. Before any deal where this agent carries risk (it lends, ' +
+  'pays first or extends credit), the default first step is a solvency check: h081_solvency_request makes an ' +
+  '"h081-solvency-ask:" code for the amount at risk, the counterparty answers with h081_prove_solvency (a proof made ' +
+  'locally over its reserve), h081_verify_solvency checks it against the request; deal only with the wallet a valid answer ' +
+  'names, and read its doesNotSay (the funds are not locked). ' + NOTICE;
 
 export interface ServerOptions {
   bank: () => Promise<BankLike>;
   version?: string;
 }
 
-const READS = new Set(['h081_bank_balance', 'h081_loan_quote', 'h081_protocol_info']);
+const READS = new Set(['h081_bank_balance', 'h081_loan_quote', 'h081_protocol_info', 'h081_solvency_request']);
 /** Tools that only return a plan unless called with confirm: true (for h081_lend: open, fund, settle, close). */
-const PLAN_FIRST = new Set(['h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim']);
+const PLAN_FIRST = new Set(['h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_prove_solvency', 'h081_solvency_reserve']);
 
 /** Whether this call can send a transaction (so a dropped connection leaves its outcome unknown). */
 export function sends(name: string, args: Record<string, unknown> = {}): boolean {
@@ -42,6 +46,7 @@ export function sends(name: string, args: Record<string, unknown> = {}): boolean
     if (args.action === 'status') return false;
     if (['open', 'fund', 'settle', 'close'].includes(String(args.action)) && args.confirm !== true) return false;
   }
+  if (name === 'h081_verify_solvency') return args.onChain === 'send';
   if (PLAN_FIRST.has(name) && args.confirm !== true) return false;
   return true;
 }

@@ -2,16 +2,21 @@
 // JSON Schema (what an MCP client shows its model), kept side by side so they say the same thing.
 // Amounts are strings: `amount` in base units (integer) or `usdg` / `h081` as a decimal token amount.
 import { z } from 'zod';
+import { SOLVENCY_DOES_NOT_SAY, SOLVENCY_HANDSHAKE } from '../../src/solvency.js';
 
 const BASE = /^\d+$/;
 const DECIMAL = /^\d+(\.\d+)?$/;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export const OPS = ['h081_bank_deposit', 'h081_bank_withdraw', 'h081_bank_balance', 'h081_loan_quote', 'h081_loan_borrow', 'h081_stake', 'h081_protocol_info', 'h081_pay',
-  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer'] as const;
+  'h081_allowance_grant', 'h081_allowance_delegate', 'h081_allowance_reclaim', 'h081_lend', 'h081_transfer',
+  'h081_solvency_request', 'h081_prove_solvency', 'h081_verify_solvency', 'h081_solvency_reserve'] as const;
 export type OpName = (typeof OPS)[number];
 
 const NOTICE_SHORT = 'H081 Capital is live on Solana mainnet, not audited yet; use at your own risk.';
+
+/** Every solvency tool says what a solvency proof does NOT say (docs/SOLVENCY-SPEC.md section 6), verbatim. */
+export const SOLVENCY_NOT_SAID = 'A valid solvency proof does NOT say: ' + SOLVENCY_DOES_NOT_SAY.map((x, i) => `(${i + 1}) ${x}`).join('; ') + '.';
 
 export const DESCRIPTIONS: Record<OpName, string> = {
   h081_bank_deposit:
@@ -145,6 +150,37 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'stay hidden on chain. The agent key sends it (there is no public leg a relayer could take a fee from), so the chain ' +
     'shows that the agent wallet used the bank. No relay fee. Sends when called (no plan step). Needs ~0.02 SOL and the ' +
     'transact circuit. Give `amount` (base units) or `usdg` (decimal). ' + NOTICE_SHORT,
+  h081_solvency_request:
+    'Default first step before any deal where this agent carries risk (lending, paying first, extending credit): ask the ' +
+    'counterparty to prove it holds at least `min` USDG. Makes an "h081-solvency-ask:" code (a fresh nonce, an expiry of ' +
+    'at most a day, the minimum rounded UP to the 1 / 2.5 / 5 ladder, how old the proof\'s pool root may be, optionally the ' +
+    'only wallet allowed to answer). Send the code to the counterparty; it answers with h081_prove_solvency; check the answer ' +
+    'with h081_verify_solvency and this same request, then deal only with the wallet it names. Sends nothing, reads nothing. ' +
+    SOLVENCY_HANDSHAKE + ' ' + SOLVENCY_NOT_SAID,
+  h081_prove_solvency:
+    'Answer an "h081-solvency-ask:" request with an "h081-solvency:" code: a zero-knowledge proof, made LOCALLY, that this ' +
+    'account\'s solvency reserve (an allowance it granted to its own reserve key; h081_pay never spends it) holds at least the ' +
+    'requested amount, bound to that request and signed by the agent wallet. It reveals the bound (a lower bound only), the ' +
+    'reserve key, an approximate time and the wallet; not the balance, not any other note. When the reserve is missing or too ' +
+    'small it must be topped up first (a smaller reserve is reclaimed, then one plain allowance is granted): WITHOUT ' +
+    '`confirm: true` NOTHING IS SENT and the result is the plan; with it the top-up is sent (the agent wallet is visible as ' +
+    'the sender of a grant; ~0.1 SOL; grant circuit) and then the proof is made. Proving itself sends nothing. Refuses a 5th ' +
+    'different bound to one asker per UTC day (9th overall), so nobody can narrow down the reserve. Needs the disclose ' +
+    'circuit (11 MB, fetched on first use). ' + SOLVENCY_NOT_SAID + ' ' + NOTICE_SHORT,
+  h081_verify_solvency:
+    'Check an "h081-solvency:" code against YOUR OWN "h081-solvency-ask:" request: the request it answers, expiry, a request ' +
+    'is accepted once, the expected wallet, the public inputs, the wallet\'s signature, the zero-knowledge proof against the ' +
+    'pinned ceremony key, that the pool root is at most maxRootAge operations old, and that the bound is above what any ' +
+    'non-USDG vault could back (`assetSound`; otherwise ok is false with asset_not_bound unless `allowUnboundAsset`). ' +
+    'Returns ok, the first failing reason, the statement, the wallet to deal with, and doesNotSay. RPC reads only. ' +
+    '`onChain: "simulate"` also runs the deployed verify_disclosure as ONE simulated transaction (nothing signed or sent; ' +
+    'any funded `feePayer`); `"send"` sends it, which puts the reserve key, the bound and the audience on chain for good. ' +
+    SOLVENCY_NOT_SAID,
+  h081_solvency_reserve:
+    'The solvency reserve: the allowance this account granted to its own reserve key so h081_prove_solvency can prove ' +
+    '"at least X" over one note. Shows it (read-only), or with `release: true` takes it back into the shielded balance: ' +
+    'WITHOUT `confirm: true` NOTHING IS SENT and the result is the plan. Proofs already handed out keep verifying until their ' +
+    'pool root is older than the asker allows. ' + NOTICE_SHORT,
 };
 
 // ------------------------------------------------------------------ zod
@@ -292,11 +328,39 @@ export const TransferZ = z.object({
   toAddressCode: z.string({ required_error: 'must be given: the recipient\'s "h081-address:" code' }).min(1),
 }).strict().refine(exactlyOne('amount', 'usdg'), oneOfMsg('amount', 'usdg'));
 
+const ttlZ = z.number().positive().max(1440, 'a request lives at most a day (1440 minutes)');
+export const SolvencyRequestZ = z.object({
+  min: posAmountZ.optional(), minUsdg: posDecimalZ.optional(),
+  label: z.string().max(32).optional(),
+  expectWallet: b58Z.optional(),
+  maxRootAge: z.number().int().min(1).max(1023).optional(),
+  ttlMinutes: ttlZ.optional(),
+}).strict().refine(exactlyOne('min', 'minUsdg'), oneOfMsg('min', 'minUsdg'));
+
+export const ProveSolvencyZ = z.object({
+  request: z.string({ required_error: 'must be given: the asker\'s "h081-solvency-ask:" code' }).min(1),
+  amount: posAmountZ.optional(), amountUsdg: posDecimalZ.optional(),
+  confirm: z.boolean().optional(),
+}).strict().refine(atMostOne('amount', 'amountUsdg'), bothMsg('amount', 'amountUsdg'));
+
+export const SOLVENCY_ON_CHAIN = ['none', 'simulate', 'send'] as const;
+export const VerifySolvencyZ = z.object({
+  code: z.string({ required_error: 'must be given: the "h081-solvency:" code to check' }).min(1),
+  request: z.string({ required_error: 'must be given: your own "h081-solvency-ask:" request the code answers' }).min(1),
+  onChain: z.enum(SOLVENCY_ON_CHAIN).optional(),
+  allowUnboundAsset: z.boolean().optional(),
+  feePayer: b58Z.optional(),
+}).strict().refine((o) => o.feePayer === undefined || o.onChain === 'simulate', { message: 'feePayer applies to onChain: "simulate" only' });
+
+export const SolvencyReserveZ = z.object({ release: z.boolean().optional(), confirm: z.boolean().optional() }).strict()
+  .refine((o) => o.confirm === undefined || o.release === true, { message: 'confirm applies to release: true only' });
+
 export const ZOD: Record<OpName, z.ZodType<any>> = {
   h081_bank_deposit: DepositZ, h081_bank_withdraw: WithdrawZ, h081_bank_balance: BalanceZ, h081_loan_quote: LoanQuoteZ,
   h081_loan_borrow: LoanBorrowZ, h081_stake: StakeZ, h081_protocol_info: ProtocolInfoZ, h081_pay: PayZ,
   h081_allowance_grant: AllowanceGrantZ, h081_allowance_delegate: AllowanceDelegateZ, h081_allowance_reclaim: AllowanceReclaimZ,
   h081_lend: LendZ, h081_transfer: TransferZ,
+  h081_solvency_request: SolvencyRequestZ, h081_prove_solvency: ProveSolvencyZ, h081_verify_solvency: VerifySolvencyZ, h081_solvency_reserve: SolvencyReserveZ,
 };
 
 // ------------------------------------------------------------------ JSON Schema (MCP inputSchema)
@@ -451,6 +515,49 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
     additionalProperties: false,
     description: 'exactly one of amount (base units) or usdg (decimal), and the recipient\'s address code',
   },
+  h081_solvency_request: {
+    type: 'object',
+    properties: {
+      min: { ...amountJ, description: 'the least the counterparty must prove it holds (base units); rounded UP to the 1 / 2.5 / 5 ladder' }, minUsdg: decimalJ('USDG'),
+      label: { type: 'string', maxLength: 32, description: 'a short name for you, shown to the prover (at most 32 bytes)' },
+      expectWallet: { ...b58J, description: 'only this wallet may answer (default: anyone; the answer names its wallet either way)' },
+      maxRootAge: { type: 'integer', minimum: 1, maximum: 1023, description: 'how many pool operations old the proof may be (default 32)' },
+      ttlMinutes: { type: 'number', exclusiveMinimum: 0, maximum: 1440, description: 'how long the request is valid (default 30, at most a day)' },
+    },
+    additionalProperties: false,
+    description: 'exactly one of min (base units) or minUsdg (decimal)',
+  },
+  h081_prove_solvency: {
+    type: 'object',
+    properties: {
+      request: { type: 'string', description: 'the asker\'s "h081-solvency-ask:" code' },
+      amount: { ...amountJ, description: 'reserve size when a top-up is needed (base units); default: the requested minimum on the ladder. A larger reserve answers larger requests without another top-up' },
+      amountUsdg: decimalJ('USDG'),
+      confirm: { type: 'boolean', description: 'true: send the reserve top-up if one is needed, then prove. Default false: when a top-up is needed nothing is sent and the result is the plan' },
+    },
+    required: ['request'],
+    additionalProperties: false,
+  },
+  h081_verify_solvency: {
+    type: 'object',
+    properties: {
+      code: { type: 'string', description: 'the counterparty\'s "h081-solvency:" code' },
+      request: { type: 'string', description: 'your own "h081-solvency-ask:" request it answers' },
+      onChain: { type: 'string', enum: [...SOLVENCY_ON_CHAIN], description: 'none (default); simulate: one simulated verify_disclosure transaction, nothing signed or sent; send: sends it (puts the reserve key, bound and audience on chain for good)' },
+      allowUnboundAsset: { type: 'boolean', description: 'accept a bound a non-USDG vault could back (the statement then says SOME asset); default false' },
+      feePayer: { ...b58J, description: 'simulate only: any funded wallet to pay the simulated rent and fee (default this agent\'s wallet; no key is used)' },
+    },
+    required: ['code', 'request'],
+    additionalProperties: false,
+  },
+  h081_solvency_reserve: {
+    type: 'object',
+    properties: {
+      release: { type: 'boolean', description: 'true: take the reserve back into the shielded balance (plan unless confirm)' },
+      confirm: { type: 'boolean', description: 'with release: true sends it. Default false: nothing is sent, the result is the plan' },
+    },
+    additionalProperties: false,
+  },
 };
 
 /** Example inputs (one per operation) that the schemas accept; the plugin's action examples and tests use them. */
@@ -490,4 +597,11 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'sweep', loanRef: '3' },
   ],
   h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
+  h081_solvency_request: [{ minUsdg: '2500', label: 'acme-desk' }, { min: '1000000000', expectWallet: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv', ttlMinutes: 60, maxRootAge: 16 }],
+  h081_prove_solvency: [{ request: 'h081-solvency-ask:5Hq2Vb7Zr9KcTmW3xLpN4' }, { request: 'h081-solvency-ask:5Hq2Vb7Zr9KcTmW3xLpN4', amountUsdg: '5000', confirm: true }],
+  h081_verify_solvency: [
+    { code: 'h081-solvency:7Yk3LmQ9pR2', request: 'h081-solvency-ask:5Hq2Vb7Zr9KcTmW3xLpN4' },
+    { code: 'h081-solvency:7Yk3LmQ9pR2', request: 'h081-solvency-ask:5Hq2Vb7Zr9KcTmW3xLpN4', onChain: 'simulate' },
+  ],
+  h081_solvency_reserve: [{}, { release: true }, { release: true, confirm: true }],
 };

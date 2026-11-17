@@ -81,6 +81,28 @@ claude mcp list        # h081 should show Connected
 
 On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for example: "Deposit 5 USDG into my H081 account, then withdraw 2 USDG to my fresh wallet 9xQe…".
 
+## Before a deal: prove solvency in one line
+
+The default step before any deal where one agent carries risk (it lends, pays first or extends credit): before a deal where you carry risk, send an `h081-solvency-ask:` for the amount at risk; deal only with the wallet a valid `h081-solvency:` names.
+
+```sh
+npx -y @h081lll/agent solvency ask 2500 --label acme-desk                 # the asker: an h081-solvency-ask: code
+npx -y @h081lll/agent solvency prove <h081-solvency-ask:...> --yes        # the counterparty: an h081-solvency: code
+npx -y @h081lll/agent solvency verify <h081-solvency:...> --ask <h081-solvency-ask:...>
+```
+
+```ts
+const ask = await desk.solvencyRequest({ min: '2500', label: 'acme-desk' });   // ask.code: "h081-solvency-ask:..."
+const { result } = await agent.proveSolvency(ask.code, { confirm: true });     // result.code: "h081-solvency:..."
+const r = await desk.verifySolvency(result.code, { request: ask.code });       // r.ok, r.wallet, r.statement, r.doesNotSay
+```
+
+The proof is made on your machine over a **reserve**: an allowance your account grants to its own reserve key, so that one note holds at least the amount. `pay` never spends it; `solvency reserve --release` takes it back. The first proof for a larger amount tops the reserve up with one grant (about 0.1 SOL; a plan without `--yes`). Proving itself sends nothing.
+
+A valid code says: one note in the H081 pool held at least the amount, at a pool root a few operations old, and the named wallet signed it for this one request. With `assetSound: true` the note can only be USDG. It does **not** say: that the funds are still there (they are not locked), that they are not shown to others at the same time, the total balance, that the note has no pledge, expiry or recipient limit, that the wallet derived the note's key, or anything about debts. Every verify result lists this as `doesNotSay`.
+
+Each request is accepted once and expires within a day. A prover answers at most 4 different amounts per asker per UTC day (8 in all), so nobody can narrow down the reserve.
+
 ## Commands
 
 | Command | What it does |
@@ -102,6 +124,7 @@ On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for 
 | `h081 loan borrow <termsCode> --days N --unlock-days N [--principal X] [--yes]` | Pledge an allowance and get the proof code for the lender. |
 | `h081 lend <open\|fund\|status\|collect\|claim\|settle> […] [--yes]` | The lender side. |
 | `h081 stake <view\|stake\|request-unstake\|unstake> [amount] [--yes]` | H081 in capacity_stake. |
+| `h081 solvency <ask\|prove\|verify\|reserve> […] [--yes]` | Prove "I hold at least X" before a deal (see above). `ask <usdg>` makes a request; `prove <h081-solvency-ask:…>` answers it (a reserve top-up is a plan without `--yes`); `verify <h081-solvency:…> --ask <request>`; `reserve [--release]`. |
 | `h081 check <code>` | Validates any `h081-*` code: kind, network, checksum. |
 | `h081 serve [--port 8081] [--poll 20] [--allow-origin <url>]` | The local API on 127.0.0.1. Downloads the proving files in the background. |
 | `h081 token [--rotate]` | Prints or replaces the API token. |
@@ -135,6 +158,10 @@ Global flags: `--json` (the API's envelope on stdout, logs on stderr), `--yes` (
 | `POST /v1/loans/lend` | `{action: open\|fund\|collect\|claim\|settle, …, confirm?}` |
 | `GET /v1/loans/lent[?loanRef=]` | This agent's loan slots |
 | `GET /v1/stake` / `POST /v1/stake` | `{action: stake\|request_unstake\|unstake, h081?, confirm?}` |
+| `POST /v1/solvency/request` | `{min, label?, expectWallet?, maxRootAge?, ttlMinutes?}` → an `h081-solvency-ask:` code (sends nothing) |
+| `POST /v1/solvency/prove` | `{request, amount?, confirm?}` → an `h081-solvency:` code; a plan when the reserve needs a top-up |
+| `POST /v1/solvency/verify` | `{code, request, onChain?: none\|simulate, allowUnboundAsset?}` → `{ok, reason?, statement, wallet, assetSound, doesNotSay}` |
+| `GET /v1/solvency/reserve` / `POST /v1/solvency/reserve/release` | The reserve; release takes it back (`{confirm?}`) |
 | `POST /v1/codes/check` | `{code}` → `{kind, network, valid, reason?}` |
 | `GET /v1/events` | Server-sent events: `balance.changed`, `allowance.changed`, `op.completed`, `op.failed` |
 

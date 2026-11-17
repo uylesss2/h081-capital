@@ -162,6 +162,14 @@ export function mockBank(over: Partial<Record<keyof BankLike, unknown>> = {}): B
       ? { sent: true, action: 'close', loanRef: req.loanRef, signatures: ['sigClose'] }
       : { sent: false, dryRun: true, plan: { action: 'close', loanRef: req.loanRef }, next: 'nothing was sent' })),
     transfer: vi.fn(async (amount: bigint, _code: string) => ({ signature: 'sigTransfer', amount, amountUsdg: (Number(amount) / 1e6).toString(), to: 'shielded', via: 'direct', shielded: 1n, shieldedUsdg: '0.000001' })),
+    solvencyRequest: vi.fn((req: { min: bigint }) => ({ code: 'h081-solvency-ask:5Hq2Vb7Zr9KcTmW3xLpN4', min: req.min, minUsdg: (Number(req.min) / 1e6).toString(), expiresAt: '2030-01-01T00:30:00.000Z', maxRootAge: 32, expectWallet: null, label: '', verifierKey: 'V', next: 'n', handshake: 'h' })),
+    proveSolvency: vi.fn(async (req: { request: string; amount?: bigint; confirm?: boolean }) => (req.confirm
+      ? { code: 'h081-solvency:7Yk3LmQ9pR2', bound: 2_500_000_000n, boundUsdg: '2500', wallet: 'W', root: '1', reserveId: 5n, reserveRemaining: 2_500_000_000n, reserveRemainingUsdg: '2500', request: { label: '', verifierKey: 'V', expiresAt: 'x' }, selfCheck: { ok: true, assetSound: true }, doesNotSay: ['d'], next: 'n' }
+      : { sent: false, dryRun: true, plan: { action: 'reserve top-up', topUp: req.amount ?? 2_500_000_000n, topUpUsdg: '2500' }, next: 'nothing was sent' })),
+    verifySolvency: vi.fn(async (_code: string, opts: { request: string; onChain?: string }) => ({ ok: true, wallet: 'W', bound: 2_500_000_000n, boundUsdg: '2500', rootAge: 1, assetSound: true, ...(opts.onChain && opts.onChain !== 'none' ? { onChain: { mode: opts.onChain, ok: true } } : {}), doesNotSay: ['d'] })),
+    solvencyReserve: vi.fn(async (req: { release?: boolean; confirm?: boolean } = {}) => (!req.release
+      ? { reserve: { id: 5n, remaining: 2_500_000_000n, remainingUsdg: '2500' }, others: [], totalUsdg: '2500', note: 'n' }
+      : req.confirm ? { sent: true, signatures: ['sigReclaim'], released: [], shielded: 1n, shieldedUsdg: '0.000001' } : { sent: false, dryRun: true, plan: { action: 'release reserve' }, next: 'nothing was sent' })),
     ...over,
   };
   return b as unknown as BankLike & Record<keyof BankLike, ReturnType<typeof vi.fn>>;

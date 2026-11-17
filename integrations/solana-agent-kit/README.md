@@ -78,6 +78,10 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_ALLOWANCE_RECLAIM` | `h081_allowance_reclaim` | `{allowanceId, confirm?: boolean}` |
 | `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close' \| 'sweep', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
 | `H081_TRANSFER` | `h081_transfer` | `{amount|usdg, toAddressCode: "h081-address:…"}` (from the main shielded balance, sent by the agent key) |
+| `H081_SOLVENCY_REQUEST` | `h081_solvency_request` | `{min|minUsdg, label?, expectWallet?, maxRootAge?, ttlMinutes?}`: the default first step before a deal where you carry risk; sends nothing |
+| `H081_PROVE_SOLVENCY` | `h081_prove_solvency` | `{request: "h081-solvency-ask:…", amount?|amountUsdg?, confirm?: boolean}`: a local proof over the reserve; a reserve top-up is a plan without `confirm` |
+| `H081_VERIFY_SOLVENCY` | `h081_verify_solvency` | `{code: "h081-solvency:…", request, onChain?: none|simulate|send, allowUnboundAsset?, feePayer?}`: `ok`, `reason`, `wallet`, `assetSound`, `doesNotSay` |
+| `H081_SOLVENCY_RESERVE` | `h081_solvency_reserve` | `{release?: boolean, confirm?: boolean}` |
 
 The three allowance actions send nothing without `confirm: true`: they return the plan of exactly what would be sent. A delegated child can never be looser than its parent; the error names the limit. `h081_allowance_delegate` needs the delegate proving artifacts, which the site does not ship yet.
 

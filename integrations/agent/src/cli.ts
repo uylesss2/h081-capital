@@ -26,7 +26,7 @@ export const KEY_WARNING = 'Anyone with this code controls the agent\'s funds. S
 /** Every command, as the README lists them (the site's quickstart test checks its commands against this). */
 export const COMMANDS = [
   'init', 'address', 'info', 'fetch-circuits', 'balance', 'history', 'deposit', 'withdraw', 'fee', 'pay', 'transfer', 'allow', 'reclaim',
-  'loan', 'lend', 'stake', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
+  'loan', 'lend', 'stake', 'solvency', 'check', 'serve', 'token', 'backup', 'restore', 'openapi', 'mcp',
 ] as const;
 
 const USAGE = `h081 ${VERSION}: the H081 private bank on this machine (SDK, CLI, local API, MCP)
@@ -51,6 +51,10 @@ usage: h081 <command> [options]
   lend open --pledge-bps N | fund <proofCode> [--principal X] | status [--loan-ref N]
        | collect <loanRef> | claim <loanRef> [--usdg X] | settle <loanRef>   [--yes]
   stake view | stake <h081> | request-unstake <h081> | unstake   [--yes]
+  solvency ask <usdg> [--label L] [--expect-wallet W] [--max-root-age N] [--ttl-minutes N]
+    | prove <h081-solvency-ask:...> [--amount X] [--yes]
+    | verify <h081-solvency:...> --ask <h081-solvency-ask:...> [--simulate] [--allow-unbound-asset]
+    | reserve [--release] [--yes]                   prove "I hold at least X" before a deal (the default pre-deal step)
   check <code>                                  validate any h081-* code: kind, network, checksum
   serve [--port 8081] [--poll 20] [--allow-origin <url>]   the local API on 127.0.0.1
   token [--rotate]                              print or replace the API token
@@ -66,7 +70,7 @@ ${NOTICE}`;
 
 class UsageError extends Error {}
 
-const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged']);
+const BOOL = new Set(['json', 'yes', 'fresh', 'direct', 'force', 'rotate', 'help', 'allow-pledged', 'simulate', 'allow-unbound-asset', 'release']);
 
 export interface ParsedArgs { pos: string[]; flags: Record<string, string | true> }
 
@@ -320,6 +324,29 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
         if (action === 'stake' || action === 'request_unstake') return outcome(await h.stake(action, { ...write, h081: arg(2, '<h081 amount>') }));
         if (action === 'unstake') return outcome(await h.stake('unstake', write));
         throw new UsageError('stake view | stake <h081> | request-unstake <h081> | unstake');
+      }
+
+      case 'solvency': {
+        const action = arg(1, 'ask, prove, verify or reserve');
+        const h = await open();
+        switch (action) {
+          case 'ask': return ok('done', await h.solvencyRequest({ min: arg(2, '<usdg>'), label: str('label'), expectWallet: str('expect-wallet'), maxRootAge: num('max-root-age'), ttlMinutes: num('ttl-minutes') }));
+          case 'prove': return outcome(await h.proveSolvency(arg(2, '<h081-solvency-ask:...>'), { ...write, amount: str('amount') }));
+          case 'verify': {
+            const ask = str('ask');
+            if (!ask) throw new UsageError('solvency verify needs --ask <your h081-solvency-ask: request>');
+            const r = await h.verifySolvency(arg(2, '<h081-solvency:...>'), { request: ask, ...(flags.simulate === true ? { onChain: 'simulate' as const } : {}), ...(flags['allow-unbound-asset'] === true ? { allowUnboundAsset: true } : {}) }) as { ok: boolean; reason?: string; message?: string; statement?: string; wallet?: string; doesNotSay?: string[] };
+            ok('done', r, () => {
+              out(r.ok ? `valid: ${r.statement}
+Deal only with ${r.wallet}.` : `not valid (${r.reason}): ${r.message}`);
+              out('It does NOT say:');
+              for (const x of r.doesNotSay ?? []) out(`  - ${x}`);
+            });
+            return r.ok ? 0 : 1;
+          }
+          case 'reserve': return flags.release === true ? outcome(await h.releaseReserve(write)) : ok('done', await h.solvencyReserve());
+          default: throw new UsageError('solvency ask | prove | verify | reserve');
+        }
       }
 
       case 'check': {

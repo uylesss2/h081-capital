@@ -11,7 +11,8 @@ import { parseAmount } from './units.js';
 
 /** What an operation needs from the bank (H081Bank satisfies it; tests pass a mock). */
 export type BankLike = Pick<H081Bank, 'deposit' | 'withdraw' | 'balance' | 'loanQuote' | 'borrow' | 'stakeView' | 'stake' | 'requestUnstake' | 'unstake' | 'protocolInfo' | 'pay' | 'codeContext'
-  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'> & { decimals: number };
+  | 'allowanceGrant' | 'allowanceDelegate' | 'allowanceReclaim' | 'lendOpen' | 'lendFund' | 'lendStatus' | 'lendCollect' | 'lendClaim' | 'lendSettle' | 'lendClose' | 'lendSweep' | 'transfer'
+  | 'solvencyRequest' | 'proveSolvency' | 'verifySolvency' | 'solvencyReserve'> & { decimals: number };
 
 /** Input an operation refuses (a schema or argument check); nothing was sent. */
 export class InputError extends Error {
@@ -231,6 +232,31 @@ export async function opTransfer(bank: BankLike, args: Args) {
   return bank.transfer(amount, code);
 }
 
+// ---- prove solvency in one line (docs/SOLVENCY-SPEC.md)
+
+export async function opSolvencyRequest(bank: BankLike, args: Args) {
+  return bank.solvencyRequest({
+    min: parseAmount(args, 'minUsdg', USDG_DECIMALS, { baseKey: 'min' }), label: args.label as string | undefined, expectWallet: args.expectWallet as string | undefined,
+    maxRootAge: args.maxRootAge as number | undefined, ttlMinutes: args.ttlMinutes as number | undefined,
+  });
+}
+
+export async function opProveSolvency(bank: BankLike, args: Args) {
+  const request = String(args.request ?? '').trim();
+  if (!request) throw new InputError('request is required: the asker\x27s "h081-solvency-ask:" code');
+  const amount = present(args, 'amount') || present(args, 'amountUsdg') ? parseAmount(args, 'amountUsdg', USDG_DECIMALS) : undefined;
+  return bank.proveSolvency({ request, amount, confirm: confirmed(args) });
+}
+
+export async function opVerifySolvency(bank: BankLike, args: Args) {
+  const onChain = (args.onChain as 'none' | 'simulate' | 'send' | undefined) ?? 'none';
+  return bank.verifySolvency(String(args.code), { request: String(args.request), onChain, allowUnboundAsset: args.allowUnboundAsset === true, feePayer: args.feePayer as string | undefined });
+}
+
+export async function opSolvencyReserve(bank: BankLike, args: Args) {
+  return bank.solvencyReserve({ release: args.release === true, ...(args.confirm === undefined ? {} : { confirm: confirmed(args) }) });
+}
+
 export async function opProtocolInfo(bank: BankLike, _args: Args) {
   return bank.protocolInfo();
 }
@@ -249,6 +275,10 @@ export const OPERATIONS: Record<OpName, (bank: BankLike, args: Args) => Promise<
   h081_stake: opStake,
   h081_protocol_info: opProtocolInfo,
   h081_transfer: opTransfer,
+  h081_solvency_request: opSolvencyRequest,
+  h081_prove_solvency: opProveSolvency,
+  h081_verify_solvency: opVerifySolvency,
+  h081_solvency_reserve: opSolvencyReserve,
 };
 
 /** Checks `args` against the operation's zod schema (strict: unknown or misplaced fields are refused). Both front ends

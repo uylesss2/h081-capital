@@ -306,8 +306,57 @@ export const ROUTES: RouteDef[] = [
     },
   },
   {
+    method: 'POST', path: '/v1/solvency/request', auth: true, summary: 'Asker: make an h081-solvency-ask: request (the default step before a deal where you carry risk)',
+    description: 'Sends nothing, reads nothing. The minimum is rounded UP to the 1 / 2.5 / 5 ladder. Send the code to the counterparty; check its answer with POST /v1/solvency/verify and this request.',
+    body: obj({ min: { ...usdgJ, description: 'the least the counterparty must prove it holds (decimal USDG)' }, label: prop('h081_solvency_request', 'label'), expectWallet: prop('h081_solvency_request', 'expectWallet'), maxRootAge: prop('h081_solvency_request', 'maxRootAge'), ttlMinutes: prop('h081_solvency_request', 'ttlMinutes') }, ['min']),
+    result: '{code, min, minUsdg, expiresAt, maxRootAge, expectWallet, label, verifierKey, next, handshake}',
+    handle: async (c) => {
+      only(c.body, ['min', 'label', 'expectWallet', 'maxRootAge', 'ttlMinutes']);
+      const min = optStr(c.body.min, 'min');
+      if (!min) throw bad('min is required: the least the counterparty must prove it holds (decimal USDG)');
+      return done(await c.h.solvencyRequest({ min, label: optStr(c.body.label, 'label'), expectWallet: optStr(c.body.expectWallet, 'expectWallet'), maxRootAge: optNum(c.body.maxRootAge, 'maxRootAge'), ttlMinutes: optNum(c.body.ttlMinutes, 'ttlMinutes') }));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/solvency/prove', auth: true, write: true, summary: 'Agent: answer a request with an h081-solvency: code (local proof over the reserve)',
+    description: 'The proof is made locally (no service proves for you) and sends nothing. When the reserve is missing or too small the top-up (one grant, about 0.1 SOL) is a plan unless confirm: true. A valid code does NOT say the funds are locked, exclusive, the whole balance, or anything about debts.',
+    body: obj({ request: prop('h081_prove_solvency', 'request'), amount: { ...usdgJ, description: 'reserve size if a top-up is needed (decimal USDG); default the requested minimum' }, confirm: confirmJ }, ['request']),
+    result: 'plan (a top-up is needed), or {code, bound, boundUsdg, wallet, root, reserveId, selfCheck, statement, doesNotSay, next}',
+    handle: async (c) => {
+      only(c.body, ['request', 'amount', 'confirm']);
+      const request = optStr(c.body.request, 'request');
+      if (!request) throw bad('request is required: the asker\x27s "h081-solvency-ask:" code');
+      return out(await c.h.proveSolvency(request, { ...wo(c), amount: optStr(c.body.amount, 'amount') }));
+    },
+  },
+  {
+    method: 'POST', path: '/v1/solvency/verify', auth: true, summary: 'Asker: check an h081-solvency: code against your own request',
+    description: 'RPC reads only (onChain "simulate" adds one simulated transaction; nothing is signed or sent). ok means one note held at least the bound at a recent pool root, presented by the wallet named: deal only with that wallet. Every result lists what the proof does NOT say.',
+    body: obj({ code: prop('h081_verify_solvency', 'code'), request: prop('h081_verify_solvency', 'request'), onChain: { type: 'string', enum: ['none', 'simulate'], description: 'none (default) or simulate (one simulated verify_disclosure transaction; nothing sent)' }, allowUnboundAsset: prop('h081_verify_solvency', 'allowUnboundAsset'), feePayer: prop('h081_verify_solvency', 'feePayer') }, ['code', 'request']),
+    result: '{ok, reason?, message?, statement, wallet, bound, boundUsdg, root, rootAge, assetSound, assetFloor, onChain?, doesNotSay}',
+    handle: async (c) => {
+      only(c.body, ['code', 'request', 'onChain', 'allowUnboundAsset', 'feePayer']);
+      const code = optStr(c.body.code, 'code'), request = optStr(c.body.request, 'request');
+      if (!code || !request) throw bad('code and request are required');
+      const onChain = optStr(c.body.onChain, 'onChain');
+      if (onChain !== undefined && onChain !== 'none' && onChain !== 'simulate') throw bad('onChain must be none or simulate here (sending the check on chain is CLI/SDK only, with confirm)');
+      return done(await c.h.verifySolvency(code, { request, ...(onChain ? { onChain: onChain as 'none' | 'simulate' } : {}), allowUnboundAsset: optBool(c.body.allowUnboundAsset, 'allowUnboundAsset'), feePayer: optStr(c.body.feePayer, 'feePayer') }));
+    },
+  },
+  {
+    method: 'GET', path: '/v1/solvency/reserve', auth: true, summary: 'Agent: the solvency reserve (read-only)',
+    result: '{reserve: {id, remaining, remainingUsdg} | null, others, totalUsdg, note}',
+    handle: async (c) => done(await c.h.solvencyReserve()),
+  },
+  {
+    method: 'POST', path: '/v1/solvency/reserve/release', auth: true, write: true, summary: 'Agent: take the reserve back into the shielded balance',
+    body: obj({ confirm: confirmJ }),
+    result: 'plan, or {signatures, released, shielded}',
+    handle: async (c) => { only(c.body, ['confirm']); return out(await c.h.releaseReserve(wo(c))); },
+  },
+  {
     method: 'POST', path: '/v1/codes/check', auth: true, summary: 'Check any h081-* code: kind, network, valid',
-    body: obj({ code: { type: 'string', description: 'an "h081-address:", "h081-loan-terms:", "h081-loan-proof:" or "h081-key:" code' } }, ['code']),
+    body: obj({ code: { type: 'string', description: 'an "h081-address:", "h081-loan-terms:", "h081-loan-proof:", "h081-solvency-ask:", "h081-solvency:" or "h081-key:" code' } }, ['code']),
     result: '{kind, network, valid, reason?}',
     handle: async (c) => {
       only(c.body, ['code']);
