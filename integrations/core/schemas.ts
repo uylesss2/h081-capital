@@ -43,7 +43,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'account owns (h081_allowance_reclaim). Ids are what h081_pay, h081_allowance_delegate and h081_allowance_reclaim take ' +
     'as `allowanceId`; an id changes after every payment or delegation. Also `shieldedAddressCode`: this account\'s ' +
     'shielded address as an "h081-address:" code, to hand to whoever should pay it privately (h081_pay) or grant it an ' +
-    'allowance. Read-only.',
+    'allowance. `reserve`: the solvency reserve (set aside for h081_prove_solvency; h081_pay never spends it; not in grantedToOthers), or null. Read-only.',
   h081_loan_quote:
     'Price a stream-backed loan without sending anything. From a lender\'s `h081-loan-terms:` code (or `pledgeBps` and ' +
     '`minRemaining` directly) it returns the largest principal that pledge can back (minRemaining * pledgeBps / 10000), ' +
@@ -172,7 +172,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'is accepted once, the expected wallet, the public inputs, the wallet\'s signature, the zero-knowledge proof against the ' +
     'pinned ceremony key, that the pool root is at most maxRootAge operations old, and that the bound is above what any ' +
     'non-USDG vault could back (`assetSound`; otherwise ok is false with asset_not_bound unless `allowUnboundAsset`). ' +
-    'Returns ok, the first failing reason, the statement, the wallet to deal with, and doesNotSay. RPC reads only. ' +
+    'Returns ok, the first failing reason, the statement, the wallet to deal with, and doesNotSay; `warning` when the request was ' +
+    'not made by this wallet (then its maker chose the nonce, expiry and root age). RPC reads only. ' +
     '`onChain: "simulate"` also runs the deployed verify_disclosure as ONE simulated transaction (nothing signed or sent; ' +
     'any funded `feePayer`); `"send"` sends it, which puts the reserve key, the bound and the audience on chain for good. ' +
     SOLVENCY_NOT_SAID,

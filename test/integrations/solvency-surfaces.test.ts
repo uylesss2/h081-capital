@@ -15,7 +15,7 @@ import { checkCode } from '../../integrations/agent/src/h081.js';
 import { main } from '../../integrations/agent/src/cli.js';
 import { configFromEnv } from '../../integrations/core/constants.js';
 import { mockBank } from './helpers.js';
-import { makeAgent, startGateway, tempHome, type AgentSetup, type Gateway } from './agent-helpers.js';
+import { makeAgent, startGateway, stubBank, tempHome, type AgentSetup, type Gateway } from './agent-helpers.js';
 
 const POOL_CTX = { cluster: 'mainnet-beta', program: MAINNET.programs.pool, mint: MAINNET.usdg.mint };
 const ask = encodeSolvencyRequest(POOL_CTX, {
@@ -94,6 +94,12 @@ describe('@h081lll/agent: SDK, local API and CLI', () => {
   let g: Gateway;
   beforeAll(async () => { a = await makeAgent(); g = await startGateway(a.h); });
   afterAll(async () => { await g.close(); });
+
+  it('balance shows the reserve (and null without one)', async () => {
+    expect((await a.h.balance({ fresh: true })).reserve).toBeNull();
+    const withReserve = await makeAgent({ bank: stubBank({ balance: async () => ({ shielded: 1n, shieldedUsdg: '0.000001', walletUsdg: 0n, walletUsdgHuman: '0', walletSol: 0.1, subAccounts: [], agentAllowances: [], grantedToOthers: [], heldBySubAccounts: [], reserve: { id: 5n, remaining: 2_500_000_000n, remainingUsdg: '2500' }, caps: null }) }) });
+    expect((await withReserve.h.balance({ fresh: true })).reserve).toEqual({ id: '5', remaining: '2500' });
+  });
 
   it('the SDK: a request, a plan when the reserve needs a top-up, the code once confirmed, a verify', async () => {
     expect(await a.h.solvencyRequest({ min: '2500', label: 'acme' })).toMatchObject({ code: expect.stringMatching(/^h081-solvency-ask:/) });

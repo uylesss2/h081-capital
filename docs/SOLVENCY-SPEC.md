@@ -287,7 +287,7 @@ Where it lives:
 | tests | `test/integrations/solvency.test.ts` (codes, vectors, ladder, cap, one test per refusal over a real disclose proof), `test/integrations/solvency-surfaces.test.ts`, `test/solana/solvency.test.ts` (`npm run test:solana:solvency`, private validator on rpc 28899) |
 
 Measured on localnet (`solana/compute-units-solvency.json`): the one-transaction simulated check is **821 bytes**
-(limit 1,232) and uses **119,231 CU**; it ran with a fee payer whose key the test never held, and that payer's balance
+(limit 1,232) and uses about **118k-121k CU** (117,731, 119,231 and 120,731 in three runs; the file keeps the latest); it ran with a fee payer whose key the test never held, and that payer's balance
 was unchanged afterwards. So 3.3's "expected to fit" is now a measured fact; the 3-transaction fallback is not needed.
 
 Localnet also showed, with real proofs: plan then confirm (nothing sent before confirm); a second verify of the same

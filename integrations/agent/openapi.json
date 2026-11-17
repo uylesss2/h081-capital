@@ -135,7 +135,7 @@
         ],
         "responses": {
           "200": {
-            "description": "ok: {shielded, wallet:{usdg, sol}, caps, allowances:[{id, remaining, dailyCap?, expires?, ...}], addressCode, syncedAt}",
+            "description": "ok: {shielded, wallet:{usdg, sol}, caps, allowances:[{id, remaining, dailyCap?, expires?, ...}], reserve:{id, remaining}|null, addressCode, syncedAt}",
             "content": {
               "application/json": {
                 "schema": {

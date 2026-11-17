@@ -236,6 +236,8 @@ export interface SolvencyVerifyResult {
   reserveKey?: string;
   request?: { label: string; min: bigint; minUsdg: string; expiresAt: string; askedByThisWallet: boolean };
   onChain?: { mode: 'simulate' | 'send'; ok: boolean; computeUnits?: number; txBytes?: number; error?: string; note: string };
+  /** set when the request was not made by this wallet: whoever supplied it chose its nonce, expiry and root age */
+  warning?: string;
   doesNotSay: readonly string[];
 }
 
@@ -357,7 +359,9 @@ export async function verifySolvency(host: SolvencyHost, code: string, opts: Sol
     if (!onChain.ok) return fail('on_chain_rejected', 'the deployed verify_disclosure refused it', { ...sound, onChain });
   }
   if (!opts.selfCheck) recordNonce(host, r.nonce, r.expiry, now);
-  return { ok: true, statement, ...sound, ...(onChain ? { onChain } : {}), doesNotSay };
+  const warning = request.askedByThisWallet || opts.selfCheck ? undefined
+    : `this request was not made by this wallet (its verifierKey is ${new PublicKey(r.verifierKey).toBase58()}): whoever supplied it chose its nonce, its expiry (${request.expiresAt}) and its root age (${r.maxRootAge}), so freshness rests on them. Ask with h081_solvency_request yourself for a check you control.`;
+  return { ok: true, statement, ...sound, ...(onChain ? { onChain } : {}), ...(warning ? { warning } : {}), doesNotSay };
 }
 
 // ---- prove (agent)

@@ -108,6 +108,8 @@ export interface BalanceResult {
   wallet: { usdg: string; sol: string };
   caps: { perDeposit: string; total: string; inVault: string; paused: boolean } | null;
   allowances: Array<{ id: string; remaining: string; holder: string; agentIndex?: number; dailyCap?: string; maxPerTx?: string; expires?: string; reclaimable: boolean; pledged: boolean }>;
+  /** the solvency reserve (set aside for solvency proofs; pay never spends it), or null */
+  reserve: { id: string; remaining: string } | null;
   addressCode: string;
   syncedAt: string;
 }
@@ -339,6 +341,7 @@ export class H081 {
       wallet: { usdg: b.walletUsdgHuman ?? u(b.walletUsdg), sol: String(b.walletSol) },
       caps: b.caps ? { perDeposit: u(b.caps.perDeposit), total: u(b.caps.total), inVault: u(b.caps.inVault), paused: b.caps.paused } : null,
       allowances: rows,
+      reserve: b.reserve ? { id: String(b.reserve.id), remaining: u(b.reserve.remaining) } : null,
       addressCode: this.addressCodeValue,
       syncedAt: new Date().toISOString(),
     };

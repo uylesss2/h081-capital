@@ -286,6 +286,7 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     expect(r.request).toMatchObject({ label: 'acme-desk', askedByThisWallet: true });
     expect(r.statement).toMatch(/at least 2500 USDG remaining/);
     expect(r.doesNotSay).toEqual(SOLVENCY_DOES_NOT_SAY);
+    expect(r.warning).toBeUndefined();
     const again = await verifySolvency(h, present(), { request: req.code, now: NOW });
     expect(again).toMatchObject({ ok: false, reason: 'nonce_reused' });
     expect(again.doesNotSay).toEqual(SOLVENCY_DOES_NOT_SAY);
@@ -297,7 +298,9 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     const h = host(v2, { ...chainOk(), capsFail: true });
     expect(await verifySolvency(h, present(), { request: req.code, now: NOW })).toMatchObject({ ok: false, reason: 'asset_floor_unavailable' });
     h.connection = host(v2, chainOk()).connection;
-    expect(await verifySolvency(h, present(), { request: req.code, now: NOW })).toMatchObject({ ok: true, request: { askedByThisWallet: false } });
+    const foreign = await verifySolvency(h, present(), { request: req.code, now: NOW });
+    expect(foreign).toMatchObject({ ok: true, request: { askedByThisWallet: false } });
+    expect(foreign.warning).toMatch(/not made by this wallet/);
     expect(await verifySolvency(h, present(), { request: req.code, now: NOW })).toMatchObject({ ok: false, reason: 'nonce_reused' });
   });
 

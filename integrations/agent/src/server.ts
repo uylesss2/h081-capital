@@ -135,7 +135,7 @@ export const ROUTES: RouteDef[] = [
     method: 'GET', path: '/v1/balance', auth: true, summary: 'Shielded and wallet balances, caps, allowances',
     description: 'Served from cache when the last sync is under 15 s old; fresh=1 forces a sync.',
     query: [{ name: 'fresh', schema: { type: 'string', enum: ['0', '1'] }, description: '1: sync now' }],
-    result: '{shielded, wallet:{usdg, sol}, caps, allowances:[{id, remaining, dailyCap?, expires?, ...}], addressCode, syncedAt}',
+    result: '{shielded, wallet:{usdg, sol}, caps, allowances:[{id, remaining, dailyCap?, expires?, ...}], reserve:{id, remaining}|null, addressCode, syncedAt}',
     handle: async (c) => done(await c.h.balance({ fresh: fresh(c.query) })),
   },
   {

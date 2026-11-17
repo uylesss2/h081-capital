@@ -12,10 +12,8 @@ LEDGER="$SOLANA_DIR/test-ledger/solvency"
 POOL_ID="${SOLVENCY_POOL_ID:-AzES8Vd7NmoxdSrEBbwDNAwn2pyoAz5m5w7bmVas5Si3}"
 # Keypair.fromSeed(sha256("h081 localnet stipend_pool upgrade authority")): LOCALNET_UPGRADE_AUTHORITY in test/solana/config-authority.ts
 UPGRADE_AUTHORITY=6CMruTpcTHYowyPcKHkh8YATGUgwBrSfjsHsVDtBV77g
-mkdir -p "$LEDGER" "$HOME/solvency-so"
-# the validator reads the .so from the WSL filesystem, not over /mnt/c
-cp "$SOLANA_DIR/target-so/stipend_pool.so" "$HOME/solvency-so/stipend_pool.so"
+mkdir -p "$LEDGER"
 exec solana-test-validator \
   --ledger "$LEDGER" --reset --quiet --rpc-port 28899 \
   --gossip-port 28902 --faucet-port 28903 --dynamic-port-range 28910-28990 \
-  --upgradeable-program "$POOL_ID" "$HOME/solvency-so/stipend_pool.so" "$UPGRADE_AUTHORITY"
+  --upgradeable-program "$POOL_ID" "$SOLANA_DIR/target-so/stipend_pool.so" "$UPGRADE_AUTHORITY"

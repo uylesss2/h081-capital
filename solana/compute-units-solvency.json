@@ -1,7 +1,7 @@
 {
   "note": "test/solana/solvency.test.ts on a private localnet validator; verify_disclosure as ONE simulated transaction (buffer_open, buffer_write 448 B, verify), sigVerify off",
   "simulate": {
-    "computeUnits": 119231,
+    "computeUnits": 120731,
     "txBytes": 821,
     "fits": true,
     "feePayerKeyHeld": false
