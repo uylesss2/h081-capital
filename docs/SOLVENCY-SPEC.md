@@ -162,8 +162,13 @@ signature = ed25519(walletKey, sha256("h081-solvency-present|v1|" || requestDige
   reserve's figures anywhere".
 - `min` snaps UP to the reputation ladder (1 / 2.5 / 5 x 10^k USDG) when asking, DOWN when proving directly. The
   prover refuses a 5th distinct bound per verifierKey per UTC day and a 9th across all (kept in the cache dir, in
-  memory without one): a verifier cannot binary-search the reserve. (Leak is bounded anyway: the reserve's size is the
-  agent's choice, not its balance.)
+  memory without one): a verifier cannot binary-search the reserve. Every ATTEMPT counts, recorded before the reserve
+  is looked at, so a request that ends in a plan or a refusal (bound above the reserve) uses a slot like a proof does.
+  (Leak is bounded anyway: bounds are ladder steps and the reserve's size is the agent's choice, not its balance.)
+  Limits, not closed: `verifierKey` is not authenticated and keys are free, so the per-key cap does not stop one asker
+  using many keys (only the global cap does), and anyone can use up the global cap for the UTC day with 8 asks, after
+  which the prover refuses new bounds to everyone until midnight UTC (a repeat of a bound already proven that day still
+  works). Signing requests would not help (a new key per ask is free); an allow-list of trusted askers would.
 
 ## 3. Verification paths
 

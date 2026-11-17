@@ -101,7 +101,7 @@ The proof is made on your machine over a **reserve**: an allowance your account 
 
 A valid code says: one note that was written into the H081 pool at some point held at least the amount, the proof was made recently (its pool root is a few operations old), and the named wallet signed it for this one request. The pool's tree keeps every note and the proof checks no nullifier, so the note may have been spent or reclaimed before the proof was made: a recent root dates the proof, not the note. With `assetSound: true` the note can only be USDG. It does **not** say: that the funds are there now or were there when the proof was made (spent notes still prove; nothing is locked), that they are not shown to others at the same time, the total balance, that the note has no pledge, expiry or recipient limit, that the wallet derived the note's key, or anything about debts. Every verify result lists this as `doesNotSay`.
 
-Each request is accepted once and expires within a day. A prover answers at most 4 different amounts per asker per UTC day (8 in all), so nobody can narrow down the reserve.
+Each request is accepted once and expires within a day. A prover answers at most 4 different amounts per asker key per UTC day (8 in all; every attempt counts, answered or not), so nobody can narrow down the reserve. Asker keys are not authenticated: one asker with many keys meets only the overall limit, and anyone can use up the 8 for the day (a repeated amount still works).
 
 ## Commands
 

@@ -16,7 +16,9 @@
 //   - the asset is private in the circuit: the claim is reported asset-sound only when the bound is above what any
 //     non-USDG vault could back (assetFloor). A read failure there is a failure, never a pass;
 //   - bounds snap to the 1 / 2.5 / 5 ladder and the prover refuses a 5th distinct bound per verifier key per UTC day and
-//     a 9th across all (probing cap), so a verifier cannot binary-search the reserve;
+//     a 9th across all (probing cap; every attempt counts, answered or not). Limits: the verifier key is unauthenticated
+//     and keys are free, so the per-key cap does not stop one asker with many keys (the global cap does), and anyone
+//     can use up the global cap for the day; the ladder alone already limits what any number of asks can learn;
 //   - every verify result carries `doesNotSay` (spec section 6) verbatim.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -497,7 +499,9 @@ export async function proveSolvency(host: SolvencyHost, req: ProveSolvencyArgs):
   if (!isZero(r.expectWallet) && !new PublicKey(r.expectWallet).equals(me)) throw new Error(`that request is for the wallet ${new PublicKey(r.expectWallet).toBase58()}, not this agent's ${me.toBase58()}. Nothing was sent.`);
   // the bound: the request's minimum on the ladder (a hostile asker cannot pick a fine-grained bound)
   const bound = snapUp(r.min, d);
-  checkSolvencyProbe(host, r.verifierKey, bound, false);
+  // counted as an ATTEMPT, before the reserve is looked at: a request that ends in a plan or a refusal (the bound is
+  // above the reserve) tells the asker as much as a proof does, so it uses up a slot too
+  checkSolvencyProbe(host, r.verifierKey, bound, true);
   await host.sync();
   const notes = reserveNotes(host).filter(isPlain);
   let reserve = notes.filter((n) => n.allowance.remaining >= bound).at(-1); // the smallest that suffices
@@ -543,7 +547,6 @@ export async function proveSolvency(host: SolvencyHost, req: ProveSolvencyArgs):
   const argsBytes = encodeDiscloseArgs(made.args);
   const signature = ed25519.sign(presentationMessage(r.digest, argsBytes), host.signer.secretKey.subarray(0, 32));
   const code = encodeSolvencyCode(host.codeContext, { requestDigest: r.digest, proof: encodeProof(made.proof.proof), args: argsBytes, wallet: me.toBytes(), signature });
-  checkSolvencyProbe(host, r.verifierKey, bound, true);
   // verify it as the asker would, before handing it over (no nonce store: that is the asker's)
   const self = await verifySolvency(host, code, { request: req.request, selfCheck: true, allowUnboundAsset: true, now });
   // an RPC that refuses getProgramAccounts leaves the asset floor unknown: the proof is still good, the asker's check decides

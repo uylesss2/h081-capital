@@ -165,7 +165,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'small it must be topped up first (a smaller reserve is reclaimed, then one plain allowance is granted): WITHOUT ' +
     '`confirm: true` NOTHING IS SENT and the result is the plan; with it the top-up is sent (the agent wallet is visible as ' +
     'the sender of a grant; ~0.1 SOL; grant circuit) and then the proof is made. Proving itself sends nothing. Refuses a 5th ' +
-    'different bound to one asker per UTC day (9th overall), so nobody can narrow down the reserve. Needs the disclose ' +
+    'different bound to one asker key per UTC day (9th overall; every attempt counts, answered or not), so nobody can narrow ' +
+    'down the reserve; asker keys are unauthenticated, so anyone can use up the daily 8 (a repeated bound still works). Needs the disclose ' +
     'circuit (11 MB, fetched on first use). ' + SOLVENCY_NOT_SAID + ' ' + NOTICE_SHORT,
   h081_verify_solvency:
     'Check an "h081-solvency:" code against YOUR OWN "h081-solvency-ask:" request: the request it answers, expiry, a request ' +

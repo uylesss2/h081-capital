@@ -26,7 +26,7 @@ import {
 } from '../../integrations/core/codes.js';
 import { CIRCUIT_HASHES, MAINNET } from '../../integrations/core/constants.js';
 import { deriveReserveSk, deriveLenderSk, deriveAgentSk, deriveAccountSk } from '../../integrations/core/keys.js';
-import { type SolvencyHost, checkSolvencyProbe, decodeProofBytes, solvencyAskNonce, verifySolvency } from '../../integrations/core/solvency.js';
+import { type SolvencyHost, checkSolvencyProbe, decodeProofBytes, proveSolvency, solvencyAskNonce, verifySolvency } from '../../integrations/core/solvency.js';
 
 const U = 1_000_000n;
 const CTX: CodeContext = { cluster: 'mainnet-beta', program: MAINNET.programs.pool, mint: MAINNET.usdg.mint };
@@ -157,6 +157,21 @@ describe('the ladder and the probing cap', () => {
     const eight = [...log, ...[5n, 6n, 7n, 8n].map((b) => ({ day, verifier: 'W', bound: (b * U).toString() }))];
     expect(probeBlock(eight, 'X', 9n * U, t)).toMatch(/8 different solvency bounds today across all verifiers/);
     expect(probeBlock(eight, 'X', 1n * U, t)).toBeUndefined();
+  });
+
+  it('an attempt counts even when it ends in a plan or a refusal (probing from above the reserve is not free)', async () => {
+    await initCrypto();
+    const h = {
+      config: { cluster: 'mainnet-beta', poolProgramId: POOL }, signer: Keypair.generate(), decimals: 6, codeContext: CTX, usdg: USDG, log: () => {}, sync: async () => {},
+      reserve: { keys: { pk: 5n } }, owner: { registerMint: () => 1n, grantedAllowances: () => [], balance: () => 0n }, grantCeiling: () => {},
+    } as unknown as SolvencyHost;
+    const v = new Uint8Array(32).fill(4);
+    const ask = (usdg: bigint) => request({ verifierKey: v, min: usdg * U, expiry: BigInt(Math.floor(Date.now() / 1000) + 600) }).code;
+    // an empty account: every request ends in a refusal (nothing to reserve), and each still counts
+    for (const b of [1n, 5n, 10n, 25n]) await expect(proveSolvency(h, { request: ask(b) })).rejects.toThrow(/Deposit first/);
+    await expect(proveSolvency(h, { request: ask(50n) })).rejects.toThrow(/4 different solvency bounds/);
+    // a repeat is still free
+    await expect(proveSolvency(h, { request: ask(10n) })).rejects.toThrow(/Deposit first/);
   });
 
   it('the bank keeps the log (in memory without a cache dir) and records only on request', () => {
