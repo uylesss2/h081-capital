@@ -37,9 +37,13 @@ Facts the circuit fixes, each a limit this spec must design around:
    contents can prove for that `agentPk`: the granter, anyone holding the memo's viewing key, or the x402
    `prove-disclose` service once it was sent the figures. So `proveSolvency` proves locally only, on a note only this
    account knows (section 1).
-3. **Point in time, no nullifier.** A note that was spent or reclaimed still verifies against any root in the 1024-root
-   ring (`merkle.rs` `ROOT_HISTORY`). Nothing locks the funds; the same note can be shown to any number of verifiers.
-   The verifier enforces root recency (section 3.2).
+3. **No nullifier: a note that ever existed proves forever.** The pool's tree is append-only (`merkle.rs` `insert`),
+   so a note that was spent or reclaimed is still a leaf of every LATER root, not only of the 1024 roots in the ring.
+   Anyone who knows its figures can prove over it at the current root (rootAge 0) at any time. Nothing locks the funds;
+   the same note can be shown to any number of verifiers. Root recency (section 3.2) dates the PROOF; it is not a
+   freshness or liveness guarantee for the note. Closing this needs a circuit that exposes (or binds) the note's
+   nullifier so a verifier can check that no `["nf", nullifier]` account exists: a new circuit, ceremony and verifier
+   (owner decision D6). Until then every surface says only that the note existed at some time in the pool's history.
 4. **One note.** It cannot sum notes and does not see the shielded balance (transact notes). An agent with 600 + 500
    in two allowances cannot prove 1,000.
 5. **Private policy.** `expiry`, `recipientRoot`, `pledgeBps`, `lender`, caps are private: a note's `remaining` may be
@@ -168,7 +172,10 @@ Result: `{ ok, reason?, statement, wallet, bound, boundUsdg, root, rootAge, asse
 
 `decodePool` gives `roots[1024]` and `current_root_index`. `rootAge = (current_root_index - i) mod 1024` for the slot
 `i` holding `root`; refuse when absent (`unknown_root`) or `rootAge > request.maxRootAge` (`stale_root`). The prover
-syncs and proves at the current root right before handing the code over.
+syncs and proves at the current root right before handing the code over. What this buys: a proof made for this
+request is presented within a few operations (with the audience binding, a relayed or stockpiled presentation of an
+honest reserve goes stale). What it does NOT buy (fact 3): any statement that the note is unspent, since a spent note
+still proves at the current root.
 
 ### 3.3 On chain
 
@@ -228,20 +235,24 @@ Localnet (`npm run test:solana:pool` style: `scripts/solana-localnet.mjs restart
   `'simulate'`; record the simulated CU and whether the single transaction fits.
 - the simulated check runs with a fee payer whose key the test does not hold.
 - reserve top-up: smaller reserve reclaimed then regranted; `pay` never spends the reserve.
-- reclaim after proving: the old code still verifies against its root until `maxRootAge` operations pass, then `stale_root`.
+- reclaim after proving: the old code still verifies against its root until `maxRootAge` operations pass, then `stale_root`;
+  and a FRESH proof over the released note at the current root still verifies (`ok: true, rootAge: 0`): the limit of fact 3, pinned.
 - junk mint: a second mint with default caps, deposit, self-grant, prove `bound = 1e10` -> `assetSound: false`; after
   `set_asset_caps(junk, 0, 0)` with its vault drained, true; after `set_default_caps(0,0)` a new vault cannot take a deposit.
 - integration tests for MCP / Agent Kit / agent CLI / local API (`npm run test:integrations`).
 
 ## 6. What a solvency proof says, and what it does NOT
 
-Says: "The holder of the reserve note for this request proved that ONE allowance note in the H081 pool, as of a pool
-root at most `rootAge` operations old, had at least `bound` base units remaining; the wallet `wallet` signed this
-presentation for this one request." With `assetSound: true`: no non-USDG vault could back that many units, so the
+Says: "Someone who knows the figures of ONE allowance note that was written into the H081 pool at some point (it may
+since have been spent or reclaimed: the circuit checks no nullifier) proved that the note had at least `bound`
+remaining when it was written; the proof was made against a pool root `rootAge` operations old, which dates when the
+proof was made, not when the note was last unspent; the wallet `wallet` signed this presentation for this one request." With `assetSound: true`: no non-USDG vault could back that many units, so the
 note is USDG.
 
 Does NOT say (every verifier surface prints this):
-1. that the funds are still there: they are not locked and can be reclaimed or spent right after;
+1. that the funds are there now, or were there when the proof was made: the note may have been spent or reclaimed
+   BEFORE the proof (append-only tree, no nullifier check: a spent note still proves against the CURRENT root; rootAge
+   dates the proof, not the note) or right after (nothing is locked);
 2. that they are not shown to other counterparties at the same time (no exclusivity);
 3. the account's total balance (one note; shielded notes are not counted);
 4. that the note is free of a pledge, an expiry or a recipient restriction (private policy; only the agent's own
@@ -293,7 +304,8 @@ was unchanged afterwards. So 3.3's "expected to fit" is now a measured fact; the
 Localnet also showed, with real proofs: plan then confirm (nothing sent before confirm); a second verify of the same
 code is `nonce_reused`; `pay` never picks the reserve; a larger request reclaims the smaller reserve and grants one;
 a released reserve's proof still verified one operation later and was `stale_root` three operations later with
-`maxRootAge: 2`; a junk mint at the default caps (scaled to 10 units) made a valid proof that was reported
+`maxRootAge: 2`, while a FRESH proof over the same released note at the current root verified `ok: true, rootAge 0`
+(fact 3: root recency dates the proof, not the note); a junk mint at the default caps (scaled to 10 units) made a valid proof that was reported
 `asset_not_bound` (and an honest USDG claim of the same size too), `set_asset_caps(junk, 0, 0)` plus the drained
 vault made the floor 0 again, and after `set_default_caps(0, 0)` a new vault refused a deposit.
 

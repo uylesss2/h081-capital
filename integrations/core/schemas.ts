@@ -170,7 +170,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
   h081_verify_solvency:
     'Check an "h081-solvency:" code against YOUR OWN "h081-solvency-ask:" request: the request it answers, expiry, a request ' +
     'is accepted once, the expected wallet, the public inputs, the wallet\'s signature, the zero-knowledge proof against the ' +
-    'pinned ceremony key, that the pool root is at most maxRootAge operations old, and that the bound is above what any ' +
+    'pinned ceremony key, that the pool root is at most maxRootAge operations old (that dates the PROOF only: disclose checks ' +
+    'no nullifier, so a note spent or reclaimed earlier still proves at the current root), and that the bound is above what any ' +
     'non-USDG vault could back (`assetSound`; otherwise ok is false with asset_not_bound unless `allowUnboundAsset`). ' +
     'Returns ok, the first failing reason, the statement, the wallet to deal with, and doesNotSay; `warning` when the request was ' +
     'not made by this wallet (then its maker chose the nonce, expiry and root age). RPC reads only. ' +
@@ -180,8 +181,9 @@ export const DESCRIPTIONS: Record<OpName, string> = {
   h081_solvency_reserve:
     'The solvency reserve: the allowance this account granted to its own reserve key so h081_prove_solvency can prove ' +
     '"at least X" over one note. Shows it (read-only), or with `release: true` takes it back into the shielded balance: ' +
-    'WITHOUT `confirm: true` NOTHING IS SENT and the result is the plan. Proofs already handed out keep verifying until their ' +
-    'pool root is older than the asker allows. ' + NOTICE_SHORT,
+    'WITHOUT `confirm: true` NOTHING IS SENT and the result is the plan. A released note stays in the pool\'s tree: proofs ' +
+    'already handed out keep verifying until their root is older than each asker allows, and whoever knows its figures (this ' +
+    'account) could still prove over it later; a verifier cannot tell (see doesNotSay). ' + NOTICE_SHORT,
 };
 
 // ------------------------------------------------------------------ zod

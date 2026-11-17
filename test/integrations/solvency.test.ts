@@ -16,7 +16,7 @@ import { encodeProof, fieldOf } from '../../src/solana/field.js';
 import { poolPda, vaultPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE, encodeDiscloseArgs } from '../../src/solana/program.js';
 import {
-  SOLVENCY_DOES_NOT_SAY, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience,
+  SOLVENCY_DOES_NOT_SAY, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience, solvencyStatement,
 } from '../../src/solvency.js';
 import {
   type CodeContext, CodeError, SOLVENCY_ASK_PREFIX, SOLVENCY_PREFIX, decodeSolvencyCode, decodeSolvencyRequest, encodeAddressCode, encodeSolvencyCode,
@@ -163,6 +163,17 @@ describe('the ladder and the probing cap', () => {
     for (const b of [1n, 2n, 3n, 4n]) checkSolvencyProbe(host, v, b * U, true);
     expect(() => checkSolvencyProbe(host, v, 5n * U, false)).toThrow(/4 different/);
     expect(() => checkSolvencyProbe(host, v, 2n * U, true)).not.toThrow();
+  });
+});
+
+describe('what a proof says: a note that existed, not one still unspent (disclose has no nullifier)', () => {
+  it('the statement never presents root recency as liveness, and doesNotSay says a spent note still proves at the current root', () => {
+    const s = solvencyStatement({ bound: '2500', symbol: 'USDG', rootAge: 0, wallet: 'W', assetSound: true });
+    expect(s).toMatch(/may since have been spent or reclaimed/);
+    expect(s).toMatch(/when the proof was made, not when the note/);
+    expect(s).not.toMatch(/as of a pool root/);
+    expect(SOLVENCY_DOES_NOT_SAY[0]).toMatch(/still proves against the CURRENT root/);
+    expect(SOLVENCY_DOES_NOT_SAY[0]).toMatch(/BEFORE the proof/);
   });
 });
 

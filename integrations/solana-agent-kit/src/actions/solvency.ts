@@ -37,7 +37,7 @@ export const verifySolvencyAction = makeAction({
   similes: ['check a solvency proof', 'verify an h081-solvency code', 'check proof of funds from a counterparty'],
   examples: [[{
     input: { code: CODE, request: ASK },
-    output: { status: 'success', ok: true, wallet: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv', boundUsdg: '2500', rootAge: 2, assetSound: true, doesNotSay: ['that the funds are still there: ...'] },
+    output: { status: 'success', ok: true, wallet: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv', boundUsdg: '2500', rootAge: 2, assetSound: true, doesNotSay: ['that the funds are there now, or were there when the proof was made: ...'] },
     explanation: 'Valid: one note held at least 2,500 USDG a couple of pool operations ago; deal only with that wallet. It does not lock the funds.',
   }, {
     input: { code: CODE, request: ASK },

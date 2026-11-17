@@ -10,8 +10,9 @@
 //     it, so the reserve's figures never leave this process and nothing here calls the x402 prove-disclose service;
 //   - the proof is bound to ONE request and ONE wallet: audience = H(requestDigest || wallet), and the wallet signs
 //     H(requestDigest || args). A verifier recomputes the digest from its own request, never from the code;
-//   - the root must be at most `maxRootAge` pool operations old (decodePool's root ring), so a reclaimed reserve stops
-//     verifying soon after;
+//   - the root must be at most `maxRootAge` pool operations old (decodePool's root ring). That dates the PROOF only: the
+//     tree is append-only and disclose checks no nullifier, so a spent or reclaimed note still proves at the current
+//     root. Nothing here can show the note is unspent (doesNotSay item 1; spec section 0 fact 3);
 //   - the asset is private in the circuit: the claim is reported asset-sound only when the bound is above what any
 //     non-USDG vault could back (assetFloor). A read failure there is a failure, never a pass;
 //   - bounds snap to the 1 / 2.5 / 5 ladder and the prover refuses a 5th distinct bound per verifier key per UTC day and
@@ -360,7 +361,7 @@ export async function verifySolvency(host: SolvencyHost, code: string, opts: Sol
   }
   if (!opts.selfCheck) recordNonce(host, r.nonce, r.expiry, now);
   const warning = request.askedByThisWallet || opts.selfCheck ? undefined
-    : `this request was not made by this wallet (its verifierKey is ${new PublicKey(r.verifierKey).toBase58()}): whoever supplied it chose its nonce, its expiry (${request.expiresAt}) and its root age (${r.maxRootAge}), so freshness rests on them. Ask with h081_solvency_request yourself for a check you control.`;
+    : `this request was not made by this wallet (its verifierKey is ${new PublicKey(r.verifierKey).toBase58()}): whoever supplied it chose its nonce, its expiry (${request.expiresAt}) and its root age (${r.maxRootAge}), so whether this proof was made for you, and recently, rests on them. Ask with h081_solvency_request yourself for a check you control.`;
   return { ok: true, statement, ...sound, ...(onChain ? { onChain } : {}), ...(warning ? { warning } : {}), doesNotSay };
 }
 
@@ -460,7 +461,7 @@ export async function proveSolvency(host: SolvencyHost, req: ProveSolvencyArgs):
     ...(topUp ? { topUp } : {}),
     selfCheck: soft ? { ok: true, reason: self.reason } : { ok: true, assetSound: self.assetSound },
     statement: self.statement, doesNotSay: SOLVENCY_DOES_NOT_SAY,
-    next: `hand this code to the asker now (it is valid for about ${r.maxRootAge} pool operations and until ${iso(r.expiry)}); they check it with h081_verify_solvency and their request. The reserve stays set aside until you release it (h081_solvency_reserve release).`,
+    next: `hand this code to the asker now (it passes their check for about ${r.maxRootAge} pool operations and until ${iso(r.expiry)}); they check it with h081_verify_solvency and their request. The reserve stays set aside until you release it (h081_solvency_reserve release); the proof cannot show that it still is.`,
   };
 }
 
@@ -497,7 +498,7 @@ export async function solvencyReserve(host: SolvencyHost, req: { release?: boole
   if (!req.confirm) {
     return {
       sent: false, dryRun: true, plan: { action: 'release reserve', reclaim: views, backToShieldedUsdg: fromUnits(total, d), sender: host.signer.publicKey.toBase58() },
-      next: 'nothing was sent. Call h081_solvency_reserve again with release: true and confirm: true to take it back; proofs already handed out keep verifying until their root is older than the asker allows',
+      next: 'nothing was sent. Call h081_solvency_reserve again with release: true and confirm: true to take it back; proofs already handed out keep verifying until their root is older than the asker allows, and the released note stays in the pool\'s tree (a proof over it cannot show it was released)',
     };
   }
   await host.requireArtifacts('spend');

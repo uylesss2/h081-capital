@@ -8,6 +8,9 @@
 //   - the agent's Solana wallet signs sha256("h081-solvency-present|v1|" || requestDigest || DiscloseArgs bytes).
 // The asset is private in the circuit; `assetFloor` (the largest amount any non-USDG vault could back) closes that off
 // chain: a bound above it can only be USDG.
+// What it does NOT bind: that the note is unspent. The pool's Merkle tree is append-only and disclose checks no
+// nullifier, so a note spent or reclaimed long ago is still a leaf of every later root and still proves at the
+// current root (rootAge 0). Root recency dates the PROOF, never the note.
 import { sha256 } from '@noble/hashes/sha2';
 import { FIELD } from './crypto.js';
 
@@ -33,7 +36,7 @@ export const SOLVENCY_MAX_LABEL = 32;
 
 /** What every verifier surface prints (spec section 6), verbatim. */
 export const SOLVENCY_DOES_NOT_SAY: readonly string[] = [
-  'that the funds are still there: they are not locked and can be reclaimed or spent right after',
+  'that the funds are there now, or were there when the proof was made: the note may have been spent or reclaimed BEFORE the proof (the pool\'s tree is append-only and disclose checks no nullifier, so a spent or reclaimed note still proves against the CURRENT root; rootAge dates the proof, not the note) or right after (nothing is locked)',
   'that they are not shown to other counterparties at the same time (no exclusivity)',
   'the account\'s total balance (one note; shielded notes are not counted)',
   'that the note is free of a pledge, an expiry or a recipient restriction (private policy; only the agent\'s own reserve construction makes it plain)',
@@ -134,7 +137,7 @@ export function assetFloor(vaults: readonly VaultCapView[], usdg: string): bigin
 /** The one-sentence statement a valid presentation supports (spec section 6). */
 export function solvencyStatement(o: { bound: string; symbol: string; rootAge: number; wallet: string; assetSound: boolean }): string {
   const what = o.assetSound ? `${o.bound} ${o.symbol}` : `${o.bound} base units of SOME asset in the pool (not shown to be ${o.symbol}: a non-${o.symbol} vault could back that much)`;
-  return `The holder of the reserve note for this request proved that ONE allowance note in the H081 pool, as of a pool root ${o.rootAge} operations old, had at least ${what} remaining; the wallet ${o.wallet} signed this presentation for this one request.`;
+  return `Someone who knows the figures of ONE allowance note that was written into the H081 pool at some point (it may since have been spent or reclaimed: the circuit checks no nullifier) proved that the note had at least ${what} remaining when it was written; the proof was made against a pool root ${o.rootAge} operations old, which dates when the proof was made, not when the note was last unspent; the wallet ${o.wallet} signed this presentation for this one request.`;
 }
 
 /** UTC day number of a unix-millisecond time. */

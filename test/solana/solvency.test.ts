@@ -6,7 +6,9 @@
 //      size recorded in solana/compute-units-solvency.json); a second verify of the same code is nonce_reused;
 //   3. pay never spends the reserve; balance() lists it as `reserve`, not under grantedToOthers;
 //   4. a larger request reclaims the smaller reserve and grants a new one;
-//   5. a released reserve's proof still verifies until its root is older than the request allows, then stale_root;
+//   5. a released reserve's proof still verifies until its root is older than the request allows, then stale_root; and
+//      a FRESH proof over the released note at the current root verifies (rootAge 0): disclose checks no nullifier, so
+//      root recency dates the proof, never the note (pinned so the docs cannot claim otherwise);
 //   6. a junk mint with the default caps backs a fake claim: assetSound false; after set_asset_caps(junk, 0, 0) and the
 //      vault drained, a claim at that size is asset-sound; after set_default_caps(0, 0) a new vault takes no deposit.
 import { writeFileSync } from 'node:fs';
@@ -158,9 +160,16 @@ describe.skipIf(!LOCAL)('prove solvency on localnet (rpc 28899)', () => {
     expect(small.bound).toBe(25n * U);
   });
 
-  it('a released reserve\'s proof verifies until its root is older than the request allows, then stale_root', async () => {
+  it('a released reserve\'s proof verifies until its root is older than the request allows, then stale_root; a fresh proof over the released note still verifies', async () => {
     const r = ask(desk, 50n, { maxRootAge: 2 });
     const p = await prove(r.code, false);
+    // the same account in a second wallet object, to keep the reserve note after the bank forgets it
+    const aw = new SolanaWallet(new Account(deriveAccountSk(agentKey)), new SolanaPool(connection, LOCALNET_POOL_PROGRAM_ID, prover), agentKey);
+    aw.registerMint(usdg);
+    await aw.sync();
+    const reserveKey = new Account(deriveReserveSk(agentKey));
+    const oldNote = aw.grantedAllowances().find((a) => a.allowance.agentPk === reserveKey.keys.pk && a.allowance.remaining === 50n * U)!;
+    expect(oldNote).toBeDefined();
     const released = await agent.solvencyReserve({ release: true, confirm: true });
     expect(released).toMatchObject({ sent: true });
     expect((await agent.balance()).reserve).toBeNull();
@@ -169,6 +178,22 @@ describe.skipIf(!LOCAL)('prove solvency on localnet (rpc 28899)', () => {
     await agent.deposit(1n * U);
     await agent.deposit(1n * U);
     expect(await verify(desk, p.code, r.code)).toMatchObject({ ok: false, reason: 'stale_root', rootAge: 3 });
+    // the limit of disclose (spec section 0 fact 3): the released note is still a leaf of the CURRENT root, so whoever
+    // knows its figures proves over it again for a new request, with an empty reserve, and it verifies at rootAge 0
+    expect((await agent.balance()).reserve).toBeNull();
+    const again = ask(desk, 50n, { maxRootAge: 2 });
+    const req = decodeSolvencyRequest(desk.codeContext, again.code);
+    const made = await aw.prove(oldNote, 'remainingAtLeast', 50n * U, solvencyAudience(req.digest, agentKey.publicKey.toBytes()));
+    const args = encodeDiscloseArgs(made.args);
+    const code = encodeSolvencyCode(desk.codeContext, {
+      requestDigest: req.digest, proof: encodeProof(made.proof.proof), args, wallet: agentKey.publicKey.toBytes(),
+      signature: ed25519.sign(presentationMessage(req.digest, args), agentKey.secretKey.subarray(0, 32)),
+    });
+    const stale = await verify(desk, code, again.code);
+    expect(stale).toMatchObject({ ok: true, rootAge: 0, bound: 50n * U });
+    // so the statement and doesNotSay never claim the note is unspent
+    expect(stale.statement).toMatch(/may since have been spent or reclaimed/);
+    expect(stale.doesNotSay[0]).toMatch(/still proves against the CURRENT root/);
   });
 
   it('junk mint: the default caps let a worthless asset back a claim (assetSound false); caps 0 and a drained vault fix it; default caps 0 block new vaults', async () => {

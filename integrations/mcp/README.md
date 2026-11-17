@@ -28,7 +28,7 @@ The server holds one Solana keypair, the *agent key*. That key pays transaction 
 | `h081_verify_solvency` | Checks an `h081-solvency:` code against your own request: the request, expiry, a request accepted once, the wallet's signature, the proof against the pinned ceremony key, a recent pool root, and that the amount is above what any non-USDG vault could back (`assetSound`). Returns `ok`, the first failing `reason`, the wallet to deal with, and `doesNotSay`. RPC reads only; `onChain: "simulate"` adds one simulated transaction (nothing signed or sent). |
 | `h081_solvency_reserve` | Shows the reserve; `release: true` takes it back into the shielded balance (**without `confirm: true` nothing is sent**). |
 
-A valid solvency proof does **not** say that the funds are still there (they are not locked), that they are not shown to others at the same time, the account's total balance, that the note is free of a pledge, expiry or recipient limit, that the wallet derived the note's key, or anything about debts. Every verify result carries this list as `doesNotSay`.
+A valid solvency proof does **not** say that the funds are there now or were there when the proof was made (the pool keeps every note and the proof checks no nullifier, so a spent or reclaimed note still proves at the current root; nothing is locked), that they are not shown to others at the same time, the account's total balance, that the note is free of a pledge, expiry or recipient limit, that the wallet derived the note's key, or anything about debts. Every verify result carries this list as `doesNotSay`.
 
 Amounts are strings: `amount` in base units (USDG and H081 have 6 decimals; `"1000000"` = 1 USDG) or `usdg` / `h081` as a decimal (`"12.5"`). Every result carries amounts both ways.
 
