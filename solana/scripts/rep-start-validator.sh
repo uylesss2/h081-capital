@@ -12,7 +12,8 @@ ACCTS="$SOLANA_DIR/test-ledger/rep-accounts"
 REP_ID=$(solana-keygen pubkey "$SOLANA_DIR/keys/rep_registry-keypair.json")
 # Keypair.fromSeed(sha256("h081 localnet stipend_pool upgrade authority")): LOCALNET_UPGRADE_AUTHORITY in test/solana/config-authority.ts
 UPGRADE_AUTHORITY=6CMruTpcTHYowyPcKHkh8YATGUgwBrSfjsHsVDtBV77g
-LOAN_ID=$(solana-keygen pubkey "$SOLANA_DIR/keys/stream_loan-keypair.json")
+# the localnet stream_loan id (declare_id! in programs/stream_loan; LOCALNET_LOAN_PROGRAM_ID in the SDK): no keypair needed
+LOAN_ID=FvM9Xczax1TCU15imjdNAMg8JXP4apSs2pn9LWCdjyPc
 mkdir -p "$LEDGER"
 # stream_loan built from this worktree (rep-loan-build.sh), at its localnet id: the fixture Slots are its accounts, and
 # the lender-close test runs its real close_slot. Required: the suite fails without it rather than skip that test.

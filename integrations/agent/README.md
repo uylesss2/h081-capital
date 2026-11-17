@@ -117,24 +117,26 @@ which loans, when, to whom, or under which keys. Proving is local (the account s
 proves for you) and takes 3 to 15 s.
 
 ```ts
-// prover: one call, to a named verifier, with the challenge (nonce) the verifier gave you
-const p = await agent.proveReputation({ audience: 'acme-desk', nonce: '0x1f2e', minLoans: 3, minVolume: '500' });
+// prover: one call, to a named verifier
+const p = await agent.proveReputation({ audience: 'acme-desk', minLoans: 3, minVolume: '500' });
 // p.code ("h081-rep:"), p.presentation ("h081-rep-sig:", hand it over only when you present), p.audience, p.nonce
 
-// verifier: check it with its own name and the nonce it issued; accept each nonce once
-const r = await desk.verifyReputation(p.code, { audience: 'acme-desk', nonce: '0x1f2e', presentation: p.presentation });
+// verifier with a request code it issued (it sets the thresholds and the challenge; the code is checksummed)
+const ask = await desk.reputationRequest({ audience: 'acme-desk', minLoans: 3, minVolume: '500' });
+const q = await agent.proveReputation({ request: ask.code });
+const r = await desk.verifyReputation(q.code, { request: ask.code, presentation: q.presentation });
 // r.ok, r.lowerBoundOnly === true, r.thresholds
 ```
 
 - `minVolume` and `monthFloor` are decimal USDG (`"500"`); the first release's names `minVolumeUsdg` / `monthFloorUsdg`
   still work (give one of each pair). The other thresholds: `minLenders`, `minSpanDays`, `minMonths`. They are rounded
   DOWN to a public ladder when proving.
-- Without `nonce` the prover picks a fresh one and returns it; the verifier then has to trust that it never saw that
-  nonce before. A desk that wants a challenge it controls hands out a request code instead:
-  `desk.reputationRequest({ audience, minLoans, minVolume })` gives an `h081-rep-ask:` code, the agent answers
-  `agent.proveReputation({ request })`, and the desk checks with `verifyReputation(code, { request, presentation })`.
-- Same call elsewhere: CLI `h081 rep prove --audience acme-desk --nonce 0x1f2e --min-loans 3 --min-volume 500`; local API
-  `POST /v1/reputation/prove {"audience": "acme-desk", "nonce": "0x1f2e", "minLoans": 3, "minVolume": "500"}`; MCP tool
+- Without a request the prover draws the challenge (nonce) and returns it (it is inside the code too); a verifier then
+  checks with `verifyReputation(code, { audience, nonce, presentation })` and must remember the nonces it accepted. A
+  desk that wants to set the challenge hands out a request code, as above. (An optional `nonce` input exists for a
+  challenge given out of band; prefer the request code, which is checksummed and network-tagged.)
+- Same call elsewhere: CLI `h081 rep prove --audience acme-desk --min-loans 3 --min-volume 500`; local API
+  `POST /v1/reputation/prove {"audience": "acme-desk", "minLoans": 3, "minVolume": "500"}`; MCP tool
   `h081_prove_reputation` and Agent Kit action `H081_PROVE_REPUTATION` with the same arguments.
 - `verifyReputation(…, { onChain: true })` also simulates rep_registry's on-chain check (read-only); the verifier's
   wallet needs some SOL to pay for the simulation, and a wallet with none is told so (`onChain.ran: false`), never

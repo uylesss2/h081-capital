@@ -1803,8 +1803,8 @@
                   },
                   "nonce": {
                     "type": "string",
-                    "pattern": "^(0x[0-9a-fA-F]{1,62}|\\d{1,75})$",
-                    "description": "without a request: the challenge the verifier gave you (0x hex or decimal); default a fresh random one, returned as nonce"
+                    "pattern": "^(0x[0-9a-fA-F]{1,64}|\\d{1,78})$",
+                    "description": "optional, without a request: a challenge the verifier gave you (0x hex or decimal); default a fresh random one, returned as nonce. A verifier that wants to set the challenge should send a request code instead"
                   },
                   "bindTo": {
                     "type": "string",
@@ -1887,7 +1887,7 @@
                   },
                   "nonce": {
                     "type": "string",
-                    "pattern": "^(0x[0-9a-fA-F]{1,62}|\\d{1,75})$",
+                    "pattern": "^(0x[0-9a-fA-F]{1,64}|\\d{1,78})$",
                     "description": "without a request: the nonce you issued (the prover passes it as `nonce`); accept each nonce once"
                   },
                   "presentation": {

@@ -13,8 +13,8 @@ import { mockBank } from './helpers.js';
 
 const PROVED = { code: 'h081-rep:7Yk3LmQ9pR2', presentation: 'h081-rep-sig:3Df8Kq2', audience: '0x01', nonce: '0x1234', presNullifier: '0x02', expiresAt: 1, counted: { loans: 3 } };
 const withRep = () => ({
-  proveReputation: vi.fn(async () => PROVED),
-  reputationRequest: vi.fn(async () => ({ code: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' })),
+  proveReputation: vi.fn(async (_req: unknown) => PROVED),
+  reputationRequest: vi.fn(async (_req: unknown) => ({ code: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' })),
 });
 /** What the bank received for the volume and floor, aliases folded. */
 const thresholdsSeen = (fn: ReturnType<typeof vi.fn>) => {
@@ -35,7 +35,10 @@ describe('the operation schema: minVolume / monthFloor, their aliases, and the p
     expect(ProveRepZ.safeParse({ request: 'h081-rep-ask:x', minVolume: '1' }).success).toBe(false);
     expect(ProveRepZ.safeParse({ audience: 'a', minVolume: '5 USDG' }).success).toBe(false);
     expect(ProveRepZ.safeParse({ audience: 'a', nonce: 'abc' }).success).toBe(false);
-    expect(VerifyRepZ.safeParse({ code: 'c', audience: 'a', nonce: '0x' + 'f'.repeat(63) }).success).toBe(false);
+    // the nonce as every code and result prints it (0x + 64 hex) passes; one more digit does not
+    expect(VerifyRepZ.safeParse({ code: 'c', audience: 'a', nonce: '0x' + 'f'.repeat(64) }).success).toBe(true);
+    expect(ProveRepZ.safeParse({ audience: 'a', nonce: '0x' + '0'.repeat(63) + '1' }).success).toBe(true);
+    expect(VerifyRepZ.safeParse({ code: 'c', audience: 'a', nonce: '0x' + 'f'.repeat(65) }).success).toBe(false);
     const props = (JSON_SCHEMA.h081_prove_reputation as { properties: Record<string, unknown> }).properties;
     for (const k of ['audience', 'minLoans', 'minVolume', 'monthFloor', 'minVolumeUsdg', 'monthFloorUsdg', 'nonce']) expect(props).toHaveProperty(k);
   });
@@ -48,6 +51,18 @@ describe('the operation schema: minVolume / monthFloor, their aliases, and the p
     expect(thresholdsSeen(bank.proveReputation)).toMatchObject({ minVolume: '250', monthFloor: '10' });
     await runOp(bank as never, 'h081_reputation_request', { audience: 'acme-desk', minVolume: '100' });
     expect(thresholdsSeen(bank.reputationRequest)).toMatchObject({ minVolume: '100' });
+  });
+});
+
+describe('a returned nonce goes straight back in (the round trip through runOp)', () => {
+  it('prove without a nonce, then verify with the result\'s 0x+64-hex nonce: the schema takes it', async () => {
+    const padded = '0x' + 'ab12'.padStart(64, '0');
+    const bank = { ...mockBank(), ...withRep(), verifyReputation: vi.fn(async (_code: unknown, _opts: unknown) => ({ ok: true })) };
+    bank.proveReputation.mockResolvedValueOnce({ ...PROVED, nonce: padded });
+    const p = await runOp(bank as never, 'h081_prove_reputation', { audience: 'acme-desk', minLoans: 1 }) as { nonce: string; code: string; presentation: string };
+    expect(p.nonce).toBe(padded);
+    await runOp(bank as never, 'h081_verify_reputation', { code: p.code, audience: 'acme-desk', nonce: p.nonce, presentation: p.presentation });
+    expect(bank.verifyReputation.mock.calls[0][1]).toMatchObject({ audience: 'acme-desk', nonce: padded });
   });
 });
 
@@ -67,10 +82,10 @@ describe('MCP: h081_prove_reputation with the one-call arguments', () => {
 });
 
 describe('Agent Kit: H081_PROVE_REPUTATION', () => {
-  let bank: ReturnType<typeof mockBank> & ReturnType<typeof withRep>;
+  let bank: ReturnType<typeof withRep>;
   const kp = Keypair.generate();
   const agent = new SolanaAgentKit(new KeypairWallet(kp, 'http://127.0.0.1:1'), 'http://127.0.0.1:1', {}).use(H081Plugin);
-  beforeEach(() => { bank = { ...mockBank(), ...withRep() }; setBankProvider(async () => bank as never); });
+  beforeEach(() => { bank = { ...mockBank(), ...withRep() } as unknown as ReturnType<typeof withRep>; setBankProvider(async () => bank as never); });
   afterEach(() => { setBankProvider(undefined); resetBank(agent); });
 
   it('the action and the method both take { audience, minLoans, minVolume }', async () => {
@@ -86,7 +101,7 @@ describe('@h081lll/agent: h.proveReputation({ audience, minLoans, minVolume }) a
   let g: Gateway;
   let a: Awaited<ReturnType<typeof makeAgent>>;
   beforeAll(async () => {
-    a = await makeAgent({ bank: stubBank(withRep()) });
+    a = await makeAgent({ bank: stubBank(withRep() as never) });
     g = await startGateway(a.h);
   });
   afterAll(async () => { await g.close(); });

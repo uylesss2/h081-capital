@@ -126,12 +126,13 @@ A refused operation is a tool result with `isError: true` and a sentence that na
 
 ## Private reputation: `h081_prove_reputation` in one call
 
-`h081_prove_reputation {"audience": "acme-desk", "nonce": "0x1f2e", "minLoans": 3, "minVolume": "500"}` proves,
+`h081_prove_reputation {"audience": "acme-desk", "minLoans": 3, "minVolume": "500"}` proves,
 locally, that this agent repaid at least 3 attested loans totalling at least 500 USDG, without revealing which loans,
 when, to whom or under which keys. It returns the `h081-rep:` code, an `h081-rep-sig:` presentation (hand it over only
 when presenting) and the `audience` / `nonce` it answers. The verifier checks it with `h081_verify_reputation {"code":
-"...", "audience": "acme-desk", "nonce": "0x1f2e", "presentation": "..."}`, or answers a request code
-(`h081_reputation_request` gives one; the agent then passes `{"request": "h081-rep-ask:..."}`). `minVolume` and
+"...", "audience": "acme-desk", "nonce": "<the returned nonce>", "presentation": "..."}` (accepting each nonce once), or,
+to set the thresholds and the challenge itself, issues a request code (`h081_reputation_request`; the agent then passes
+`{"request": "h081-rep-ask:..."}` and the verifier checks with `{"code": "...", "request": "...", "presentation": "..."}`). `minVolume` and
 `monthFloor` are decimal USDG; `minVolumeUsdg` / `monthFloorUsdg` are accepted as aliases. `h081_reputation_status`
 shows what counts, what waits for an attest and what never counts (backed and slashed loans); `h081_reputation_attest`
 hands repaid loans to the relayer's queue. A proof is a lower bound on repaid loans and says nothing about defaults.

@@ -156,7 +156,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'and check the answer with h081_verify_reputation and this request; accept each nonce once. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
   h081_prove_reputation:
     'Prove this agent\'s repayment record to one verifier without revealing which loans, when, to whom, or under which keys: give the ' +
-    'verifier\'s "h081-rep-ask:" `request` code, or its `audience` name plus thresholds (`minLoans`, `minVolume` in decimal USDG, ...; rounded DOWN to the public ladder) and the `nonce` it gave you, if any. Returns an ' +
+    'verifier\'s "h081-rep-ask:" `request` code, or its `audience` name plus thresholds (`minLoans`, `minVolume` in decimal USDG, ...; rounded DOWN to the public ladder). Returns an ' +
     '"h081-rep:" code and, unless the request binds a key, a separate "h081-rep-sig:" `presentation` to give the verifier only when you ' +
     'present (whoever holds both can use the code until it expires, at most a day). Counts only loans repaid under this account\'s loan keys ' +
     'and attested (h081_reputation_status, h081_reputation_attest). The proof is made locally (the account secret is in the witness; no ' +
@@ -340,7 +340,8 @@ type RepAliasable = { minVolume?: string; minVolumeUsdg?: string; monthFloor?: s
 const notBoth = (o: RepAliasable) => !(o.minVolume !== undefined && o.minVolumeUsdg !== undefined) && !(o.monthFloor !== undefined && o.monthFloorUsdg !== undefined);
 const notBothMsg = { message: 'give minVolume or its alias minVolumeUsdg (and monthFloor or monthFloorUsdg), not both' };
 const ttlZ = z.number().int().min(1).max(86_400);
-const NONCE_RE = /^(0x[0-9a-fA-F]{1,62}|\d{1,75})$/;
+// a nonce as the codes print it (0x + 64 hex, zero padded) or shorter, or decimal; its range is checked where it is used
+const NONCE_RE = /^(0x[0-9a-fA-F]{1,64}|\d{1,78})$/;
 const nonceZ = z.string().regex(NONCE_RE, 'a number (0x hex or decimal)');
 export const RepRequestZ = z.object({ audience: nameZ, ...repThresholds, ttlSec: ttlZ.optional(), bindTo: b58Z.optional(), label: z.string().max(32).optional() }).strict()
   .refine(notBoth, notBothMsg);
@@ -536,7 +537,7 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   },
   h081_prove_reputation: {
     type: 'object',
-    properties: { request: { type: 'string', description: 'the verifier\'s "h081-rep-ask:" code (carries audience, challenge and thresholds)' }, audience: repAudienceJ, ...repThresholdsJ, nonce: nonceJ('without a request: the challenge the verifier gave you (0x hex or decimal); default a fresh random one, returned as nonce'), bindTo: { ...b58J, description: 'optional: bind the proof to this key (default: a fresh session key, signed separately)' }, expiresInSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'without a request: lifetime of the proof, default 600' } },
+    properties: { request: { type: 'string', description: 'the verifier\'s "h081-rep-ask:" code (carries audience, challenge and thresholds)' }, audience: repAudienceJ, ...repThresholdsJ, nonce: nonceJ('optional, without a request: a challenge the verifier gave you (0x hex or decimal); default a fresh random one, returned as nonce. A verifier that wants to set the challenge should send a request code instead'), bindTo: { ...b58J, description: 'optional: bind the proof to this key (default: a fresh session key, signed separately)' }, expiresInSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'without a request: lifetime of the proof, default 600' } },
     additionalProperties: false, description: 'exactly one of request, or audience with thresholds',
   },
   h081_verify_reputation: {

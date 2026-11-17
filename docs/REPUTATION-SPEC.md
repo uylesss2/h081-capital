@@ -15,21 +15,25 @@ An agent proves, to one named audience and for one challenge:
 It reveals nothing else: not which loans, when, which lenders, which keys, or the exact totals.
 
 ```ts
-// one call: the prover names the verifier, the thresholds, and the challenge the verifier gave it
-const p = await agent.proveReputation({ audience: 'acme-desk', nonce: '0x1f2e', minLoans: 3, minVolume: '500' });
-const r = await desk.verifyReputation(p.code, { audience: 'acme-desk', nonce: '0x1f2e', presentation: p.presentation });
+// one call: the prover names the verifier and the thresholds
+const p = await agent.proveReputation({ audience: 'acme-desk', minLoans: 3, minVolume: '500' });
+// p.code ("h081-rep:", which carries the audience, nonce and thresholds), p.presentation ("h081-rep-sig:")
 
-// or with a request code, when the desk wants to fix the thresholds and the challenge itself
+// a desk that sets the thresholds and the challenge itself hands out a request code (framed: checksum, kind, network)
 const ask = await desk.reputationRequest({ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 });
 const { code, presentation } = await agent.proveReputation({ request: ask.code });
-const r2 = await desk.verifyReputation(code, { request: ask.code, presentation });   // r2.ok, r2.lowerBoundOnly === true
+const r = await desk.verifyReputation(code, { request: ask.code, presentation });   // r.ok, r.lowerBoundOnly === true
 ```
 
 The same one call exists on every surface (section 6): MCP `h081_prove_reputation`, Agent Kit `H081_PROVE_REPUTATION`
 and `h081ProveReputation`, CLI `h081 rep prove --audience A --nonce N --min-loans 3 --min-volume 500`, local API
 `POST /v1/reputation/prove`. `minVolume` / `monthFloor` are decimal USDG; the first release's names `minVolumeUsdg` /
 `monthFloorUsdg` stay accepted as aliases (one of each pair; both is refused). Without `nonce` the prover draws one and
-returns it (`p.nonce`); the verifier then relies on remembering nonces it accepted.
+returns it (`p.nonce`, also inside `p.code`); a verifier without a request checks with `{ audience, nonce }` and must
+remember the nonces it accepted. An optional `nonce` input lets a verifier's own challenge be passed in without a request
+code; it is a raw number copied between parties, which the code-framing rule (letters and digits, checksum, kind,
+network tag) discourages, so the documented flow for a verifier-set challenge is the request code, and whether to keep
+the raw input is listed for the owner (section 13).
 
 ### What it guarantees (and what enforces it)
 
@@ -329,7 +333,7 @@ Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL
 |---|---|
 | `npm run test:solana:rep` (validator on rpc 8899: rep_registry + stream_loan built from this worktree, fixtures) | 16 passed (was 14) |
 | `npx vitest run test/circuits/reputation.test.ts test/sdk/rep-consistency.test.ts` | 21 passed (18 circuit, 3 drift) |
-| `npx vitest run test/integrations test/relayer` | 337 passed, 9 skipped (localnet-only files without their validator); was 324 before the pass |
+| `npx vitest run test/integrations test/relayer` | 338 passed, 9 skipped (localnet-only files without their validator); was 324 before the pass |
 | `cargo test -p rep_registry` (WSL; the program is unchanged in this pass) | 9 passed |
 | `npm run typecheck` | clean |
 | `npm run build:integrations` | mcp, plugin and agent build |
@@ -378,12 +382,12 @@ Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL
     unit tests (below), and every attest path after funding is now covered on the validator.
 - Integrations: schemas, MCP, plugin, agent CLI, OpenAPI route list, relayer routes and config, a drift test between
   the Rust source and the SDK (ids, error table, sizes, public-input order). Third pass:
-  - `test/integrations/reputation-surfaces.test.ts` (6): the one-call shape `{ audience, minLoans, minVolume, nonce? }`
+  - `test/integrations/reputation-surfaces.test.ts` (7): the one-call shape `{ audience, minLoans, minVolume, nonce? }`
     through the zod schema, `runOp`, MCP `tools/call`, the Agent Kit action and method, the agent method and
     `POST /v1/reputation/prove`; the `minVolumeUsdg` / `monthFloorUsdg` aliases reach the bank as `minVolume` /
     `monthFloor`; both of a pair, a nonce or thresholds next to a request, and malformed nonces are refused before the
-    bank.
-  - `test/integrations/reputation.test.ts` (18, was 12 at the first write-up): adds the one-call prove with the
+    bank; a returned nonce (0x + 64 hex, as every code prints it) goes straight back into verify through `runOp`.
+  - `test/integrations/reputation.test.ts` (18, was 17 before this pass): adds the one-call prove with the
     verifier's nonce (returned, verified with `{ audience, nonce }`, another nonce refused, a fresh nonce returned when
     none is given, 0 and 2^248 refused before proving).
   - `test/integrations/loankeys.test.ts` (4): two banks with stale in-memory key lists on one signer take different
@@ -519,6 +523,8 @@ and house-fleet lenders attesting before close.
 11. Whether backed loans ever count (default and today: never; section 3.4). The backer spec names what that would
     take: a proof of the borrower key at funding, no BackingClaimed, repayment before expiry, a minimum fee paid.
 12. The Vercel sweep cron (section 6 has the exact entry) and the relayer env it needs.
+13. Whether to keep the raw `nonce` input of `proveReputation` (section 0). It predates no framing: the verify side
+    already took a raw `{ audience, nonce }`; a framed alternative exists (the `h081-rep-ask:` request code).
 
 ## 14. Cost (mainnet, estimates at 6,960 lamports per byte)
 

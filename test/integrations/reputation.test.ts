@@ -23,6 +23,7 @@ import {
   REP_MAX_SETS_PER_DAY_ALL,
 } from '../../integrations/core/reputation.js';
 import type { H081Config } from '../../integrations/core/constants.js';
+import { VerifyRepZ } from '../../integrations/core/schemas.js';
 
 const U = 1_000_000n;
 const USDG = new PublicKey(new Uint8Array(32).fill(3));
@@ -339,7 +340,11 @@ describe.skipIf(!haveArtifacts)('the one-call prove: { audience, minLoans, minVo
     expect((await verifyReputation(e, given.code, { audience: 'acme-desk', nonce: '0xabc124', presentation: given.presentation })).reason).toMatch(/another challenge/);
     // without a nonce: a fresh one, returned so the prover can hand it over with the code
     const fresh = await proveReputation(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50' });
+    expect(fresh.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(VerifyRepZ.safeParse({ code: fresh.code, audience: 'acme-desk', nonce: fresh.nonce, presentation: fresh.presentation }).success).toBe(true);
     expect(await verifyReputation(e, fresh.code, { audience: 'acme-desk', nonce: fresh.nonce, presentation: fresh.presentation })).toMatchObject({ ok: true });
+    // a request's own nonce, as reputationRequest prints it, passes the schema too
+    expect(VerifyRepZ.safeParse({ code: fresh.code, audience: 'acme-desk', nonce: reputationRequest(e, { audience: 'acme-desk' }).nonce }).success).toBe(true);
     await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1, nonce: '0x0' })).rejects.toThrow(/nonce must be between 1 and 2\^248/);
     await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1, nonce: '0x' + '1'.padEnd(63, '0') })).rejects.toThrow(/nonce must be between/);
   }, 300_000);
