@@ -1,11 +1,11 @@
 // h081_back / h081_back_draw and h081_lend fund with a backing code: argument checks, plan-unless-confirm routing,
-// operator ceilings and the kind 8 / 9 codes. A mocked bank: nothing touches a network.
+// operator ceilings and the kind 10 / 11 codes. A mocked bank: nothing touches a network.
 import { describe, expect, it } from 'vitest';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { InputError, runOp, type BankLike } from '../../integrations/core/operations.js';
 import { DESCRIPTIONS, EXAMPLE_INPUTS, JSON_SCHEMA, OPS, ZOD } from '../../integrations/core/schemas.js';
 import {
-  BACKING_PREFIX, CODE_KIND, CodeError, DRAW_KEY_PREFIX, PREFIX_KIND, decodeBackingCode, decodeDrawKeyCode, encodeBackingCode, encodeDrawKeyCode, encodeLoanTerms,
+  BACKING_PREFIX, CODE_KIND, CodeError, DRAW_KEY_PREFIX, KIND_NAMES, PREFIX_KIND, RESERVED_CODE_KINDS, decodeBackingCode, decodeDrawKeyCode, encodeBackingCode, encodeDrawKeyCode, encodeLoanTerms, frameV2,
 } from '../../integrations/core/codes.js';
 import { configFromEnv } from '../../integrations/core/constants.js';
 import { BackerOps, BACKED_PRIVACY, type BackerHost } from '../../integrations/core/backer.js';
@@ -92,7 +92,7 @@ describe('h081_back and h081_back_draw are operations', () => {
   });
 });
 
-describe('kinds 8 and 9 in the v2 frame', () => {
+describe('kinds 10 and 11 in the v2 frame', () => {
   it('round-trip, are letters and digits only, and refuse another kind or network', () => {
     const backing = Keypair.generate().publicKey, drawKey = Keypair.generate().publicKey, payoutTo = Keypair.generate().publicKey;
     const b = encodeBackingCode(ctx, { backing, loanRef: 42n });
@@ -103,11 +103,28 @@ describe('kinds 8 and 9 in the v2 frame', () => {
     const d = encodeDrawKeyCode(ctx, { drawKey, payoutTo });
     const dk = decodeDrawKeyCode(ctx, d);
     expect([dk.drawKey.equals(drawKey), dk.payoutTo.equals(payoutTo)]).toEqual([true, true]);
-    expect([CODE_KIND.backing, CODE_KIND.drawKey, PREFIX_KIND[BACKING_PREFIX], PREFIX_KIND[DRAW_KEY_PREFIX]]).toEqual([8, 9, 8, 9]);
+    expect([CODE_KIND.backing, CODE_KIND.drawKey, PREFIX_KIND[BACKING_PREFIX], PREFIX_KIND[DRAW_KEY_PREFIX]]).toEqual([10, 11, 10, 11]);
     expect(() => decodeBackingCode(ctx, d)).toThrow(CodeError);
     expect(() => decodeBackingCode({ ...ctx, cluster: 'localnet' }, b)).toThrow(/another network/);
     expect(() => decodeBackingCode(ctx, b.slice(0, -3))).toThrow(CodeError);
     expect(() => decodeDrawKeyCode(ctx, encodeLoanTerms(ctx, { loanRef: 1n, pledgeBps: 4000n, lenderViewPub: new Uint8Array(32) }))).toThrow(/loan terms code|not a draw key code/);
+  });
+});
+
+describe('the code-kind registry', () => {
+  it('every kind is used once, none is a reserved reputation kind (7, 8, 9), and each has a name', () => {
+    const kinds = Object.values(CODE_KIND);
+    expect(new Set(kinds).size).toBe(kinds.length);
+    expect(Object.keys(RESERVED_CODE_KINDS).map(Number)).toEqual([7, 8, 9]);
+    for (const k of kinds) expect(RESERVED_CODE_KINDS[k], `kind ${k} is reserved`).toBeUndefined();
+    for (const k of [...Object.values(PREFIX_KIND)]) expect(KIND_NAMES[k], `kind ${k} has a name`).toBeDefined();
+  });
+  it('a reputation code (kind 8 or 9) is never read as a backed-line code, even under a backing prefix', () => {
+    const body = new Uint8Array(40);
+    for (const k of [7, 8, 9]) {
+      expect(() => decodeBackingCode(ctx, frameV2(BACKING_PREFIX, k, ctx, body))).toThrow(/not a backing code/);
+      expect(() => decodeDrawKeyCode(ctx, frameV2(DRAW_KEY_PREFIX, k, ctx, new Uint8Array(64)))).toThrow(/not a draw key code/);
+    }
   });
 });
 

@@ -11,7 +11,7 @@
 // Run with `npm run test:staking`.
 import { beforeAll, describe, expect, it } from 'vitest';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, TransactionInstruction } from '@solana/web3.js';
-import { customErrorCode, send } from '../../src/solana/buffer.js';
+import { customErrorCode, send, simulate } from '../../src/solana/buffer.js';
 import { concatBytes, u64le } from '../../src/solana/field.js';
 import { sha256 } from '@noble/hashes/sha2';
 import {
@@ -336,6 +336,21 @@ describe.skipIf(!reachable)('safety_pool: setup and insure (must run before the 
     expect((await cfgOf(SPF, H.publicKey)).exposure).toBe(5_000_000n + 2_000_000n + BIG + 3_000_000n + 2_000_000n);
   });
 
+  // docs/BACKER-SPEC.md 3.3 / 14: a backed loan already has its Subrogation (the backer's fee and recovery)
+  it('a backed loan (pledge 0, Subrogation from funding on) can be insured: safety_pool reads only the slot', async () => {
+    const s = decodeStreamSlot(await account(streamSlotPda(REF.backed)));
+    expect([s.funded, s.pledgeBps, s.minRemaining]).toEqual([true, 0, 0n]);
+    const sub = decodeSubrogation(await account(streamSubrogationPda(REF.backed)));
+    expect(sub.safetyConfig.toBase58()).toBe(meta.backedBacking);
+    expect([sub.owed, sub.paid]).toEqual([250_000n, 0n]);
+    const e0 = (await cfgOf(SPF, H.publicKey)).exposure;
+    // insure does not look at the Subrogation (nor at pledge_bps): the cover binds, and counts in the exposure
+    await insure(REF.backed, 1_000_000n);
+    const c = decodeCover(await account(coverPda(SPF, REF.backed)));
+    expect([c.paid, c.released, c.limit]).toEqual([false, false, 1_000_000n]);
+    expect((await cfgOf(SPF, H.publicKey)).exposure).toBe(e0 + 1_000_000n);
+  });
+
   it('release_cover: anyone frees a repaid loan\'s cover (its exposure); an unpaid loan\'s cover stays', async () => {
     const e0 = (await cfgOf(SPF, H.publicKey)).exposure;
     await expectCode(tx(stranger, releaseCoverIx(SPF, H.publicKey, REF.live, loanOf(REF.live))), SAFETY_ERROR.NotReleasable);
@@ -650,6 +665,36 @@ describe.skipIf(!reachable)('safety_pool: shortfall and slash (after the live lo
     expect(await tokenBalance(connection, uwAsset)).toBe(4_000_000n);
     expect(await tokenBalance(connection, recovery)).toBe(0n);
     expect((await cfgOf(SPF, H.publicKey)).assets).toBe(a0);
+  });
+
+  // docs/BACKER-SPEC.md 3.3: "a safety_pool slash of a backed loan fails at record_slash's init"
+  it('a backed loan\'s cover can never be slashed: the CPI to record_slash fails creating the Subrogation that already exists; nothing moves', async () => {
+    expect(streamLoanLoaded, 'stream_loan.so must be loaded: slash records the slash there by CPI').toBe(true);
+    const ref = REF.backed;
+    const lenderAta = ataAddress(lender.publicKey, H.publicKey);
+    // it is short (principal 5,250,000, nothing repaid) and the pool has assets: every check before the CPI passes
+    expect(await viewShortfall(connection, payer, SPF, ref, loanOf(ref))).toBe(5_250_000n);
+    const cfg0 = await cfgOf(SPF, H.publicKey);
+    expect(cfg0.assets).toBeGreaterThan(0n);
+    const lender0 = await tokenBalance(connection, lenderAta);
+    const vault0 = await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey));
+    const sub0 = await account(streamSubrogationPda(ref));
+    const sim = await simulate(connection, stranger, [slashBy(SPF, H.publicKey, ref, loanOf(ref), lenderAta)]);
+    expect(sim.err).not.toBeNull();
+    const logs = sim.logs.join('\n');
+    // safety_pool invoked stream_loan's record_slash, whose `init` of the Subrogation hit the existing account
+    expect(logs).toContain(`Program ${SAFETY_STREAM_LOAN_PROGRAM_ID.toBase58()} invoke [2]`);
+    expect(logs).toMatch(/Instruction: RecordSlash/);
+    expect(logs).toMatch(/already in use/);
+    await expectFail(tx(stranger, slashBy(SPF, H.publicKey, ref, loanOf(ref), lenderAta)));
+    // nothing moved: the cover is still open and unpaid, the pool and the lender hold what they held, the backer's record is intact
+    const c = decodeCover(await account(coverPda(SPF, ref)));
+    expect([c.paid, c.paidOut, c.released]).toEqual([false, 0n, false]);
+    const cfg1 = await cfgOf(SPF, H.publicKey);
+    expect([cfg1.assets, cfg1.exposure]).toEqual([cfg0.assets, cfg0.exposure]);
+    expect(await tokenBalance(connection, lenderAta)).toBe(lender0);
+    expect(await tokenBalance(connection, safetyVaultPda(SPF, H.publicKey))).toBe(vault0);
+    expect(Buffer.from(await account(streamSubrogationPda(ref))).equals(Buffer.from(sub0))).toBe(true);
   });
 
   it('withdraw after the cooldown redeems at the price of the day (slashes lowered it)', async () => {

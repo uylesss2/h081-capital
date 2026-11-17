@@ -53,8 +53,8 @@ Both keys are re-derivable from the agent key, so a line can be managed again af
 `payout_to`, by default the draw key's USDG account.
 
 ```
-A: h081_back_draw key                               -> "h081-draw-key:" code (kind 9) -> B
-B: h081_back open (Backing + vault), stake          -> "h081-backing:" code (kind 8, loanRef 0) -> A
+A: h081_back_draw key                               -> "h081-draw-key:" code (kind 11) -> B
+B: h081_back open (Backing + vault), stake          -> "h081-backing:" code (kind 10, loanRef 0) -> A
 L: h081_lend open (existing open_slot)              -> loan ref -> A
 A: h081_back_draw request(loanRef, advance, lender fee, term, ttl)   reserves the cover
                                                     -> "h081-backing:" code with loanRef -> L
@@ -251,10 +251,18 @@ None. No new vk, no `gen-solana-vk` run, no ceremony.
   (sync + claim in one transaction), `releaseBacked`.
 
 **`src/solana/lender.ts`**: `LOAN_ERROR` has the new codes; `loanStatus` returns `backed: true` for a backed slot;
-`close()` says "the backer is still owed" for a backed Subrogation; `SolanaLoanLenderWallet` gains `fundBacked`,
-`claimBacked`, `releaseBacked` and `backedStatus`. **`wallet.withdraw`** takes `{allowOffCurve}` so a shielded stake or
-repayment can go straight to a Backing or slot PDA. stipend_pool's withdraw checks only `ta.owner == public_recipient`
-(ops.rs), so an off-curve owner is accepted; no localnet test exercises it yet (section 14).
+`close()` says "the backer is still owed" for a backed Subrogation (checked with `subrogationKindOf`, not only
+`pledge_bps`); `SolanaLoanLenderWallet` gains `fundBacked`, `claimBacked`, `releaseBacked` and `backedStatus`.
+**`wallet.withdraw`** takes `{allowOffCurve}` so a shielded stake or repayment can go straight to a Backing or slot PDA.
+stipend_pool's withdraw checks only `ta.owner == public_recipient` (ops.rs), so an off-curve owner is accepted; the
+localnet H081Bank flow does both with real proofs (section 14).
+
+**Readers** (`src/solana/backer.ts`): `SUBROGATION_LABEL` ("backer fee / recovery" or "safety-pool slash recovery"),
+`subrogationKindOf` (backed when the slot is funded with `pledge_bps == 0`, or when `safety_config` is a Backing owned by
+stream_loan), `subrogationKinds` (batched, 100 per call) and `backedLenderPosition` (the lender's due = principal − backer
+fee, what went to the backer and to the lender, the cover paid, and the lender's own shortfall). stream_loan's
+`shortfall` (principal − repaid) counts the backer's fee and ignores a cover already paid, so lender-facing views show
+`lenderShortfall` for a backed loan.
 
 **Agent SDK** (`integrations/core/backer.ts`, delegated from `H081Bank`): `backOpen`, `backStake` (wallet or shielded),
 `backStatus`, `backWithdraw` (and close), `backSettle` (cancel / release / forgive), `backClaim`, `backDrawKey`,
@@ -274,17 +282,24 @@ plan unless `confirm: true`, and every plan carries the privacy note of section 
   `h081BackDraw` methods.
 - `@h081lll/agent`: `H081.back` / `H081.draw`; routes `POST/GET /v1/backing` and `POST/GET /v1/draws`;
   `/v1/loans/lend` takes `backingCode` and `minCoverBps`; CLI `h081 back …` and `h081 draw …`; `h081 check` reads
-  kinds 8 and 9; `openapi.json` regenerated. Nothing is published.
+  kinds 10 and 11; `openapi.json` regenerated. Nothing is published.
 
 ## 8. Codes (v2 frame, `integrations/core/codes.ts`)
 
 | kind | prefix | body |
 |---|---|---|
-| 8 | `h081-backing:` | backing 32 ‖ loan_ref u64 LE (0 = none), 40 B |
-| 9 | `h081-draw-key:` | draw key 32 ‖ payout account 32, 64 B |
+| 10 | `h081-backing:` | backing 32 ‖ loan_ref u64 LE (0 = none), 40 B |
+| 11 | `h081-draw-key:` | draw key 32 ‖ payout account 32, 64 B |
 
-Network tag: the loan code context (cluster, stream_loan program, USDG). Kind 7 stays reserved for the reputation
-proof. **The site's `src/lib/live/codes.ts` mirror is not in this branch** (it lives in the site repo).
+Network tag: the loan code context (cluster, stream_loan program, USDG). **Kind allocation.** This branch first used 8
+and 9, which collide with the reputation branch (`feat/zk-reputation`: 7 `h081-rep:`, 8 `h081-rep-ask:`, 9
+`h081-rep-sig:`). No branch, published package or the site ever shipped a kind above 6 (main, `fix/rpc-429-seed` (the
+published agent 0.1.2), `feat/agent-api`, `feat/prove-solvency` and the site all stop at 6 or below), so the backed-line
+codes moved to **10 and 11** without breaking a shipped code. `codes.ts` now carries the registry: 1-6 shipped, 7-9
+`RESERVED_CODE_KINDS` for the reputation codes, 10-11 backed lines; a new kind takes the next free number. A unit test
+checks every kind is used once, none is reserved, and a kind 7/8/9 frame is never read as a backed-line code. The
+reputation branch needs no change. Confirm the registry when both branches merge (section 11, D8). **The site's
+`src/lib/live/codes.ts` mirror is not in this branch** (it lives in the site repo).
 
 ## 9. Privacy: what leaks
 
@@ -336,8 +351,16 @@ deposit volume), a pinned lender hints at who the backer is, and the lender is n
   before the go.
 - **D4. Fee sponsorship** (section 9). Without it, v1 lines are linkable to the paying wallet.
 - **D5. The upgrade** (section 16): owner-only, rehearsed on localnet first, upgrade authority kept, never `--final`.
-- **D6. The site mirror** of kinds 8 and 9, and the "backed" label in the site and x402 views (section 16).
+- **D6. The site mirror** of kinds 10 and 11, and the "backed" label in the site's loan views (section 16). The x402
+  loans market and `lendStatus` in this repo are done.
 - **D7. v2 confidential stake** (section 12): a new circuit, a stipend_pool upgrade and a ceremony.
+- **D8. Code kinds at merge.** This branch takes 10 and 11 and reserves 7-9 for the reputation codes (section 8).
+  Confirm that registry when the two branches merge; nothing shipped changes.
+- **D9. safety_pool cover on a backed loan.** safety_pool `insure` accepts a backed loan (it reads only the Slot), but
+  its slash can never pay: stream_loan's `record_slash` cannot create the Subrogation the backed loan already has
+  (shown on localnet, section 14). A premium paid for it buys nothing; the underwriter's co-sign (off on mainnet) is
+  the only gate. Either the underwriter never co-signs a `pledge_bps == 0` loan (no code; `insureIx` says so), or a
+  later safety_pool upgrade refuses one in `insure`. No safety_pool change is made here.
 
 ## 12. v2 (out of scope): confidential stake
 
@@ -367,8 +390,14 @@ repayment before expiry and a minimum fee paid.
   default, the backer never above stake + fee, and a full repayment balances exactly.
 - **TypeScript unit** (`test/sdk/backer.test.ts`, `test/integrations/backer-ops.test.ts`): the shared vectors, key
   derivation, instruction layouts, decoders, the `loanStatus` backed flag, the error table, the ops' zod checks, plan
-  unless confirm, the lend-fund routing, kinds 8/9 framing, and `H081_MAX_BACK` / `H081_MAX_DRAW`; plus the updated
-  plugin, MCP and OpenAPI tests.
+  unless confirm, the lend-fund routing, kinds 10/11 framing and the kind registry (no duplicate, none of the reserved
+  7-9, a kind 7/8/9 frame never read as a backed-line code), and `H081_MAX_BACK` / `H081_MAX_DRAW`; the readers
+  (`subrogationKindOf`, batched `subrogationKinds`, `backedLenderPosition` with fee-first pending, 100% and 20% cover);
+  plus the updated plugin, MCP and OpenAPI tests.
+- **Readers, unit** (`test/relayer/x402-services.test.ts`, `test/integrations/core-lend.test.ts`): the x402 market
+  labels a backed loan's Subrogation "backer fee / recovery" (never "slash"), a safety-pool one a slash, reads pledge 0
+  as backed, and gives the lender's due, cover paid and shortfall; `lendStatus` the same, before and after a default
+  claim; `h081_lend claim` refuses a backed loan; the `settle` plan warns that settling first forfeits the cover.
 - **Localnet** (`npm run test:solana:backer`): its own validator (rpc 18899, ledger `solana/test-ledger/backer`),
   started with the pre-backer program `stream_loan_base.so`.
   1. Upgrade rehearsal: a registry and slots made under the old program survive an in-place upgrade (extend
@@ -396,8 +425,45 @@ repayment before expiry and a minimum fee paid.
   9. The pool escrow cannot block a default claim: a share escrowed by a spend naming the slot plus dust sent into the
      escrow; sync + claim alone is refused (`ReceiptsPending`), `claimBacked` (pull + sync + claim) pays the lender its
      whole due.
-- **Not covered yet**: a shielded stake or repayment through a real pool withdraw to a PDA; safety_pool `insure` on a
-  backed slot (expected: `slash` fails at `record_slash`); the H081Bank backed flow against a validator; the site mirror.
+  10. The H081Bank backed flow through the agent operations (`runOp`, what MCP, Agent Kit and the agent routes call),
+     three real banks on the fast build: A hands its draw-key code; B shields 300, opens a line pinned to L (plan
+     first), and **stakes 250 from its shielded balance: a stipend_pool withdraw with a real `transact` proof from
+     `build/circuits` to the Backing PDA's vault**; L opens a slot; A requests 100 at 3%; L funds with the planned
+     `planDigest`; L's `lendStatus` says `kind: backed`, "backer fee / recovery"; `h081_lend claim` is refused; A takes
+     the advance, shields 30 and **repays 8 from its shielded balance (a pool withdraw to the slot PDA)**: 5 to the
+     vault first, 3 to L; after expiry + grace the lender's shortfall is 100 and the settle plan warns; A (anyone)
+     claims and L gets 100 from the stake; a further shielded repayment of 10 recovers into the vault; after the
+     horizon the draw is released and B closes the line and gets the whole vault (165) back. No ceremony key is
+     involved: the localnet stipend_pool build verifies the `build/circuits` keys.
+- **safety_pool on a backed loan** (`test/solana/staking.test.ts`, the staking suite): a fixture loan `backed` written
+  as fund_backed leaves it (pledge 0, agent_pk 0, a Backing account and the Subrogation naming it, at the live expiry).
+  It is fixture state, not a real fund_backed: a real backed loan on the localnet build is due a day later at the
+  earliest (MIN_TERM) and safety_pool, fast build included, reads only that build's program id. `insure` **succeeds**
+  (safety_pool reads only the Slot; see D9). After expiry + grace, with a real shortfall and pool assets, `slash`
+  fails inside the CPI: the logs show stream_loan invoked at depth 2, `Instruction: RecordSlash`, and the Subrogation
+  `init` hitting an account "already in use"; the cover stays unpaid and open, the pool's assets and exposure, its
+  vault, the lender's balance and the Subrogation bytes are unchanged.
+- **Runs (2026-11-17, HEAD + this change)**:
+  - `cargo test --manifest-path programs/stream_loan/Cargo.toml --features localnet-treasury` (WSL,
+    `CARGO_TARGET_DIR=~/stipend-target-private-backer-host`): 30 passed; with `--features localnet-treasury,fast`: 30
+    passed. (Without `localnet-treasury` the crate refuses to compile by design: the treasury placeholder.)
+  - `npm run test:solana:backer` (rpc 18899, from `stream_loan_base.so`, upgraded in place): 15 passed (the 14 above and the H081Bank flow, 10).
+  - The lending suite on the new `.so`: `node scripts/solana-backer-localnet.mjs restart` (pool + the new
+    `stream_loan.so` on 18899), then `STIPEND_LOAN_RPC=http://127.0.0.1:18899 npx vitest run --config
+    vitest.solana-loan.config.ts`: `lending.test.ts` 31 passed; `lend-localnet.test.ts` failed in its `beforeAll` when run
+    right after `lending.test.ts` on the same validator (a fresh deposit read back a shielded balance of 0; nothing
+    this change touches) and passed 5 of 5 alone on a fresh validator (`... npx vitest run
+    test/integrations/lend-localnet.test.ts --config vitest.solana-loan.config.ts`).
+  - The staking suite on 18899: `STAKING_RPC_PORT=18899 STAKING_FAUCET_PORT=18901 STAKING_GOSSIP_PORT=18902
+    STAKING_DYNAMIC_PORTS=18910-18990 STAKING_LEDGER=/home/<user>/… STAKING_STAGE=… STAKING_LOG=… node
+    scripts/solana-staking-localnet.mjs restart`, then `STAKING_RPC=http://127.0.0.1:18899 npx vitest run --config
+    vitest.staking.config.ts`: 39 passed (the two backed-loan tests included).
+  - `npm test`: 463 passed, 49 failed, 8 skipped. The 49 are all in `test/e2e` (the EVM contracts on hardhat:
+    "invalid proof", "not insured"); a clean checkout of the previous commit fails the same 49 with the same
+    `build/circuits`, so they are not from this change. Everything else passes (`test/integrations`, `test/relayer`,
+    `test/sdk`: 371 passed, 8 skipped). `npm run typecheck`: clean.
+- **Not covered yet**: a real fund_backed loan slashed by safety_pool (only fixture state can reach a backed loan's
+  expiry within a test run, see above); the site mirror (D6).
 
 ## 15. Files
 
@@ -409,17 +475,33 @@ repayment before expiry and a minimum fee paid.
 - Integrations: core `backer.ts` (new), `bank.ts`, `codes.ts`, `constants.ts`, `errors.ts`, `operations.ts`,
   `schemas.ts`; agent `h081.ts`, `server.ts`, `cli.ts`, `README.md`, `openapi.json`; agent-kit `actions/back.ts`,
   `actions/backDraw.ts`, `tools/index.ts`, `index.ts`.
+- Readers: `relayer/x402/loans.ts`, `relayer/x402/services.ts`, `integrations/core/bank.ts` (lendStatus, claim, settle,
+  quote), `src/solana/lender.ts` (close), `src/solana/token.ts` (`insureIx` note).
 - Tests: `test/solana/backer.test.ts`, `test/sdk/backer.test.ts`, `test/integrations/backer-ops.test.ts`,
-  `test/data/backer-vectors.json`, `vitest.solana-backer.config.ts`.
+  `test/integrations/core-lend.test.ts`, `test/relayer/x402-services.test.ts` (+ `helpers/x402.ts`),
+  `test/solana/staking.test.ts` + `staking-fixtures.ts` (loan `backed`), `test/data/backer-vectors.json`,
+  `vitest.solana-backer.config.ts`; `scripts/solana-staking-localnet.mjs` and `solana/scripts/staking-*.sh` take
+  `STAKING_*` port and ledger overrides.
 
 ## 16. Migration and upgrade
 
 - **Additive only**: no layout, discriminator, account-list or error-code change, and `fund` is untouched.
 - **Not upgraded**: stipend_pool, safety_pool, capacity_stake.
-- **Readers to update before mainnet** (none of them is in this branch): every reader that labels a Subrogation as a
-  slash must call `isBackedSubrogation` first and show "backer fee / recovery". That covers the SlashRecorded and
-  DripSubrogated consumers, the x402 loans market and its shortfall views, the site's loan views and `lendStatus`, and
-  the reputation branch. They must also handle `pledge_bps == 0` and show "backed".
+- **Readers.** Every reader that labels a Subrogation must check `subrogationKindOf` / `subrogationKinds` (or
+  `isBackedSubrogation`) first and show "backer fee / recovery", and must read `pledge_bps == 0` on a funded slot as
+  "backed". Done in this repo:
+  - the x402 `loans-market` (`relayer/x402/loans.ts`): every loan gets `kind` (`stream` / `backed`) and `subrogation`
+    (`{kind, label, to, owed, paid}` or null), a backed loan also `backed` (`lenderDue`, `backerFee`, `toBacker`,
+    `toLender`, `coverPaid`, `lenderShortfall`), and `counts.backed`. Subrogations, their `safety_config` accounts and
+    the Draws are read in batches of 100. `shortfall` stays stream_loan's rule and says so;
+  - `lendStatus` (`integrations/core/bank.ts`): the same `kind`, `subrogation` and `backed`; for a backed loan
+    `shortfall` is the lender's own (`lenderShortfall`). `h081_lend claim` refuses a backed loan and points to
+    `h081_back claim`; the `settle` plan warns that settling before the default claim forfeits the cover (back_claim needs
+    an unsettled loan); `loanQuote` notes a backed slot;
+  - `SolanaLoanLenderWallet.close` names a backed Subrogation by `subrogationKindOf`.
+  - There is **no SlashRecorded or DripSubrogated event consumer** in this repo (nothing reads those events), so there
+    was nothing to relabel.
+  Still to do outside this repo: the site's loan views (D6) and the reputation branch (section 13).
 - **The upgrade (owner step)**: build with `build-phase2-mainnet.sh`, measure the `.so`, `solana program extend
   8JBd7… <bytes>`, deploy, then check the hash. Rehearse first with `npm run test:solana:backer` (it starts from the
   pre-backer program and upgrades in place) and with the existing lending suite on the new `.so`. Keep the upgrade

@@ -1,7 +1,10 @@
 // Loan-market data for the x402 `loans-market` service: the stream_loan registry and every slot, read
 // straight from the chain (no indexer) and cached for a short while. Numbers are decimal strings.
 import { Connection, PublicKey, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js';
-import { GRACE, ORIGINATION_FEE_BPS, type SlotAccount, decodeRegistry, decodeSlot, registryPda, shortfallOf, slotPda } from '../../src/solana/lender.js';
+import {
+  GRACE, ORIGINATION_FEE_BPS, type SlotAccount, type SubrogationAccount, decodeRegistry, decodeSlot, decodeSubrogation, registryPda, shortfallOf, slotPda, subrogationPda,
+} from '../../src/solana/lender.js';
+import { SUBROGATION_LABEL, type SubrogationKind, backedLenderPosition, decodeDraw, drawPda, isBackedSlot, isDrawAccount, subrogationKindOf } from '../../src/solana/backer.js';
 
 /** Slot addresses per getMultipleAccountsInfo call (the RPC limit is 100). */
 const SLOT_BATCH = 100;
@@ -18,7 +21,18 @@ export const SLOT_ACCOUNT_BYTES = 8 + 8 + 32 + 1 + 1 + 1 + 32 + 32 + 8 + 8 + 16 
 
 export interface LoanView {
   loanRef: string; lender: string; asset: string; tokenProgram: string; principal: string; repaid: string; fundedAt: string; expiry: string;
-  pledgeBps: number; minRemaining: string; minRate: string; streamStart: string; settled: boolean; shortfall: string;
+  pledgeBps: number; minRemaining: string; minRate: string; streamStart: string; settled: boolean;
+  /** stream_loan's rule: principal - repaid once expiry + grace has passed (for a backed loan this includes the backer's fee) */
+  shortfall: string;
+  /** `backed`: funded by a backed line (fund_backed; pledgeBps 0, no stream behind it); `stream`: a pledged stream loan */
+  kind: 'stream' | 'backed';
+  /**
+   * The loan's Subrogation, if any: receipts repay `to` first until `paid` reaches `owed`. kind `backer` ("backer fee /
+   * recovery") on a backed loan, never a slash; kind `slash` ("safety-pool slash recovery") after a safety-pool slash.
+   */
+  subrogation: { kind: SubrogationKind; label: string; to: string; owed: string; paid: string } | null;
+  /** a backed loan: the lender's due (principal - backer fee), the cover the stake paid, and what the lender is still short */
+  backed?: { backing: string; backerFee: string; lenderDue: string; toBacker: string; toLender: string; coverPaid: string; lenderShortfall: string };
 }
 
 export interface LoanMarketSnapshot {
@@ -27,7 +41,7 @@ export interface LoanMarketSnapshot {
   originationFeeBps: number;
   graceSeconds: number;
   treasury: string;
-  counts: { open: number; funded: number; settled: number };
+  counts: { open: number; funded: number; settled: number; backed: number };
   loans: LoanView[];
   openSlots: Array<{ loanRef: string; lender: string }>;
   /** chain time the shortfalls were computed at (unix seconds) */
@@ -70,6 +84,13 @@ export class LoanMarketReader {
     return this.pending;
   }
 
+  /** getMultipleAccountsInfo in batches of SLOT_BATCH, in order. */
+  private async batch(keys: PublicKey[]): Promise<Array<{ owner: PublicKey; data: Uint8Array } | null>> {
+    const out: Array<{ owner: PublicKey; data: Uint8Array } | null> = [];
+    for (let i = 0; i < keys.length; i += SLOT_BATCH) out.push(...await this.connection.getMultipleAccountsInfo(keys.slice(i, i + SLOT_BATCH), 'confirmed'));
+    return out;
+  }
+
   /**
    * Reads the registry and the clock, then every slot by its derived address (["slot", loan_ref] for
    * loan_ref 1..nextLoanRef-1, fetched in batches): public RPC endpoints refuse indexed queries such as
@@ -103,9 +124,26 @@ export class LoanMarketReader {
       try { decoded.push(decodeSlot(account.data)); } catch { /* not a slot */ }
     }
     decoded.sort((a, b) => (a.loanRef < b.loanRef ? -1 : a.loanRef > b.loanRef ? 1 : 0));
+    const funded = decoded.filter((s) => s.funded);
+    let subs: Array<SubrogationAccount | undefined>, kinds: Array<SubrogationKind | undefined>, draws: Array<ReturnType<typeof decodeDraw> | undefined>;
+    try {
+      const subInfos = await this.batch(funded.map((s) => subrogationPda(s.loanRef, this.programId)));
+      subs = subInfos.map((i) => (i && i.owner.equals(this.programId) ? decodeSubrogation(i.data) : undefined));
+      const withSub = subs.flatMap((sub, i) => (sub ? [i] : []));
+      const cfgs = await this.batch(withSub.map((i) => subs[i]!.safetyConfig));
+      kinds = funded.map(() => undefined);
+      withSub.forEach((i, j) => { kinds[i] = subrogationKindOf(cfgs[j], this.programId, funded[i]); });
+      const backedIdx = funded.flatMap((s, i) => (isBackedSlot(s) && subs[i] ? [i] : []));
+      const drawInfos = await this.batch(backedIdx.map((i) => drawPda(subs[i]!.safetyConfig, funded[i].loanRef, this.programId)));
+      draws = funded.map(() => undefined);
+      backedIdx.forEach((i, j) => { const d = drawInfos[j]; if (d && d.owner.equals(this.programId) && isDrawAccount(d.data)) draws[i] = decodeDraw(d.data); });
+    } catch (e) {
+      throw new RelayError(503, 'rpc', `stream_loan not readable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const extra = new Map(funded.map((s, i) => [s.loanRef, { sub: subs[i], kind: kinds[i], draw: draws[i] }]));
     const loans: LoanView[] = [];
     const openSlots: LoanMarketSnapshot['openSlots'] = [];
-    const counts = { open: 0, funded: 0, settled: 0 };
+    const counts = { open: 0, funded: 0, settled: 0, backed: 0 };
     for (const s of decoded) {
       if (!s.funded) {
         counts.open++;
@@ -113,11 +151,25 @@ export class LoanMarketReader {
         continue;
       }
       if (s.settled) counts.settled++; else counts.funded++;
+      const x = extra.get(s.loanRef);
+      const backed = isBackedSlot(s);
+      if (backed) counts.backed++;
+      const sub = x?.sub, kind = x?.kind ?? 'slash';
+      let backedView: LoanView['backed'];
+      if (backed) {
+        const p = backedLenderPosition(s, sub, x?.draw, now);
+        backedView = {
+          backing: sub?.safetyConfig.toBase58() ?? '', backerFee: p.backerFee.toString(), lenderDue: p.lenderDue.toString(), toBacker: p.toBacker.toString(),
+          toLender: p.toLender.toString(), coverPaid: p.coverPaid.toString(), lenderShortfall: p.lenderShortfall.toString(),
+        };
+      }
       loans.push({
         loanRef: s.loanRef.toString(), lender: s.lender.toBase58(), asset: s.asset.toBase58(), tokenProgram: s.tokenProgram.toBase58(),
         principal: s.principal.toString(), repaid: s.repaid.toString(), fundedAt: s.fundedAt.toString(), expiry: s.expiry.toString(),
         pledgeBps: Number(s.pledgeBps), minRemaining: s.minRemaining.toString(), minRate: s.minRate.toString(), streamStart: s.streamStart.toString(),
-        settled: s.settled, shortfall: shortfallOf(s, now).toString(),
+        settled: s.settled, shortfall: shortfallOf(s, now).toString(), kind: backed ? 'backed' : 'stream',
+        subrogation: sub ? { kind, label: SUBROGATION_LABEL[kind], to: sub.to.toBase58(), owed: sub.owed.toString(), paid: sub.paid.toString() } : null,
+        ...(backedView ? { backed: backedView } : {}),
       });
     }
     return {

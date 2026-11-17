@@ -7,7 +7,7 @@ import { Keypair, PublicKey } from '@solana/web3.js';
 import {
   BACKER_ERROR, BACKING_ACCOUNT_SIZE, DEFAULT_MAX_LENDER_FEE_BPS, DRAW_ACCOUNT_SIZE, FULL_COVER_BPS, backedFundTerms, backedTermsDigest, LOCALNET_LOAN_FAST_PROGRAM_ID, backClaimIx, backOpenIx, backRequestIx, backSettleIx,
   backWithdrawIx, backedClaimAmount, backedTerms, backerKeyFor, backerTimes, backingPda, backingVault, checkLineTerms, decodeBacking, decodeDraw, drawKeyFor, drawPda,
-  fundBackedIx, isBackedSlot, lineCapacity, releaseReason, routingDone,
+  fundBackedIx, isBackedSlot, lineCapacity, releaseReason, routingDone, SUBROGATION_LABEL, backedLenderPosition, subrogationKindOf, subrogationKinds,
 } from '../../src/solana/backer.js';
 import { LOAN_ERROR, LOCALNET_LOAN_PROGRAM_ID, MAINNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, loanStatus, slotPda, subrogationPda } from '../../src/solana/lender.js';
 
@@ -140,5 +140,48 @@ describe('instructions and accounts', () => {
     const st = await loanStatus(fake, 1n);
     expect(st.state === 'open' && st.backed).toBe(true);
     void PublicKey;
+  });
+});
+
+// docs/BACKER-SPEC.md section 16: readers call a backed loan's Subrogation the backer's fee and recovery, never a slash
+describe('readers: Subrogation kind and the lender\'s position on a backed loan', () => {
+  const P = LOCALNET_LOAN_PROGRAM_ID;
+  const backingData = Buffer.concat([disc('account:Backing'), Buffer.alloc(BACKING_ACCOUNT_SIZE - 8)]);
+  it('a Backing owned by stream_loan, or a backed slot (pledge 0), makes it the backer\'s; anything else is a slash', async () => {
+    expect(SUBROGATION_LABEL).toEqual({ backer: 'backer fee / recovery', slash: 'safety-pool slash recovery' });
+    expect(subrogationKindOf({ owner: P, data: backingData }, P)).toBe('backer');
+    expect(subrogationKindOf({ owner: Keypair.generate().publicKey, data: backingData }, P)).toBe('slash'); // a look-alike owned elsewhere
+    expect(subrogationKindOf({ owner: P, data: Buffer.alloc(BACKING_ACCOUNT_SIZE) }, P)).toBe('slash');
+    expect(subrogationKindOf(null, P)).toBe('slash');
+    expect(subrogationKindOf(null, P, { funded: true, pledgeBps: 0n })).toBe('backer');
+    expect(subrogationKindOf(null, P, { funded: true, pledgeBps: 4000n })).toBe('slash');
+    // batched: one getMultipleAccountsInfo per 100 Subrogations, in order
+    const cfgs = Array.from({ length: 150 }, () => Keypair.generate().publicKey);
+    const subs = cfgs.map((safetyConfig, i) => ({ loanRef: BigInt(i), safetyConfig, to: safetyConfig, owed: 1n, paid: 0n }));
+    let calls = 0;
+    const conn = { getMultipleAccountsInfo: async (ks: PublicKey[]) => { calls++; expect(ks.length).toBeLessThanOrEqual(100); return ks.map((k) => (cfgs.indexOf(k) % 2 === 0 ? { owner: P, data: backingData } : null)); } };
+    const kinds = await subrogationKinds(conn as never, subs, P);
+    expect(calls).toBe(2);
+    expect(kinds.filter((k) => k === 'backer')).toHaveLength(75);
+    expect(kinds[0]).toBe('backer');
+    expect(kinds[1]).toBe('slash');
+  });
+
+  it('the lender\'s position: fee first, then the lender; its shortfall nets the cover paid; nothing before expiry + grace', () => {
+    // advance 500, fee 25, lender fee 15: principal 540, lender due 515
+    const slot = { loanRef: 1n, lender: PublicKey.default, funded: true, settled: false, asset: PublicKey.default, tokenProgram: PublicKey.default, principal: 540n, repaid: 10n, minRemaining: 0n, minRate: 0n, pledgeBps: 0n, expiry: 1_000n, agentPk: 0n, fundedAt: 0n, payoutTo: PublicKey.default, streamStart: 0n, bump: 255 };
+    const draw = { backerFee: 25n, claimed: 0n };
+    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_001n, 0n, 2n)).toEqual({ lenderDue: 515n, backerFee: 25n, toBacker: 10n, toLender: 0n, coverPaid: 0n, lenderShortfall: 0n });
+    // after expiry + grace: the lender is short its whole due; 30 unsynced in the inbox would pay the fee's last 15 first
+    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_003n, 0n, 2n).lenderShortfall).toBe(515n);
+    expect(backedLenderPosition(slot, { owed: 25n, paid: 10n }, draw, 1_003n, 30n, 2n)).toMatchObject({ toBacker: 25n, toLender: 15n, lenderShortfall: 500n });
+    // the claim paid 515 (owed = paid + payout): nothing short; recoveries go to the backer, not the lender
+    const claimed = backedLenderPosition({ ...slot, repaid: 110n }, { owed: 525n, paid: 110n }, { backerFee: 25n, claimed: 515n }, 1_003n, 0n, 2n);
+    expect(claimed).toMatchObject({ toBacker: 110n, toLender: 0n, coverPaid: 515n, lenderShortfall: 0n });
+    // 20% cover: the lender keeps the uncovered rest as its shortfall
+    expect(backedLenderPosition(slot, { owed: 113n, paid: 10n }, { backerFee: 25n, claimed: 103n }, 1_003n, 0n, 2n).lenderShortfall).toBe(412n);
+    // settled or repaid: no shortfall; without the Draw, the Subrogation's owed stands for the fee
+    expect(backedLenderPosition({ ...slot, settled: true }, { owed: 25n, paid: 10n }, draw, 1_003n, 0n, 2n).lenderShortfall).toBe(0n);
+    expect(backedLenderPosition({ ...slot, repaid: 540n }, { owed: 25n, paid: 25n }, undefined, 1_003n, 0n, 2n)).toMatchObject({ lenderDue: 515n, toLender: 515n, lenderShortfall: 0n });
   });
 });

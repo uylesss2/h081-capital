@@ -117,8 +117,10 @@ export function ledgerPda(loanRef: bigint, mint: PublicKey, programId = LOCALNET
 }
 
 /**
- * A safety-pool slash recorded for the loan: ["subrogation", loan_ref u64 LE]. Exists only after a slash; while
- * it does and `paid < owed`, sync/claim forward the loan's receipts to its `to` account before the lender.
+ * The loan's Subrogation: ["subrogation", loan_ref u64 LE]. A stream loan has one only after a safety-pool slash; a
+ * backed loan has one from funding on (the backer's fee, then the recovery of a cover payout; safety_config is its
+ * Backing). While `paid < owed`, sync/claim forward the loan's receipts to its `to` account before the lender. Label
+ * it with backer.subrogationKindOf / subrogationKinds, never as a slash without checking.
  */
 export function subrogationPda(loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): PublicKey {
   return PublicKey.findProgramAddressSync([enc('subrogation'), u64le(loanRef)], programId)[0];
@@ -365,14 +367,17 @@ export function decodeLedger(data: Uint8Array): LedgerAccount {
   return { loanRef: x.u64(), mint: x.key(), held: x.u64(), received: x.u64() };
 }
 
-/** The Subrogation account: a safety pool paid the lender `owed`; `paid` of the loan's receipts went to `to` so far. */
+/**
+ * The Subrogation account: `owed` is what the loan's receipts repay to `to` first (a safety pool's slash payout, or a
+ * backed line's fee plus any cover payout); `paid` of them went to `to` so far. See subrogationPda for how to label it.
+ */
 export interface SubrogationAccount { loanRef: bigint; safetyConfig: PublicKey; to: PublicKey; owed: bigint; paid: bigint }
 export function decodeSubrogation(data: Uint8Array): SubrogationAccount {
   const x = new Reader(data);
   return { loanRef: x.u64(), safetyConfig: x.key(), to: x.key(), owed: x.u64(), paid: x.u64() };
 }
 
-/** The loan's Subrogation, or undefined before any slash. */
+/** The loan's Subrogation, or undefined (a stream loan never slashed). */
 export async function readSubrogation(connection: Connection, loanRef: bigint, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<SubrogationAccount | undefined> {
   const info = await connection.getAccountInfo(subrogationPda(loanRef, programId), 'confirmed');
   return info && info.owner.equals(programId) ? decodeSubrogation(info.data) : undefined;
@@ -794,7 +799,7 @@ export class SolanaLoanLenderWallet {
     return send(this.connection, payer, [syncIx(payer.publicKey, loanRef, m, slot.lender, await this.pool.tokenProgramOf(m), this.programId, sub?.to)]);
   }
 
-  /** The slash recorded for the loan by a safety pool, if any (its receipts go to `to` until `paid` reaches `owed`). */
+  /** The loan's Subrogation, if any: a safety-pool slash, or a backed loan's fee and recovery (receipts go to `to` until `paid` reaches `owed`). */
   async subrogation(loanRef: bigint): Promise<SubrogationAccount | undefined> {
     return readSubrogation(this.connection, loanRef, this.programId);
   }
@@ -853,7 +858,8 @@ export class SolanaLoanLenderWallet {
       if (!s.settled) throw new Error(`loan ${loanRef} is not settled: settle it first`);
       const sub = await this.subrogation(loanRef);
       if (sub && sub.paid < sub.owed && s.repaid < s.principal) {
-        if (s.pledgeBps === 0n) throw new Error(`loan ${loanRef} is backed and its backer is still owed ${sub.owed - sub.paid} (fee or recovery): the slot stays open until it is paid, forgiven, or the recovery horizon passes`);
+        // never call a backed line's fee or recovery a slash: the slot is backed, or the Subrogation's safety_config is a Backing
+        if (backer.subrogationKindOf(await this.connection.getAccountInfo(sub.safetyConfig, 'confirmed'), this.programId, s) === 'backer') throw new Error(`loan ${loanRef} is backed and its backer is still owed ${sub.owed - sub.paid} (fee or recovery): the slot stays open until it is paid, forgiven, or the recovery horizon passes`);
         throw new Error(`loan ${loanRef} was slashed and the safety pool has recovered ${sub.paid} of ${sub.owed}: the slot stays open until it has`);
       }
       loan = { asset: s.asset, tokenProgram: s.tokenProgram };

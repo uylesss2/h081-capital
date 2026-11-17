@@ -344,7 +344,12 @@ export function safetyWithdrawIx(programId: PublicKey, owner: PublicKey, mint: P
   ]);
 }
 
-/** The slot lender and the pool's underwriter (config authority) both sign. `cover` is the most a slash may pay. */
+/**
+ * The slot lender and the pool's underwriter (config authority) both sign. `cover` is the most a slash may pay.
+ * Never co-sign one for a backed loan (funded with pledge_bps 0, docs/BACKER-SPEC.md): safety_pool accepts it, but its
+ * slash can never pay (stream_loan's record_slash cannot create the Subrogation the backed loan already has), so the
+ * premium would buy nothing. The staking suite shows both (test/solana/staking.test.ts, loan `backed`).
+ */
 export function insureIx(
   programId: PublicKey, lender: PublicKey, mint: PublicKey, from: PublicKey, loanRef: bigint, premium: bigint, cover: bigint, underwriter: PublicKey,
   tokenProgram = TOKEN22_PROGRAM_ID, streamLoan = SAFETY_STREAM_LOAN_PROGRAM_ID,

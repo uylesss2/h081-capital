@@ -1,5 +1,5 @@
 // Test doubles for the x402 seller: a scripted facilitator, payment builders and stream_loan account fixtures.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import type { Facilitator, Settled, Verified } from '../../../relayer/x402/facilitator.js';
 import {
@@ -100,4 +100,35 @@ export function clockAccount(now: bigint) {
   const data = Buffer.alloc(40);
   data.writeBigInt64LE(now, 32);
   return { data, owner: PublicKey.default, lamports: 1, executable: false };
+}
+
+const anchorDisc = (name: string) => createHash('sha256').update(`account:${name}`).digest().subarray(0, 8);
+
+/** Encodes a stream_loan Subrogation account (97 bytes). */
+export function encodeSubrogation(s: { loanRef: bigint; safetyConfig: PublicKey; to: PublicKey; owed: bigint; paid: bigint }): Buffer {
+  const b = Buffer.alloc(97);
+  anchorDisc('Subrogation').copy(b, 0);
+  b.writeBigUInt64LE(s.loanRef, 8); s.safetyConfig.toBuffer().copy(b, 16); s.to.toBuffer().copy(b, 48);
+  b.writeBigUInt64LE(s.owed, 80); b.writeBigUInt64LE(s.paid, 88); b[96] = 255;
+  return b;
+}
+
+/** A stream_loan Backing account (278 bytes): its discriminator is what readers check; the fields stay zero. */
+export function encodeBackingStub(): Buffer {
+  const b = Buffer.alloc(278);
+  anchorDisc('Backing').copy(b, 0);
+  return b;
+}
+
+/** Encodes a stream_loan Draw account (178 bytes). */
+export function encodeDraw(d: { loanRef: bigint; backing: PublicKey; advance: bigint; backerFee: bigint; lenderFee: bigint; reserve: bigint; claimed: bigint; state: number }): Buffer {
+  const b = Buffer.alloc(178);
+  anchorDisc('Draw').copy(b, 0);
+  let o = 8;
+  const u64 = (v: bigint) => { b.writeBigUInt64LE(v, o); o += 8; };
+  u64(d.loanRef); d.backing.toBuffer().copy(b, o); o += 32; o += 64; // payer, payout_to
+  u64(d.advance); u64(d.backerFee); u64(d.lenderFee); u64(d.reserve); u64(0n); u64(0n); u64(0n); u64(d.claimed);
+  b[o++] = d.state; b[o++] = 255;
+  if (o !== b.length) throw new Error(`draw encoder wrote ${o} of ${b.length} bytes`);
+  return b;
 }

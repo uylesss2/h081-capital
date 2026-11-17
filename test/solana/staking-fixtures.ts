@@ -19,7 +19,7 @@ export const LIVE_SECONDS = 200n;
 
 export const REF = {
   live: 1001n, unfunded: 1002n, noExpiry: 1003n, expired: 1004n, settled: 1005n, pending: 1006n, huge: 1007n, wrongOwner: 1008n,
-  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n, long: 1014n, repaid: 1015n, dust: 1016n, slashedRepaid: 1017n,
+  emptyPool: 1011n, overdue: 1012n, escrowed: 1013n, long: 1014n, repaid: 1015n, dust: 1016n, slashedRepaid: 1017n, backed: 1018n,
 } as const;
 
 export interface StakingMeta {
@@ -31,6 +31,8 @@ export interface StakingMeta {
   /** mint authority of `asset` (throwaway localnet key) */
   assetAuthoritySecret: number[];
   loans: Record<keyof typeof REF, { loanRef: string; principal: string; repaid: string; pending: string; escrowed: string }>;
+  /** the Backing named by the `backed` loan's Subrogation */
+  backedBacking: string;
 }
 
 export function readStakingMeta(): StakingMeta {
@@ -137,13 +139,41 @@ export function writeFixtures(t0: bigint): StakingMeta {
       Keypair.generate().publicKey.toBuffer(), le(3_000_000n), le(1_000_000n), Buffer.from([sbump]),
     ]));
   }
+  // a backed loan as fund_backed leaves it (docs/BACKER-SPEC.md 3.3): pledge 0, no stream, agent_pk 0, principal = advance
+  // 5,000,000 + backer fee 250,000; its Subrogation exists from funding on {safety_config: the Backing, to: the vault,
+  // owed: the backer fee}. A real fund_backed loan on the localnet build is due a day later at the earliest, and
+  // safety_pool reads only that build's id, so the state is written directly at the live expiry instead.
+  slot('backed', { principal: 5_250_000n, pledgeBps: 0, minRemaining: 0n, minRate: 0n, streamStart: 0n, agentPk: new Uint8Array(32) });
+  let backedBacking: PublicKey;
+  {
+    const le = (v: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(v); return b; };
+    const backer = Keypair.generate().publicKey;
+    const [backing, bbump] = PublicKey.findProgramAddressSync([new TextEncoder().encode('backing'), backer.toBytes(), le(1n)], SAFETY_STREAM_LOAN_PROGRAM_ID);
+    backedBacking = backing;
+    // Backing (278 bytes): backer, draw_key, lender, asset, token_program, payer, nonce, cover 10000, fee 500, max lender fee 500,
+    // expiry, max_advance, max_total, advanced_total, reserved, open_draws 1, draws_total 1, covered_out 0, cosign false, created_at, bump
+    const u16 = (v: number) => { const b = Buffer.alloc(2); b.writeUInt16LE(v); return b; };
+    const u32 = (v: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(v); return b; };
+    const backingData = Buffer.concat([
+      createHash('sha256').update('account:Backing').digest().subarray(0, 8), backer.toBuffer(), Keypair.generate().publicKey.toBuffer(), lender.publicKey.toBuffer(),
+      asset.toBuffer(), CLASSIC_TOKEN_PROGRAM_ID.toBuffer(), lender.publicKey.toBuffer(), le(1n), u16(10_000), u16(500), u16(500), le(liveExpiry + 86_400n),
+      le(5_000_000n), le(5_000_000n), le(5_000_000n), le(5_000_000n), u16(1), u32(1), le(0n), Buffer.from([0]), le(t0 - 3600n), Buffer.from([bbump]),
+    ]);
+    if (backingData.length !== 278) throw new Error(`Backing fixture is ${backingData.length} bytes`);
+    put(backing, SAFETY_STREAM_LOAN_PROGRAM_ID, backingData);
+    const [sub, sbump] = PublicKey.findProgramAddressSync([new TextEncoder().encode('subrogation'), le(REF.backed)], SAFETY_STREAM_LOAN_PROGRAM_ID);
+    put(sub, SAFETY_STREAM_LOAN_PROGRAM_ID, Buffer.concat([
+      createHash('sha256').update('account:Subrogation').digest().subarray(0, 8), le(REF.backed), backing.toBuffer(),
+      ataAddress(backing, asset, CLASSIC_TOKEN_PROGRAM_ID).toBuffer(), le(250_000n), le(0n), Buffer.from([sbump]),
+    ]));
+  }
 
   // the loan asset itself: its supply is what the fixture accounts hold; tests mint receipts with assetAuthority
   put(asset, CLASSIC_TOKEN_PROGRAM_ID, mintData(assetAuthority.publicKey, supply));
 
   const meta: StakingMeta = {
     t0: Number(t0), liveExpiry: Number(liveExpiry), lenderSecret: Array.from(lender.secretKey), asset: asset.toBase58(),
-    assetAuthoritySecret: Array.from(assetAuthority.secretKey), loans,
+    assetAuthoritySecret: Array.from(assetAuthority.secretKey), loans, backedBacking: backedBacking.toBase58(),
   };
   writeFileSync(resolve(FIXTURE_DIR, 'meta.json'), JSON.stringify(meta, null, 2));
   return meta;

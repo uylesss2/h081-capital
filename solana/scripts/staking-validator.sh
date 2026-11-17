@@ -5,12 +5,14 @@
 # init instructions require the upgrade authority), plus the stream_loan fixture accounts written by
 # test/solana/staking-fixtures.ts (--account-dir).
 # Never touches other validators (8899/8900 belong to another project; 8999 is the pool suite's).
+# Overrides (defaults above), so one worktree can run it on its own port and ledger: STAKING_LEDGER, STAKING_RPC_PORT,
+# STAKING_FAUCET_PORT, STAKING_GOSSIP_PORT, STAKING_DYNAMIC_PORTS, STAKING_STAGE.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
-LEDGER="$HOME/stipend-staking-ledger"
+LEDGER="${STAKING_LEDGER:-$HOME/stipend-staking-ledger}"
 SO="$SOLANA_DIR/target-so"
 K="$SOLANA_DIR/keys"
-W="$HOME/stipend-staking-so"
+W="${STAKING_STAGE:-$HOME/stipend-staking-so}"
 # Localnet-only upgrade authority: LOCALNET_UPGRADE_AUTHORITY in test/solana/config-authority.ts (public seed).
 UPGRADE_AUTHORITY=6CMruTpcTHYowyPcKHkh8YATGUgwBrSfjsHsVDtBV77g
 rm -rf "$W" && mkdir -p "$W/fixtures"
@@ -27,6 +29,7 @@ cp "$SO/staking-fixtures/"*.json "$W/fixtures/" 2>/dev/null || true
 rm -f "$W/fixtures/meta.json"
 exec solana-test-validator \
   --ledger "$LEDGER" --reset --quiet \
-  --rpc-port 9199 --faucet-port 9914 --gossip-port 8093 --dynamic-port-range 8500-8600 \
+  --rpc-port "${STAKING_RPC_PORT:-9199}" --faucet-port "${STAKING_FAUCET_PORT:-9914}" --gossip-port "${STAKING_GOSSIP_PORT:-8093}" \
+  --dynamic-port-range "${STAKING_DYNAMIC_PORTS:-8500-8600}" \
   --account-dir "$W/fixtures" \
   "${args[@]}"

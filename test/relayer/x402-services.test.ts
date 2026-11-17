@@ -17,11 +17,12 @@ import { type Allowance, FIELD, allowanceCommitment, initCrypto, randomField, ra
 import { LEVELS } from '../../src/inputs.js';
 import { MerkleTree } from '../../src/merkle.js';
 import { Prover } from '../../src/prover.js';
-import { GRACE, registryPda, slotPda } from '../../src/solana/lender.js';
+import { GRACE, registryPda, slotPda, subrogationPda } from '../../src/solana/lender.js';
+import { drawPda } from '../../src/solana/backer.js';
 import { poolPda, vaultPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE } from '../../src/solana/program.js';
 import { concatBytes, encodeTransactArgs, encodeTransactExt, extDataHash, fromBe, toB64 } from '../../src/solana/index.js';
-import { clockAccount, encodeRegistry, encodeSlot } from './helpers/x402.js';
+import { clockAccount, encodeBackingStub, encodeDraw, encodeRegistry, encodeSlot, encodeSubrogation } from './helpers/x402.js';
 
 const loanProgram = Keypair.generate().publicKey;
 const NOW = 1_800_000_000n;
@@ -60,7 +61,7 @@ describe('loan market reader', () => {
   const slots = [
     encodeSlot({ loanRef: 1n, lender }), // open
     encodeSlot({ loanRef: 2n, lender, funded: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 1_000_000n, repaid: 250_000n, expiry: NOW - GRACE - 10n, pledgeBps: 4000n, fundedAt: NOW - 100_000n }),
-    encodeSlot({ loanRef: 3n, lender, funded: true, settled: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 5n, repaid: 5n, expiry: NOW + 10n }),
+    encodeSlot({ loanRef: 3n, lender, funded: true, settled: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 5n, repaid: 5n, expiry: NOW + 10n, pledgeBps: 1000n }),
   ];
   let rpcCalls = 0;
   const connection = {
@@ -70,9 +71,14 @@ describe('loan market reader', () => {
       if (k.equals(SYSVAR_CLOCK_PUBKEY)) return clockAccount(NOW);
       return null;
     },
-    // slots live at ["slot", loan_ref] for loan_ref 1..nextLoanRef-1; the reader must ask for exactly those
+    // slots live at ["slot", loan_ref] for loan_ref 1..nextLoanRef-1; the reader must ask for exactly those, then for
+    // the funded loans' Subrogation PDAs (none here)
     getMultipleAccountsInfo: async (keys: PublicKey[]) => {
       rpcCalls++;
+      if (keys[0]?.equals(subrogationPda(2n, loanProgram))) {
+        expect(keys.map((k) => k.toBase58())).toEqual([2n, 3n].map((r) => subrogationPda(r, loanProgram).toBase58()));
+        return keys.map(() => null);
+      }
       expect(keys.map((k) => k.toBase58())).toEqual([1n, 2n, 3n].map((r) => slotPda(r, loanProgram).toBase58()));
       return slots.map((data) => ({ data, owner: loanProgram, lamports: 1, executable: false }));
     },
@@ -87,7 +93,9 @@ describe('loan market reader', () => {
     expect(snap).toMatchObject({ programId: loanProgram.toBase58(), registry: { nextLoanRef: '4' }, originationFeeBps: 25, graceSeconds: Number(GRACE), treasury: 'T', counts: { open: 1, funded: 1, settled: 1 }, now: NOW.toString() });
     expect(snap.openSlots).toEqual([{ loanRef: '1', lender: lender.toBase58() }]);
     expect(snap.loans.map((l) => l.loanRef)).toEqual(['2', '3']);
-    expect(snap.loans[0]).toMatchObject({ lender: lender.toBase58(), asset: asset.toBase58(), tokenProgram: TOKEN_PROGRAM_ID.toBase58(), principal: '1000000', repaid: '250000', pledgeBps: 4000, settled: false, shortfall: '750000' });
+    expect(snap.loans[0]).toMatchObject({ lender: lender.toBase58(), asset: asset.toBase58(), tokenProgram: TOKEN_PROGRAM_ID.toBase58(), principal: '1000000', repaid: '250000', pledgeBps: 4000, settled: false, shortfall: '750000', kind: 'stream', subrogation: null });
+    expect(snap.loans[0].backed).toBeUndefined();
+    expect(snap.counts.backed).toBe(0);
     expect(snap.loans[1]).toMatchObject({ settled: true, shortfall: '0' });
     const calls = rpcCalls;
     expect(await reader.snapshot()).toBe(snap);
@@ -97,6 +105,42 @@ describe('loan market reader', () => {
     expect(rpcCalls).toBeGreaterThan(calls);
     // the service wraps it
     expect(await loansMarket(reader).run({ body: undefined, url: new URL('http://x/'), clientKey: 'k', log: () => undefined }, undefined)).toMatchObject({ counts: { open: 1 } });
+  });
+
+  // docs/BACKER-SPEC.md section 16: a backed loan's Subrogation is the backer's fee and recovery, never a slash
+  it('labels a backed loan\'s Subrogation "backer fee / recovery" and a safety-pool one a slash; pledge 0 reads as backed', async () => {
+    const backing = Keypair.generate().publicKey, vault = Keypair.generate().publicKey;
+    const safetyConfig = Keypair.generate().publicKey, safetyProgram = Keypair.generate().publicKey, recovery = Keypair.generate().publicKey;
+    // 4: backed, defaulted (advance 500, backer fee 25, lender fee 15 -> principal 540; 10 repaid, all to the backer), the stake paid 515
+    // 5: a stream loan slashed by a safety pool; 6: backed (pledge 0) whose Subrogation the RPC no longer returns
+    const accounts = new Map<string, { data: Buffer; owner: PublicKey }>([
+      [registryPda(loanProgram).toBase58(), { data: encodeRegistry(7n), owner: loanProgram }],
+      [slotPda(4n, loanProgram).toBase58(), { data: encodeSlot({ loanRef: 4n, lender, funded: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 540n * 1_000_000n, repaid: 10n * 1_000_000n, expiry: NOW - GRACE - 10n, pledgeBps: 0n }), owner: loanProgram }],
+      [slotPda(5n, loanProgram).toBase58(), { data: encodeSlot({ loanRef: 5n, lender, funded: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 1_000n, repaid: 100n, expiry: NOW - GRACE - 10n, pledgeBps: 5000n }), owner: loanProgram }],
+      [slotPda(6n, loanProgram).toBase58(), { data: encodeSlot({ loanRef: 6n, lender, funded: true, asset, tokenProgram: TOKEN_PROGRAM_ID, principal: 100n, expiry: NOW + 100n, pledgeBps: 0n }), owner: loanProgram }],
+      [subrogationPda(4n, loanProgram).toBase58(), { data: encodeSubrogation({ loanRef: 4n, safetyConfig: backing, to: vault, owed: 525n * 1_000_000n, paid: 10n * 1_000_000n }), owner: loanProgram }],
+      [subrogationPda(5n, loanProgram).toBase58(), { data: encodeSubrogation({ loanRef: 5n, safetyConfig, to: recovery, owed: 900n, paid: 0n }), owner: loanProgram }],
+      [backing.toBase58(), { data: encodeBackingStub(), owner: loanProgram }],
+      [safetyConfig.toBase58(), { data: Buffer.alloc(200), owner: safetyProgram }],
+      [drawPda(backing, 4n, loanProgram).toBase58(), { data: encodeDraw({ loanRef: 4n, backing, advance: 500n * 1_000_000n, backerFee: 25n * 1_000_000n, lenderFee: 15n * 1_000_000n, reserve: 515n * 1_000_000n, claimed: 515n * 1_000_000n, state: 2 }), owner: loanProgram }],
+    ]);
+    const get = (k: PublicKey) => { const a = accounts.get(k.toBase58()); return a ? { ...a, lamports: 1, executable: false } : null; };
+    const conn = {
+      getAccountInfo: async (k: PublicKey) => (k.equals(SYSVAR_CLOCK_PUBKEY) ? clockAccount(NOW) : get(k)),
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(get),
+    } as unknown as Connection;
+    const snap = await new LoanMarketReader(conn, { programId: loanProgram }).snapshot();
+    expect(snap.counts).toEqual({ open: 0, funded: 3, settled: 0, backed: 2 });
+    const [backed, slashed, noSub] = snap.loans;
+    expect(backed).toMatchObject({ loanRef: '4', kind: 'backed', pledgeBps: 0, shortfall: '530000000' });
+    expect(backed.subrogation).toEqual({ kind: 'backer', label: 'backer fee / recovery', to: vault.toBase58(), owed: '525000000', paid: '10000000' });
+    // the lender's own figures: due 515, nothing from repayments (the 10 went to the backer's fee), 515 from the stake
+    expect(backed.backed).toEqual({ backing: backing.toBase58(), backerFee: '25000000', lenderDue: '515000000', toBacker: '10000000', toLender: '0', coverPaid: '515000000', lenderShortfall: '0' });
+    expect(slashed).toMatchObject({ loanRef: '5', kind: 'stream', shortfall: '900' });
+    expect(slashed.subrogation).toEqual({ kind: 'slash', label: 'safety-pool slash recovery', to: recovery.toBase58(), owed: '900', paid: '0' });
+    expect(slashed.backed).toBeUndefined();
+    expect(noSub).toMatchObject({ loanRef: '6', kind: 'backed', subrogation: null });
+    expect(JSON.stringify(backed)).not.toMatch(/slash/i);
   });
 
   it('answers 503 when the chain is not readable', async () => {

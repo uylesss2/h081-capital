@@ -130,7 +130,8 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     '0.25% origination fee to the protocol treasury; or "fund" a backed draw (`backingCode`): the plan shows the exact ' +
     'terms and a `planDigest`, and the confirm call must pass that `planDigest` back (the draw is funded only at exactly ' +
     'those terms, so a borrower re-request in between is refused); "status" lists the agent\'s slots (or `loanRef`): funded, repaid, ' +
-    'outstanding, claimable, collectable, shortfall, and with `pledgeBps` an open slot\'s terms code again; "claim" ' +
+    'outstanding, claimable, collectable, shortfall, `kind` (stream or backed; a backed loan\'s Subrogation is the backer fee / ' +
+    'recovery, never a slash), and with `pledgeBps` an open slot\'s terms code again; "claim" ' +
     'pulls the vested lender share of the borrower\'s stream (spend circuit), sized to what the loan still owes; ' +
     '"collect" takes shares already routed to the slot; "settle" closes the books (no shortfall can be reported after); ' +
     '"close" returns a settled slot\'s rent (repayments still in it are collected first); "sweep" takes what reached a ' +

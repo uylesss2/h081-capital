@@ -99,12 +99,13 @@ export function loansMarket(reader: LoanMarketReader): X402Service<void> {
   return {
     id: 'loans-market', ...X402_ROUTES['loans-market'], flow: 'settle-after', mimeType: 'application/json',
     description: 'Returns the stream_loan market read from Solana mainnet: the registry, every loan slot (lender, asset, principal, repaid, expiry, '
-      + 'pledge, stream bounds, settlement, shortfall as of chain time), open slots waiting for a borrower, counts and the origination fee rate. '
+      + 'pledge, stream bounds, settlement, shortfall as of chain time; kind stream or backed, and any Subrogation labelled as a backer fee / recovery or a '
+      + 'safety-pool slash), open slots waiting for a borrower, counts and the origination fee rate. '
       + 'Cached for 30 seconds. ' + DISCLAIMER,
     inputExample: {}, inputSchema: { type: 'object', additionalProperties: false, properties: {} },
     outputExample: {
       programId: '8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4', registry: { nextLoanRef: '1' }, originationFeeBps: 25, graceSeconds: 604800,
-      treasury: 'EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq', counts: { open: 0, funded: 0, settled: 0 }, loans: [], openSlots: [],
+      treasury: 'EGvxic665gsar6K3YsnuUH4qPTnv1Rb2rMu2F3GpkZGq', counts: { open: 0, funded: 0, settled: 0, backed: 0 }, loans: [], openSlots: [],
       now: '1793600000', updatedAt: '2026-11-02T00:00:00.000Z',
     },
     outputSchema: {

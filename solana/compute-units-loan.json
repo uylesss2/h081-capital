@@ -1,5 +1,5 @@
 {
-  "measured": "2026-11-16T00:21:44.374Z",
+  "measured": "2026-11-17T01:55:26.014Z",
   "rpc": "http://127.0.0.1:18899",
   "budget": {
     "claim_capped": 400000,
@@ -10,11 +10,11 @@
     "collect_legacy": 40000
   },
   "computeUnits": {
-    "claim_capped": 259427,
-    "sync_excess": 23510,
-    "return_excess_open": 22052,
-    "return_excess_closed": 37779,
-    "collect_legacy": 17583,
-    "sweep_closed_held": 20398
+    "claim_capped": 258823,
+    "sync_excess": 29510,
+    "return_excess_open": 26552,
+    "return_excess_closed": 22779,
+    "collect_legacy": 19083,
+    "sweep_closed_held": 18898
   }
 }

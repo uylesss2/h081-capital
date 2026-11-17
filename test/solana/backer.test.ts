@@ -24,6 +24,12 @@ import {
   backedFundTerms, DEFAULT_MAX_LENDER_FEE_BPS,
 } from '../../src/solana/backer.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
+import { Prover } from '../../src/prover.js';
+import { LOCALNET_CAPACITY_STAKE_PROGRAM_ID, LOCALNET_SAFETY_POOL_PROGRAM_ID } from '../../src/solana/token.js';
+import { H081Bank, type LendSlotView } from '../../integrations/core/bank.js';
+import type { H081Config } from '../../integrations/core/constants.js';
+import { deriveAccountSk } from '../../integrations/core/keys.js';
+import { plain, runOp } from '../../integrations/core/operations.js';
 
 const RPC = process.env.STIPEND_BACKER_RPC;
 const LOAN = LOCALNET_LOAN_PROGRAM_ID;
@@ -657,6 +663,121 @@ suite('the default claim cannot be blocked through the slot\'s pool escrow (fast
     expect(ev.amount).toBe(100n * U - share - 1n);
     expect(await bal(c.lenderAta)).toBe(lb + 100n * U);
     expect(decodeDraw((await connection.getAccountInfo(drawPda(backing, ref, FAST)))!.data).state).toBe('claimed');
+  });
+});
+
+// The agent operations (runOp: what the MCP tools, the Agent Kit actions and the @h081lll/agent routes call) on real
+// H081Bank instances against this validator, on the fast build so the default path runs in seconds. Three agents: a
+// backer B, a borrower A and a lender L. B stakes from its shielded balance (a stipend_pool withdraw, with a real proof
+// from build/circuits, to the Backing PDA) and A repays from its shielded balance (a pool withdraw to the slot PDA):
+// both are pool withdraws to an off-curve owner. Then a default, the claim, a recovery into the vault, and the close.
+suite('H081Bank backed flow through the agent operations (fast build; shielded stake and repayment)', () => {
+  it('B opens and stakes from shielded, A requests, L funds the planned terms; status says "backer fee / recovery"; default, claim, recovery, close', async () => {
+    await initCrypto();
+    const pool = new SolanaPool(connection);
+    await pool.initialize(LOCALNET_UPGRADE_AUTHORITY);
+    const [authority, bKp, aKp, lKp] = await newKeys(4);
+    const mint = await createMint(authority);
+    const ata = (k: PublicKey) => associatedTokenAddress(k, mint);
+    await send(connection, authority, [
+      createAtaIx(authority.publicKey, bKp.publicKey, mint), mintToIx(mint, ata(bKp.publicKey), authority.publicKey, 400n * U),
+      createAtaIx(authority.publicKey, aKp.publicKey, mint), mintToIx(mint, ata(aKp.publicKey), authority.publicKey, 50n * U),
+      createAtaIx(authority.publicKey, lKp.publicKey, mint), mintToIx(mint, ata(lKp.publicKey), authority.publicKey, 500n * U),
+      createAtaIx(authority.publicKey, LOAN_TREASURY, mint),
+    ]);
+    const cfg: H081Config = {
+      cluster: 'localnet', rpcUrl: RPC!, relayerUrl: undefined, circuitsDir: 'build/circuits', circuitsUrl: 'http://127.0.0.1:1/',
+      poolProgramId: pool.programId, loanProgramId: FAST, capacityProgramId: LOCALNET_CAPACITY_STAKE_PROGRAM_ID, safetyProgramId: LOCALNET_SAFETY_POOL_PROGRAM_ID,
+      usdgMint: mint, stakeMint: mint, loanTreasury: LOAN_TREASURY, decimals: 6,
+    };
+    const open = (k: Keypair) => H081Bank.open({ config: cfg, signer: k, accountSk: deriveAccountSk(k), prover: new Prover(), cacheDir: null });
+    const B = await open(bKp), A = await open(aKp), L = await open(lKp);
+    type Obj = Record<string, unknown>;
+    const op = async (bank: H081Bank, name: Parameters<typeof runOp>[1], args: Obj) => (await runOp(bank, name, args)) as Obj & { plan?: Obj };
+
+    // A: the draw key code for line 1 (offline)
+    const drawKeyCode = String((await op(A, 'h081_back_draw', { action: 'key' })).drawKeyCode);
+    expect(drawKeyCode.startsWith('h081-draw-key:')).toBe(true);
+
+    // B: shield 300, open a line pinned to L (5% fee, 100% cover), stake 250 from the shielded balance
+    expect((await op(B, 'h081_bank_deposit', { usdg: '300' })).shielded).toBe(300n * U);
+    const lineArgs = { action: 'open', drawKeyCode, feeBps: 500, days: 1, maxAdvanceUsdg: '200', lender: lKp.publicKey.toBase58() };
+    expect((await op(B, 'h081_back', lineArgs)).sent).toBe(false);
+    const opened = await op(B, 'h081_back', { ...lineArgs, confirm: true });
+    const nonce = String(opened.nonce), backing = new PublicKey(String(opened.backing)), lineCode = String(opened.backingCode);
+    const vault = backingVault(backing, mint);
+    expect(await connection.getAccountInfo(backing)).not.toBeNull();
+    const staked = await op(B, 'h081_back', { action: 'stake', nonce, usdg: '250', fromShielded: true, confirm: true });
+    expect(staked.staked).toBe(250n * U);
+    expect(await bal(vault)).toBe(250n * U); // a stipend_pool withdraw straight to the Backing PDA's associated account
+    expect((await op(B, 'h081_bank_balance', {})).shielded).toBe(50n * U);
+
+    // L opens a slot; A requests 100 at a 3% lender fee, due 3 seconds after funding
+    const loanRef = String((await op(L, 'h081_lend', { action: 'open', pledgeBps: 4000, confirm: true })).loanRef);
+    const req = await op(A, 'h081_back_draw', { action: 'request', backingCode: lineCode, loanRef, advanceUsdg: '100', lenderFeeBps: 300, days: 3 / 86_400, confirm: true });
+    expect(req).toMatchObject({ sent: true, principal: 108n * U, backerFee: 5n * U, lenderFee: 3n * U });
+    const drawCode = String(req.backingCode);
+
+    // L: the plan, then the fund with its planDigest (exactly the planned terms)
+    const fundPlan = await op(L, 'h081_lend', { action: 'fund', backingCode: drawCode });
+    expect(fundPlan.plan).toMatchObject({ kind: 'backed', youAreDue: 103n * U, covered: 103n * U, backerFeeFirst: 5n * U });
+    const lBefore = await bal(ata(lKp.publicKey));
+    expect((await op(L, 'h081_lend', { action: 'fund', backingCode: drawCode, planDigest: String(fundPlan.plan!.planDigest), confirm: true })).sent).toBe(true);
+    expect(await bal(ata(lKp.publicKey))).toBe(lBefore - 100n * U);
+
+    // L's status labels the Subrogation as the backer's fee, never a slash; claim (stream loans only) refuses it
+    const status = async () => ((await op(L, 'h081_lend', { action: 'status', loanRef })).slots as LendSlotView[])[0];
+    let v = await status();
+    expect(v).toMatchObject({ kind: 'backed', pledgeBps: 0n, principal: 108n * U, shortfall: 0n });
+    expect(v.subrogation).toEqual({ kind: 'backer', label: 'backer fee / recovery', to: vault.toBase58(), owed: 5n * U, paid: 0n });
+    expect(v.backed).toMatchObject({ backing: backing.toBase58(), drawState: 'funded', lenderDue: 103n * U, backerFee: 5n * U, coverPaid: 0n });
+    expect(JSON.stringify(plain(v))).not.toMatch(/slash/i);
+    await expect(op(L, 'h081_lend', { action: 'claim', loanRef })).rejects.toThrow(/is backed: there is no pledged stream/);
+
+    // A takes the advance to its wallet, shields 30 and repays 8 from the shielded balance (a pool withdraw to the slot PDA)
+    expect((await op(A, 'h081_back_draw', { action: 'take', usdg: '99.75', confirm: true })).sent).toBe(true);
+    await op(A, 'h081_bank_deposit', { usdg: '30' });
+    const lMid = await bal(ata(lKp.publicKey));
+    expect((await op(A, 'h081_back_draw', { action: 'repay', backingCode: drawCode, usdg: '8', fromShielded: true, confirm: true })).sent).toBe(true);
+    // the backer's 5 first, the lender the rest
+    expect(await bal(vault)).toBe(255n * U);
+    expect(await bal(ata(lKp.publicKey))).toBe(lMid + 3n * U);
+    v = await status();
+    expect(v.subrogation).toMatchObject({ kind: 'backer', owed: 5n * U, paid: 5n * U });
+    expect(v.backed).toMatchObject({ toBacker: 5n * U, toLender: 3n * U });
+
+    // default: after expiry + grace the lender is short its due less what it got (103 - 3); settling now would forfeit the cover
+    await waitUntil((await readSlot(BigInt(loanRef), FAST)).expiry + 3n);
+    v = await status();
+    expect(v.shortfall).toBe(100n * U);
+    expect(v.backed!.lenderShortfall).toBe(100n * U);
+    expect(String((await op(L, 'h081_lend', { action: 'settle', loanRef })).plan!.warning)).toMatch(/including the backer's cover/);
+
+    // anyone claims (here A, the borrower): the stake pays the lender its unpaid due
+    const lPre = await bal(ata(lKp.publicKey));
+    expect((await op(A, 'h081_back', { action: 'claim', backingCode: drawCode })).sent).toBe(true);
+    expect(await bal(ata(lKp.publicKey))).toBe(lPre + 100n * U);
+    expect(await bal(vault)).toBe(155n * U);
+    v = await status();
+    expect(v).toMatchObject({ shortfall: 0n, backed: { coverPaid: 100n * U, drawState: 'claimed', lenderShortfall: 0n } });
+    expect(v.subrogation).toMatchObject({ kind: 'backer', label: 'backer fee / recovery', owed: 105n * U, paid: 5n * U });
+    expect(String((await op(L, 'h081_lend', { action: 'settle', loanRef })).plan!.warning)).toMatch(/already paid its cover \(100 USDG\)/);
+
+    // a later shielded repayment recovers the payout into the vault, not to the lender
+    await op(A, 'h081_back_draw', { action: 'repay', backingCode: drawCode, usdg: '10', fromShielded: true, confirm: true });
+    expect(await bal(vault)).toBe(165n * U);
+    expect(await bal(ata(lKp.publicKey))).toBe(lPre + 100n * U);
+    const lines = (await op(B, 'h081_back', { action: 'status', nonce })).lines as Obj[];
+    expect(lines[0]).toMatchObject({ coveredOut: 100n * U, openDraws: 1 });
+
+    // after the claim window and the recovery horizon the draw is released; B closes the line and gets the vault back
+    await waitUntil((await readSlot(BigInt(loanRef), FAST)).expiry + 2n + 5n + 5n + 1n);
+    await op(B, 'h081_back', { action: 'release', nonce, loanRef }); // permissionless on chain; the op names the line by B's nonce
+    expect(await connection.getAccountInfo(drawPda(backing, BigInt(loanRef), FAST))).toBeNull();
+    const bWallet = await bal(ata(bKp.publicKey));
+    expect((await op(B, 'h081_back', { action: 'close', nonce, confirm: true })).sent).toBe(true);
+    expect(await bal(ata(bKp.publicKey))).toBe(bWallet + 165n * U);
+    expect(await connection.getAccountInfo(backing)).toBeNull();
   });
 });
 

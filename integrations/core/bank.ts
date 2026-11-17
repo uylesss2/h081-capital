@@ -41,7 +41,7 @@ import { fieldOf } from '../../src/solana/field.js';
 import { sendLegacy } from '../../src/solana/send.js';
 import {
   type ClosedSlotAccount, SolanaLoanLenderWallet, type SlotAccount, claimRoom, decodeClosedSlot, decodeRegistry, decodeSlot, isClosedSlotAccount, maxPrincipal,
-  originationFee, payoutAudience, registryPda, shortfallOf, slotEscrow, slotInbox, slotPda, sweepSplit,
+  decodeSubrogation, originationFee, payoutAudience, registryPda, shortfallOf, slotEscrow, slotInbox, slotPda, subrogationPda, sweepSplit,
 } from '../../src/solana/lender.js';
 import { createAtaIdempotentIx, readCapacity, requestUnstakeIx, stakeIx, unstakeIx } from '../../src/solana/token.js';
 import type { PoolEventLogSnapshot } from '../../src/solana/events.js';
@@ -52,6 +52,9 @@ import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from
 import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
 import { fromUnits } from './units.js';
 import { BackerOps } from './backer.js';
+import {
+  SUBROGATION_LABEL, type SubrogationKind, backedLenderPosition, backerTimes, decodeDraw, drawPda, isBackedSlot, isDrawAccount, subrogationKindOf,
+} from '../../src/solana/backer.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
 
@@ -230,13 +233,28 @@ export interface LendSlotView {
   /** routed to the slot beyond the principal: the borrower's, sent back to its payout account (stream_loan return_excess) */
   borrowerExcess: bigint; borrowerExcessUsdg: string;
   pledgeBps: bigint | null; expiry: bigint; expiresAt: string | null;
-  /** unpaid principal once expiry + 7 days has passed */
+  /**
+   * unpaid principal once expiry + 7 days has passed. A backed loan: what the lender is still short of its due
+   * (principal - backer fee) after repayments and any cover the stake paid (`backed.lenderShortfall`)
+   */
   shortfall: bigint;
   payoutTo: string | null;
   /** the borrower moved its pledged note without handing this lender the successor: only the shortfall path remains */
   borrowerWithheldMemo: boolean;
   /** an open slot of this agent, when pledgeBps was given: its "h081-loan-terms:" code again */
   termsCode?: string;
+  /** `backed`: funded by a backed line (fund_backed; pledgeBps 0, no stream); `stream`: a pledged stream loan. Absent when not funded. */
+  kind?: 'stream' | 'backed';
+  /**
+   * The loan's Subrogation, when it has one: receipts go to `to` first until `paid` reaches `owed`. kind `backer` (label
+   * "backer fee / recovery") on a backed loan, kind `slash` ("safety-pool slash recovery") after a safety-pool slash.
+   */
+  subrogation?: { kind: SubrogationKind; label: string; to: string; owed: bigint; paid: bigint };
+  /** a backed loan as its lender sees it: the backer's fee is paid first, the stake covers a default */
+  backed?: {
+    backing: string; drawState: string | null; lenderDue: bigint; lenderDueUsdg: string; backerFee: bigint; toBacker: bigint; toLender: bigint;
+    coverPaid: bigint; coverPaidUsdg: string; lenderShortfall: bigint; lenderShortfallUsdg: string;
+  };
 }
 export interface LendSentResult {
   sent: true; action: 'collect' | 'claim' | 'settle' | 'close' | 'sweep'; loanRef: bigint; signatures: string[];
@@ -1306,7 +1324,9 @@ export class H081Bank {
     const fee = originationFee(principal);
     return {
       pledgeBps: bps, minRemaining, maxPrincipal: max, principal, originationFee: fee, originationFeeBps: 25, payout: principal - fee, loanRef, slot,
-      note: 'terms come from a lender off-chain (no on-chain offer book); h081_loan_borrow pledges to them and returns the proof code the lender funds against',
+      note: slot?.funded && slot.pledgeBps === 0n
+        ? `loan #${loanRef} is a backed loan (funded from a backed line, no pledge): this pricing is for stream loans; h081_back_draw action "status" shows its terms`
+        : 'terms come from a lender off-chain (no on-chain offer book); h081_loan_borrow pledges to them and returns the proof code the lender funds against',
     };
   }
 
@@ -1680,7 +1700,38 @@ export class H081Bank {
       borrowerWithheldMemo: mine && s.funded && lender.opaque(ref),
     };
     if (!s.funded && mine && pledgeBps !== undefined) view.termsCode = this.loanTermsCode(ref, pledgeBps);
+    if (s.funded) await this.labelSubrogation(view, ref, s, now, split ? split.pending + split.escrowed : 0n);
     return view;
+  }
+
+  /**
+   * A funded slot's kind and Subrogation, labelled by what it is: a backed loan's Subrogation is the backer's fee and
+   * recovery, never a slash (isBackedSlot / the Backing behind safety_config). A backed loan's shortfall is the
+   * lender's: its due (principal - backer fee) less repayments and the cover the stake paid.
+   */
+  private async labelSubrogation(view: LendSlotView, ref: bigint, s: SlotAccount, now: bigint, pending: bigint): Promise<void> {
+    const pid = this.config.loanProgramId;
+    view.kind = isBackedSlot(s) ? 'backed' : 'stream';
+    const subInfo = await this.connection.getAccountInfo(subrogationPda(ref, pid), 'confirmed').catch(() => null);
+    const sub = subInfo && subInfo.owner.equals(pid) ? decodeSubrogation(subInfo.data) : undefined;
+    let kind: SubrogationKind | undefined;
+    if (sub) {
+      const cfg = await this.connection.getAccountInfo(sub.safetyConfig, 'confirmed').catch(() => null);
+      kind = subrogationKindOf(cfg, pid, s);
+      view.subrogation = { kind, label: SUBROGATION_LABEL[kind], to: sub.to.toBase58(), owed: sub.owed, paid: sub.paid };
+    }
+    if (view.kind !== 'backed') return;
+    const backing = sub?.safetyConfig;
+    const dInfo = backing ? await this.connection.getAccountInfo(drawPda(backing, ref, pid), 'confirmed').catch(() => null) : null;
+    const draw = dInfo && dInfo.owner.equals(pid) && isDrawAccount(dInfo.data) ? decodeDraw(dInfo.data) : undefined;
+    const p = backedLenderPosition(s, sub, draw, now, pending, backerTimes(pid).grace);
+    const d = this.decimals;
+    view.backed = {
+      backing: backing?.toBase58() ?? '', drawState: draw?.state ?? null, lenderDue: p.lenderDue, lenderDueUsdg: fromUnits(p.lenderDue, d), backerFee: p.backerFee,
+      toBacker: p.toBacker, toLender: p.toLender, coverPaid: p.coverPaid, coverPaidUsdg: fromUnits(p.coverPaid, d), lenderShortfall: p.lenderShortfall,
+      lenderShortfallUsdg: fromUnits(p.lenderShortfall, d),
+    };
+    view.shortfall = p.lenderShortfall;
   }
 
   /**
@@ -1768,6 +1819,10 @@ export class H081Bank {
     const s = await this.mySlot(ref, 'claim on it');
     if (!s.funded) throw new Error(`loan slot #${ref} has not lent anything yet. Nothing was sent.`);
     if (s.settled) throw new Error(`loan #${ref} is settled. Nothing was sent.`);
+    if (isBackedSlot(s)) {
+      throw new Error(`loan #${ref} is backed: there is no pledged stream to claim from. Repayments reach the slot (h081_lend action "collect"); on a default, `
+        + 'after expiry + 7 days, anyone sends h081_back action "claim" with the backing code and the stake pays you up to its cover. Nothing was sent.');
+    }
     const lender = this.lender();
     await lender.sync();
     const vested = lender.claimable(ref, await this.pool.now());
@@ -1802,11 +1857,21 @@ export class H081Bank {
     if (s.settled) throw new Error(`loan #${ref} is already settled. Nothing was sent.`);
     const outstanding = s.principal > s.repaid ? s.principal - s.repaid : 0n;
     if (!req.confirm) {
+      const backed = isBackedSlot(s);
+      let warning = outstanding > 0n
+        ? `${fromUnits(outstanding, d)} ${MAINNET.usdg.symbol} is still unpaid: settling now gives up any shortfall claim on it`
+        : 'the loan is repaid; settling closes it';
+      if (backed && outstanding > 0n) {
+        // back_claim needs an unsettled shortfall: settling first forfeits the stake's cover for good
+        const view = await this.lendView(ref, s, await this.pool.now());
+        const claimed = (view.backed?.coverPaid ?? 0n) > 0n;
+        warning = claimed
+          ? `${warning}; the backer's stake already paid its cover (${view.backed!.coverPaidUsdg} ${MAINNET.usdg.symbol})`
+          : `${warning}, including the backer's cover: a backed loan's default claim (h081_back action "claim") needs an unsettled loan, so claim first, after expiry + 7 days`;
+      }
       return H081Bank.lendPlan({
-        action: 'settle', loanRef: ref, principal: s.principal, repaid: s.repaid, outstanding, outstandingUsdg: fromUnits(outstanding, d),
-        warning: outstanding > 0n
-          ? `${fromUnits(outstanding, d)} ${MAINNET.usdg.symbol} is still unpaid: settling now gives up any shortfall claim on it`
-          : 'the loan is repaid; settling closes it',
+        action: 'settle', loanRef: ref, kind: backed ? 'backed' : 'stream', principal: s.principal, repaid: s.repaid, outstanding, outstandingUsdg: fromUnits(outstanding, d),
+        warning,
       }, 'Call h081_lend again with action "settle", the same loanRef and confirm: true to settle it.');
     }
     await this.needSol(LEND_SOL_MIN, 'settling');

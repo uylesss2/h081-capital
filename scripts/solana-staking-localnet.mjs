@@ -1,6 +1,9 @@
 // Drives the Phase 2 staking localnet from Windows: keygen | build | fixtures | start | stop | restart.
 // Private validator on rpc 9199 (ledger ~/stipend-staking-ledger); never touches other validators
 // (8899/8900 belong to another project, 8999 to the pool suite).
+// STAKING_RPC_PORT, STAKING_FAUCET_PORT, STAKING_GOSSIP_PORT, STAKING_DYNAMIC_PORTS, STAKING_LEDGER (a WSL path),
+// STAKING_STAGE and STAKING_LOG are passed on to the WSL scripts (WSLENV), so a worktree can run the suite on its own
+// port and ledger; point the tests at it with STAKING_RPC.
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -9,10 +12,12 @@ const root = resolve(import.meta.dirname, '..');
 const toWsl = (p) => p.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/mnt/${d.toLowerCase()}`);
 const scripts = toWsl(resolve(root, 'solana', 'scripts'));
 const isWin = process.platform === 'win32';
+const passOn = Object.keys(process.env).filter((k) => /^STAKING_(RPC_PORT|FAUCET_PORT|GOSSIP_PORT|DYNAMIC_PORTS|LEDGER|STAGE|LOG)$/.test(k));
+const wslenv = [process.env.WSLENV, ...passOn.map((k) => `${k}/u`)].filter(Boolean).join(':');
 
 function wsl(script, capture = false) {
   const [cmd, args] = isWin ? ['wsl.exe', ['-d', 'Ubuntu', '--', 'bash', `${scripts}/${script}`]] : ['bash', [`${scripts}/${script}`]];
-  const r = spawnSync(cmd, args, { stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit', env: { ...process.env, MSYS_NO_PATHCONV: '1' }, encoding: 'utf8' });
+  const r = spawnSync(cmd, args, { stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit', env: { ...process.env, MSYS_NO_PATHCONV: '1', ...(wslenv ? { WSLENV: wslenv } : {}) }, encoding: 'utf8' });
   if (r.status !== 0) process.exit(r.status ?? 1);
   return r.stdout;
 }

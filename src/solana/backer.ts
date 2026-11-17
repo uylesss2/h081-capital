@@ -341,6 +341,71 @@ export async function isBackedSubrogation(connection: Pick<Connection, 'getAccou
   return !!info && info.owner.equals(programId) && isBackingAccount(info.data);
 }
 
+// ------------------------------------------------------------- readers: never label a backed Subrogation as a slash
+
+/** What a reader calls a loan's Subrogation. `backer`: a backed line's fee and recovery; `slash`: a safety-pool slash. */
+export type SubrogationKind = 'backer' | 'slash';
+export const SUBROGATION_LABEL: Readonly<Record<SubrogationKind, string>> = { backer: 'backer fee / recovery', slash: 'safety-pool slash recovery' };
+
+/**
+ * The kind of a Subrogation from its `safety_config` account (as read) and, when known, its slot. Backed when the slot
+ * is backed (funded with pledge_bps == 0: fund_backed is the only way to fund one) or when safety_config is a Backing
+ * owned by this stream_loan program. Everything else is a safety-pool slash.
+ */
+export function subrogationKindOf(
+  safetyConfig: { owner: PublicKey; data: Uint8Array } | null | undefined, programId = LOCALNET_LOAN_PROGRAM_ID, slot?: Pick<SlotAccount, 'funded' | 'pledgeBps'>,
+): SubrogationKind {
+  if (slot && isBackedSlot(slot)) return 'backer';
+  return safetyConfig && safetyConfig.owner.equals(programId) && isBackingAccount(safetyConfig.data) ? 'backer' : 'slash';
+}
+
+/** subrogationKindOf for many Subrogations, reading their safety_config accounts in batches of 100 (one RPC call each). */
+export async function subrogationKinds(
+  connection: Pick<Connection, 'getMultipleAccountsInfo'>, subs: SubrogationAccount[], programId = LOCALNET_LOAN_PROGRAM_ID,
+  slots?: Array<Pick<SlotAccount, 'funded' | 'pledgeBps'> | undefined>,
+): Promise<SubrogationKind[]> {
+  const infos: Array<{ owner: PublicKey; data: Uint8Array } | null> = [];
+  for (let i = 0; i < subs.length; i += 100) {
+    infos.push(...await connection.getMultipleAccountsInfo(subs.slice(i, i + 100).map((s) => s.safetyConfig), 'confirmed'));
+  }
+  return subs.map((_, i) => subrogationKindOf(infos[i], programId, slots?.[i]));
+}
+
+/** The lender's side of a backed loan: what it is due, what it got from repayments and from the cover, what is still short. */
+export interface BackedLenderPosition {
+  /** principal - backer fee (= advance + lender fee) */
+  lenderDue: bigint;
+  backerFee: bigint;
+  /** receipts that went (or, unsynced, will go) to the backer's vault: fee first, then recovery of a cover payout */
+  toBacker: bigint;
+  /** receipts credited (or, unsynced, to be credited) to the lender: repaid - what went to the backer */
+  toLender: bigint;
+  /** what back_claim paid the lender from the stake */
+  coverPaid: bigint;
+  /**
+   * Once expiry + grace has passed with the loan unpaid and unsettled: lenderDue - toLender - coverPaid; 0 otherwise.
+   * stream_loan's own shortfall (principal - repaid) also counts the backer's fee and ignores the cover already paid.
+   */
+  lenderShortfall: bigint;
+}
+export function backedLenderPosition(
+  slot: SlotAccount, sub: Pick<SubrogationAccount, 'owed' | 'paid'> | undefined, draw: Pick<DrawAccount, 'backerFee' | 'claimed'> | undefined, now: bigint,
+  pending = 0n, grace = GRACE,
+): BackedLenderPosition {
+  // the Draw closes only once nothing more can reach the vault; without it, the Subrogation's owed is the fee (a claim raises it)
+  const backerFee = draw?.backerFee ?? sub?.owed ?? 0n;
+  const coverPaid = draw?.claimed ?? 0n;
+  const lenderDue = slot.principal > backerFee ? slot.principal - backerFee : 0n;
+  const subPaid = sub?.paid ?? 0n;
+  const subLeft = sub && sub.owed > sub.paid ? sub.owed - sub.paid : 0n;
+  const pendingToBacker = pending < subLeft ? pending : subLeft;
+  const toBacker = subPaid + pendingToBacker;
+  const toLender = (slot.repaid > subPaid ? slot.repaid - subPaid : 0n) + (pending - pendingToBacker);
+  const late = slot.funded && !slot.settled && slot.expiry !== 0n && now > slot.expiry + grace && slot.repaid + pending < slot.principal;
+  const got = toLender + coverPaid;
+  return { lenderDue, backerFee, toBacker, toLender, coverPaid, lenderShortfall: late && lenderDue > got ? lenderDue - got : 0n };
+}
+
 /** The draws of a line, by one getProgramAccounts (discriminator + backing at offset 16). */
 export async function drawsOf(connection: Pick<Connection, 'getProgramAccounts'>, backing: PublicKey, programId = LOCALNET_LOAN_PROGRAM_ID): Promise<Array<DrawAccount & { address: PublicKey }>> {
   const found = await connection.getProgramAccounts(programId, {
@@ -534,7 +599,7 @@ export async function claimBacked(connection: Connection, payer: Keypair, backin
 
 /**
  * The borrower of one line: `drawKey` (drawKeyFor(sk, lineNonce)) requests draws; the advance goes to `payoutTo`
- * (default: the draw key's associated token account). It hands the backer its draw-key code (kind 9) first.
+ * (default: the draw key's associated token account). It hands the backer its draw-key code (kind 11) first.
  */
 export class SolanaBackedBorrower {
   constructor(

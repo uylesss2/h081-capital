@@ -13,10 +13,11 @@ import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { type Allowance, allowanceCommitment } from '../../src/crypto.js';
 import { minRemainingFor } from '../../src/inputs.js';
 import { fieldOf } from '../../src/solana/field.js';
-import { type SolLenderNote, closedSlotPda, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda } from '../../src/solana/lender.js';
+import { type SolLenderNote, closedSlotPda, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda, subrogationPda } from '../../src/solana/lender.js';
+import { drawPda } from '../../src/solana/backer.js';
 import type { StreamArgs } from '../../src/solana/program.js';
 import type { SolOwnedAllowance } from '../../src/solana/wallet.js';
-import { H081Bank } from '../../integrations/core/bank.js';
+import { H081Bank, type LendSlotView } from '../../integrations/core/bank.js';
 import { FlatDirProver } from '../../integrations/core/circuits.js';
 import { decodeLoanProof, decodeLoanTerms, encodeLoanProof } from '../../integrations/core/codes.js';
 import { MAINNET } from '../../integrations/core/constants.js';
@@ -501,5 +502,78 @@ describe('a loan between two agents (mocked SDK, real codes)', () => {
     expect((await runOp(A.bank, 'h081_lend', { action: 'settle', loanRef: '3' }) as { plan: { warning: string } }).plan.warning).toMatch(/repaid; settling closes it/);
     expect(await runOp(A.bank, 'h081_lend', { action: 'settle', loanRef: '3', confirm: true })).toMatchObject({ sent: true });
     expect(settle).toHaveBeenCalledOnce();
+  });
+});
+
+// docs/BACKER-SPEC.md section 16: lendStatus must call a backed loan's Subrogation the backer's fee and recovery (never a
+// slash), read pledge 0 as backed, and give the lender's own shortfall (its due less repayments and the cover paid).
+describe('h081_lend on a backed loan (status labels, claim, settle)', () => {
+  const disc = (name: string) => createHash('sha256').update(`account:${name}`).digest().subarray(0, 8);
+  const subrogation = (safetyConfig: PublicKey, to: PublicKey, owed: bigint, paid: bigint) =>
+    Buffer.concat([disc('Subrogation'), u64(3n), safetyConfig.toBuffer(), to.toBuffer(), u64(owed), u64(paid), Buffer.from([255])]);
+  const draw = (backing: PublicKey, claimed: bigint, state: number) => Buffer.concat([
+    disc('Draw'), u64(3n), backing.toBuffer(), Buffer.alloc(64), u64(USD(500)), u64(USD(25)), u64(USD(15)), u64(USD(515)), u64(DAY), u64(0n), u64(0n), u64(claimed),
+    Buffer.from([state, 255]),
+  ]);
+  const backing = Keypair.generate().publicKey, vault = Keypair.generate().publicKey;
+  const put = (conn: Conn, k: PublicKey, owner: PublicKey, data: Buffer) => conn.accounts.set(k.toBase58(), { owner, data, executable: false, lamports: 1 });
+
+  async function backedLoan(o: { repaid: bigint; subPaid: bigint; subOwed: bigint; claimed: bigint; state: number; expiry: bigint }) {
+    const ctx = await openAgent();
+    // advance 500, backer fee 25 (5%), lender fee 15 (3%): principal 540, the lender is due 515
+    putSlot([ctx.conn], slotData({ loanRef: 3n, lender: ctx.signer.publicKey, funded: true, principal: USD(540), repaid: o.repaid, pledgeBps: 0, expiry: o.expiry }));
+    put(ctx.conn, subrogationPda(3n, LOAN), LOAN, subrogation(backing, vault, o.subOwed, o.subPaid));
+    put(ctx.conn, backing, LOAN, Buffer.concat([disc('Backing'), Buffer.alloc(270)]));
+    put(ctx.conn, drawPda(backing, 3n, LOAN), LOAN, draw(backing, o.claimed, o.state));
+    return ctx;
+  }
+
+  it('repaying: kind backed, the Subrogation labelled "backer fee / recovery", the lender\'s due and no shortfall yet', async () => {
+    const { bank } = await backedLoan({ repaid: USD(300), subPaid: USD(25), subOwed: USD(25), claimed: 0n, state: 1, expiry: NOW + 10n * DAY });
+    const v = (await runOp(bank, 'h081_lend', { action: 'status', loanRef: '3' }) as { slots: LendSlotView[] }).slots[0];
+    expect(v).toMatchObject({ kind: 'backed', pledgeBps: 0n, outstanding: USD(240), shortfall: 0n });
+    expect(v.subrogation).toEqual({ kind: 'backer', label: 'backer fee / recovery', to: vault.toBase58(), owed: USD(25), paid: USD(25) });
+    expect(v.backed).toMatchObject({ backing: backing.toBase58(), drawState: 'funded', lenderDue: USD(515), backerFee: USD(25), toBacker: USD(25), toLender: USD(275), coverPaid: 0n, lenderShortfall: 0n });
+    expect(JSON.stringify(plain(v))).not.toMatch(/slash/i);
+  });
+
+  it('defaulted: the shortfall is the lender\'s due less repayments (not principal - repaid); after the claim it is what the cover left', async () => {
+    const late = NOW - 8n * DAY;
+    const { bank } = await backedLoan({ repaid: USD(10), subPaid: USD(10), subOwed: USD(25), claimed: 0n, state: 1, expiry: late });
+    let v = (await bank.lendStatus({ loanRef: 3n })).slots[0];
+    // stream_loan's own shortfall would say 530 (it counts the backer's 15 still owed); the lender is short 515
+    expect(v.shortfall).toBe(USD(515));
+    expect(v.backed).toMatchObject({ lenderShortfall: USD(515), toLender: 0n, toBacker: USD(10) });
+    // a claim at 100% cover paid 515: nothing left short; owed = paid + payout, so later receipts recover the stake
+    const after = await backedLoan({ repaid: USD(10), subPaid: USD(10), subOwed: USD(525), claimed: USD(515), state: 2, expiry: late });
+    v = (await after.bank.lendStatus({ loanRef: 3n })).slots[0];
+    expect(v).toMatchObject({ shortfall: 0n, backed: { coverPaid: USD(515), coverPaidUsdg: '515', drawState: 'claimed', lenderShortfall: 0n } });
+    expect(v.subrogation).toMatchObject({ kind: 'backer', label: 'backer fee / recovery', owed: USD(525) });
+  });
+
+  it('claim refuses a backed loan (no pledged stream) and points to the stake; settle warns that settling first forfeits the cover', async () => {
+    const { bank } = await backedLoan({ repaid: USD(10), subPaid: USD(10), subOwed: USD(25), claimed: 0n, state: 1, expiry: NOW - 8n * DAY });
+    const claim = vi.spyOn(bank.lender(), 'claim');
+    await expect(runOp(bank, 'h081_lend', { action: 'claim', loanRef: '3' })).rejects.toThrow(/loan #3 is backed: there is no pledged stream.*h081_back action "claim".*Nothing was sent/);
+    expect(claim).not.toHaveBeenCalled();
+    const settle = vi.spyOn(bank.lender(), 'settle');
+    const plan = await runOp(bank, 'h081_lend', { action: 'settle', loanRef: '3' }) as { plan: { warning: string; kind: string } };
+    expect(plan.plan.kind).toBe('backed');
+    expect(plan.plan.warning).toMatch(/including the backer's cover: .* needs an unsettled loan, so claim first/);
+    expect(settle).not.toHaveBeenCalled();
+    // after the claim, the warning says the cover was paid
+    const after = await backedLoan({ repaid: USD(10), subPaid: USD(10), subOwed: USD(525), claimed: USD(515), state: 2, expiry: NOW - 8n * DAY });
+    expect(((await runOp(after.bank, 'h081_lend', { action: 'settle', loanRef: '3' })) as { plan: { warning: string } }).plan.warning).toMatch(/stake already paid its cover \(515 USDG\)/);
+  });
+
+  it('a stream loan slashed by a safety pool is still labelled a slash', async () => {
+    const { bank, conn, signer } = await openAgent();
+    putSlot([conn], slotData({ loanRef: 3n, lender: signer.publicKey, funded: true, principal: USD(40), repaid: USD(10), pledgeBps: 4000, expiry: NOW - 8n * DAY }));
+    const cfg = Keypair.generate().publicKey;
+    put(conn, subrogationPda(3n, LOAN), LOAN, subrogation(cfg, vault, USD(30), 0n));
+    put(conn, cfg, Keypair.generate().publicKey, Buffer.alloc(120));
+    const v = (await bank.lendStatus({ loanRef: 3n })).slots[0];
+    expect(v).toMatchObject({ kind: 'stream', shortfall: USD(30), subrogation: { kind: 'slash', label: 'safety-pool slash recovery' } });
+    expect(v.backed).toBeUndefined();
   });
 });
