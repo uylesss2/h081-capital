@@ -89,11 +89,16 @@ export function decodeProofCode(code: string): LoanProofCode {
 //   version (2) | kind | 4-byte network tag | body | 4-byte checksum
 // The network tag is sha256("h081-handover|<cluster>|<program>|<mint>")[0..4]: a code made for another network,
 // program or asset is refused with its own message. Kinds 1 (loan terms), 2 (loan proof), 3 (zk proof) and
-// 4 (practice proof) are the site's; 5 is the shielded address below.
+// 4 (practice proof) are the site's; 5 is the shielded address below, 6 the key backup, 10/11 solvency (request and
+// presentation). Proposed registry across branches (docs/SOLVENCY-SPEC.md 2.2, owner decision D2): 7-9 reputation,
+// 10/11 solvency, 12/13 backer.
 
 export const FRAME_VERSION = 2;
-export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6 } as const;
-const KIND_NAME: Record<number, string> = { 1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code' };
+export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, solvencyAsk: 10, solvency: 11 } as const;
+const KIND_NAME: Record<number, string> = {
+  1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code',
+  10: 'solvency request code', 11: 'solvency proof code',
+};
 
 /** Which network, program and asset a code belongs to. */
 export interface CodeContext { cluster: string; program: string; mint: string }
@@ -275,8 +280,110 @@ export function decodeKeyCode(ctx: CodeContext, code: string): Uint8Array {
   return body;
 }
 
+// ---- solvency (docs/SOLVENCY-SPEC.md 2.2): the asker's request (kind 10) and the agent's presentation (kind 11)
+
+export const SOLVENCY_ASK_PREFIX = 'h081-solvency-ask:';
+export const SOLVENCY_PREFIX = 'h081-solvency:';
+const SOLVENCY_VERSION = 1;
+const u16le = (x: number) => Uint8Array.of(x & 0xff, (x >> 8) & 0xff);
+
+/** What an asker puts in an "h081-solvency-ask:" code. */
+export interface SolvencyRequest {
+  /** the asker's ed25519 public key (its wallet), or 32 random bytes */
+  verifierKey: Uint8Array;
+  /** 16 random bytes; a verifier accepts each nonce once */
+  nonce: Uint8Array;
+  /** unix seconds; at most a day after the request is made */
+  expiry: bigint;
+  /** base units of USDG the proof must show at least */
+  min: bigint;
+  /** how many pool operations old the proof's root may be */
+  maxRootAge: number;
+  /** the wallet that must present (32 zero bytes: anyone) */
+  expectWallet: Uint8Array;
+  /** a short name for the asker, UTF-8, at most 32 bytes */
+  label: string;
+}
+
+/** A decoded request plus its digest: sha256 of the framed bytes without the checksum. */
+export interface DecodedSolvencyRequest extends SolvencyRequest { digest: Uint8Array }
+
+/** What an agent hands back: the proof and its public args (kind 3's first 448 bytes), the wallet and its signature. */
+export interface SolvencyPresentation {
+  requestDigest: Uint8Array;
+  /** encodeProof (256 bytes) */
+  proof: Uint8Array;
+  /** encodeDiscloseArgs (192 bytes) */
+  args: Uint8Array;
+  wallet: Uint8Array;
+  signature: Uint8Array;
+}
+
+/** The frame without its checksum: what the request digest hashes. */
+function unsummedFrame(kind: number, ctx: CodeContext, body: Uint8Array): Uint8Array {
+  return Uint8Array.from([FRAME_VERSION, kind, ...contextTag(ctx), ...body]);
+}
+
+const SOLVENCY_ASK_FIXED = 1 + 32 + 16 + 8 + 8 + 2 + 32 + 1;
+
+function solvencyRequestBody(r: SolvencyRequest): Uint8Array {
+  if (r.verifierKey.length !== 32) throw new Error('verifierKey must be 32 bytes');
+  if (r.nonce.length !== 16) throw new Error('nonce must be 16 bytes');
+  if (r.expectWallet.length !== 32) throw new Error('expectWallet must be 32 bytes (all zero: anyone)');
+  if (r.expiry < 0n || r.expiry >= 1n << 64n) throw new Error('expiry out of range');
+  if (r.min <= 0n || r.min >= 1n << 64n) throw new Error('min must be a positive u64');
+  if (!Number.isInteger(r.maxRootAge) || r.maxRootAge < 1 || r.maxRootAge > 1023) throw new Error('maxRootAge must be 1..1023');
+  const label = new TextEncoder().encode(r.label ?? '');
+  if (label.length > 32) throw new Error('the label must be at most 32 bytes');
+  return Uint8Array.from([SOLVENCY_VERSION, ...r.verifierKey, ...r.nonce, ...u64le(r.expiry), ...u64le(r.min), ...u16le(r.maxRootAge), ...r.expectWallet, label.length, ...label]);
+}
+
+/** "h081-solvency-ask:<base58>": kind 10. Returns the code and its digest (the presentation commits to it). */
+export function encodeSolvencyRequest(ctx: CodeContext, r: SolvencyRequest): { code: string; digest: Uint8Array } {
+  const body = solvencyRequestBody(r);
+  return { code: frameV2(SOLVENCY_ASK_PREFIX, CODE_KIND.solvencyAsk, ctx, body), digest: sha256(unsummedFrame(CODE_KIND.solvencyAsk, ctx, body)) };
+}
+
+/** A request made for `ctx` (checksum, kind, network checked); its digest is recomputed here, never taken from a code. */
+export function decodeSolvencyRequest(ctx: CodeContext, code: string): DecodedSolvencyRequest {
+  const b = unframeV2(SOLVENCY_ASK_PREFIX, CODE_KIND.solvencyAsk, ctx, code);
+  if (b.length < SOLVENCY_ASK_FIXED) throw new CodeError('That solvency request code is incomplete; ask for it again.');
+  if (b[0] !== SOLVENCY_VERSION) throw new CodeError(`That solvency request code is in a format this bank does not read (version ${b[0]}).`);
+  const labelLen = b[SOLVENCY_ASK_FIXED - 1];
+  if (labelLen > 32 || b.length !== SOLVENCY_ASK_FIXED + labelLen) throw new CodeError('That solvency request code has the wrong length; copy it again.');
+  let label: string;
+  try { label = new TextDecoder('utf-8', { fatal: true }).decode(b.slice(SOLVENCY_ASK_FIXED)); } catch { throw new CodeError('That solvency request code has a label that is not text.'); }
+  const r: DecodedSolvencyRequest = {
+    verifierKey: b.slice(1, 33), nonce: b.slice(33, 49), expiry: readU64le(b, 49), min: readU64le(b, 57), maxRootAge: b[65] | (b[66] << 8),
+    expectWallet: b.slice(67, 99), label, digest: sha256(unsummedFrame(CODE_KIND.solvencyAsk, ctx, b)),
+  };
+  if (r.min === 0n) throw new CodeError('That solvency request asks for a minimum of 0, which proves nothing.');
+  if (r.maxRootAge < 1 || r.maxRootAge > 1023) throw new CodeError('That solvency request has a root age outside 1..1023.');
+  return r;
+}
+
+/** Bytes of a kind 11 body: ver | requestDigest 32 | proof 256 | DiscloseArgs 192 | wallet 32 | signature 64. */
+export const SOLVENCY_CODE_BODY = 1 + 32 + 256 + 192 + 32 + 64;
+
+/** "h081-solvency:<base58>": kind 11. The proof and args bytes are kind 3's first 448 bytes (encodeProof + encodeDiscloseArgs). */
+export function encodeSolvencyCode(ctx: CodeContext, p: SolvencyPresentation): string {
+  if (p.requestDigest.length !== 32 || p.proof.length !== 256 || p.args.length !== 192 || p.wallet.length !== 32 || p.signature.length !== 64) {
+    throw new Error('a solvency presentation is requestDigest 32 | proof 256 | args 192 | wallet 32 | signature 64 bytes');
+  }
+  return frameV2(SOLVENCY_PREFIX, CODE_KIND.solvency, ctx, Uint8Array.from([SOLVENCY_VERSION, ...p.requestDigest, ...p.proof, ...p.args, ...p.wallet, ...p.signature]));
+}
+
+/** A presentation made for `ctx` (checksum, kind, network checked). Field ranges and the signature are the verifier's job. */
+export function decodeSolvencyCode(ctx: CodeContext, code: string): SolvencyPresentation {
+  const b = unframeV2(SOLVENCY_PREFIX, CODE_KIND.solvency, ctx, code);
+  if (b.length !== SOLVENCY_CODE_BODY) throw new CodeError(`That solvency proof code has the wrong length (${b.length} of ${SOLVENCY_CODE_BODY} bytes); copy it again.`);
+  if (b[0] !== SOLVENCY_VERSION) throw new CodeError(`That solvency proof code is in a format this bank does not read (version ${b[0]}).`);
+  return { requestDigest: b.slice(1, 33), proof: b.slice(33, 289), args: b.slice(289, 481), wallet: b.slice(481, 513), signature: b.slice(513, 577) };
+}
+
 /** The kind of an "h081-*:" code from its prefix, or undefined. */
 export const PREFIX_KIND: Record<string, number> = {
   [TERMS_PREFIX]: CODE_KIND.terms, [PROOF_PREFIX]: CODE_KIND.proof, [ADDRESS_PREFIX]: CODE_KIND.address, [KEY_PREFIX]: CODE_KIND.key,
+  [SOLVENCY_ASK_PREFIX]: CODE_KIND.solvencyAsk, [SOLVENCY_PREFIX]: CODE_KIND.solvency,
 };
 export const KIND_NAMES: Readonly<Record<number, string>> = KIND_NAME;

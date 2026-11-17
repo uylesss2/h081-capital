@@ -56,6 +56,8 @@ export interface FetchOptions {
   names?: CircuitName[];
   url?: string;
   fetch?: typeof fetch;
+  /** which files of each circuit (default all three; a verifier needs only the vkey) */
+  kinds?: ArtifactKind[];
   /** re-download files that exist but whose hash is wrong (default true) */
   repair?: boolean;
   log?: (line: string) => void;
@@ -76,7 +78,7 @@ export async function fetchCircuits(opts: FetchOptions): Promise<FetchReport> {
   mkdirSync(opts.dir, { recursive: true });
   const report: FetchReport = { fetched: [], kept: [], bytes: 0 };
   for (const n of names) {
-    for (const k of KINDS) {
+    for (const k of opts.kinds ?? KINDS) {
       const want = CIRCUIT_HASHES[n][k];
       if (!want) throw new Error(`no pinned hash for ${n}.${k}; it cannot be fetched safely`);
       const file = join(opts.dir, ARTIFACT_FILE[k](n));

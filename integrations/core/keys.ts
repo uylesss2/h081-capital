@@ -149,6 +149,17 @@ export function deriveLenderSk(keypair: Keypair, derivation: AccountDerivation =
   return derivation === 'signature' ? deriveAccountSkFromSignature(keypair, label) : deriveAccountSk(keypair, label);
 }
 
+/**
+ * The solvency reserve's secret (docs/SOLVENCY-SPEC.md section 1): the account the main account grants its reserve
+ * allowance to. Its own label (h081/agent-account/v1/solvency-reserve), outside the 0..15 sub-account indices, so no
+ * sub-account, lender key or other derived key ever collides with it, and its agentPk (revealed in every solvency
+ * proof) is used for nothing else.
+ */
+export function deriveReserveSk(keypair: Keypair, derivation: AccountDerivation = 'seed'): bigint {
+  const label = `${DERIVE_LABEL}/solvency-reserve`;
+  return derivation === 'signature' ? deriveAccountSkFromSignature(keypair, label) : deriveAccountSk(keypair, label);
+}
+
 /** A field element from decimal or 0x-hex text. */
 export function parseFieldElement(text: string, what = 'H081_ACCOUNT_SK'): bigint {
   const t = text.trim();
