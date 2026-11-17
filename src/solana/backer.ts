@@ -614,7 +614,7 @@ export async function claimBacked(connection: Connection, payer: Keypair, backin
 
 /**
  * The borrower of one line: `drawKey` (drawKeyFor(sk, lineNonce)) requests draws; the advance goes to `payoutTo`
- * (default: the draw key's associated token account). It hands the backer its draw-key code (kind 11) first.
+ * (default: the draw key's associated token account). It hands the backer its draw-key code (kind 13) first.
  */
 export class SolanaBackedBorrower {
   constructor(

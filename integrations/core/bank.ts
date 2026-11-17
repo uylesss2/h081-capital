@@ -1871,12 +1871,19 @@ export class H081Bank {
         ? `${fromUnits(outstanding, d)} ${MAINNET.usdg.symbol} is still unpaid: settling now gives up any shortfall claim on it`
         : 'the loan is repaid; settling closes it';
       if (backed && outstanding > 0n) {
-        // back_claim needs an unsettled shortfall: settling first forfeits the stake's cover for good
+        // back_claim needs an unsettled shortfall AND a Draw still open in state funded (backer.rs handle_back_claim):
+        // only then does settling first forfeit the stake's cover. Claimed, released or closed: no claim is possible.
         const view = await this.lendView(ref, s, await this.pool.now());
-        const claimed = (view.backed?.coverPaid ?? 0n) > 0n;
-        warning = claimed
-          ? `${warning}; the backer's stake already paid its cover (${view.backed!.coverPaidUsdg} ${MAINNET.usdg.symbol})`
-          : `${warning}, including the backer's cover: a backed loan's default claim (h081_back action "claim") needs an unsettled loan, so claim first, after expiry + 7 days`;
+        const state = view.backed?.drawState ?? null;
+        if (state === 'funded') {
+          warning = `${warning}, including the backer's cover: a backed loan's default claim (h081_back action "claim") needs an unsettled loan, so claim first, after expiry + 7 days`;
+        } else if (state === 'claimed') {
+          warning = `${warning}; the backer's stake already paid its cover (${view.backed!.coverPaidUsdg ?? '0'} ${MAINNET.usdg.symbol})`;
+        } else if (state === null) {
+          warning = `${warning}; the backer's Draw is closed, so no default claim is possible any more and whether its cover was paid can no longer be read on chain`;
+        } else {
+          warning = `${warning}; the backer's Draw was ${state} without a claim (its reserve is freed), so no default claim is possible any more and no cover was paid`;
+        }
       }
       return H081Bank.lendPlan({
         action: 'settle', loanRef: ref, kind: backed ? 'backed' : 'stream', principal: s.principal, repaid: s.repaid, outstanding, outstandingUsdg: fromUnits(outstanding, d),

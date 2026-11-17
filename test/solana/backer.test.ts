@@ -781,6 +781,10 @@ suite('H081Bank backed flow through the agent operations (fast build; shielded s
     expect(v.backed).toMatchObject({ drawState: null, lenderDue: null, coverPaid: null, lenderShortfall: null, toBacker: 15n * U, toLender: 3n * U });
     expect(v.backed!.note).toMatch(/draw is closed/);
     expect(v.shortfall).toBe(108n * U - 18n * U);
+    // the settle plan no longer sends L to a claim that cannot succeed (the Draw is gone; the cover was in fact paid)
+    const relWarn = String((await op(L, 'h081_lend', { action: 'settle', loanRef })).plan!.warning);
+    expect(relWarn).not.toMatch(/claim first|including the backer's cover/);
+    expect(relWarn).toMatch(/Draw is closed, so no default claim is possible any more/);
     const bWallet = await bal(ata(bKp.publicKey));
     expect((await op(B, 'h081_back', { action: 'close', nonce, confirm: true })).sent).toBe(true);
     expect(await bal(ata(bKp.publicKey))).toBe(bWallet + 165n * U);

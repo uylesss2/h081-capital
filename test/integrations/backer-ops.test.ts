@@ -1,5 +1,5 @@
 // h081_back / h081_back_draw and h081_lend fund with a backing code: argument checks, plan-unless-confirm routing,
-// operator ceilings and the kind 10 / 11 codes. A mocked bank: nothing touches a network.
+// operator ceilings and the kind 12 / 13 codes. A mocked bank: nothing touches a network.
 import { describe, expect, it } from 'vitest';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { InputError, runOp, type BankLike } from '../../integrations/core/operations.js';
@@ -12,6 +12,8 @@ import { BackerOps, BACKED_PRIVACY, type BackerHost } from '../../integrations/c
 import { BACKING_ACCOUNT_SIZE, DRAW_ACCOUNT_SIZE, backerKeyFor, backingPda, backingVault, drawPda } from '../../src/solana/backer.js';
 import { LOCALNET_LOAN_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, slotPda } from '../../src/solana/lender.js';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { findClashes, parseCodeKinds, parseReserved, unreserved, type KindTable } from '../../scripts/check-code-kinds.mjs';
 
 const ctx = { cluster: 'mainnet-beta', program: '8JBd7epQXxdcKRMaWM1S5PC7nsQKoZq3uCetpiJ684g4', mint: '2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH' };
 
@@ -92,7 +94,7 @@ describe('h081_back and h081_back_draw are operations', () => {
   });
 });
 
-describe('kinds 10 and 11 in the v2 frame', () => {
+describe('kinds 12 and 13 in the v2 frame', () => {
   it('round-trip, are letters and digits only, and refuse another kind or network', () => {
     const backing = Keypair.generate().publicKey, drawKey = Keypair.generate().publicKey, payoutTo = Keypair.generate().publicKey;
     const b = encodeBackingCode(ctx, { backing, loanRef: 42n });
@@ -103,7 +105,7 @@ describe('kinds 10 and 11 in the v2 frame', () => {
     const d = encodeDrawKeyCode(ctx, { drawKey, payoutTo });
     const dk = decodeDrawKeyCode(ctx, d);
     expect([dk.drawKey.equals(drawKey), dk.payoutTo.equals(payoutTo)]).toEqual([true, true]);
-    expect([CODE_KIND.backing, CODE_KIND.drawKey, PREFIX_KIND[BACKING_PREFIX], PREFIX_KIND[DRAW_KEY_PREFIX]]).toEqual([10, 11, 10, 11]);
+    expect([CODE_KIND.backing, CODE_KIND.drawKey, PREFIX_KIND[BACKING_PREFIX], PREFIX_KIND[DRAW_KEY_PREFIX]]).toEqual([12, 13, 12, 13]);
     expect(() => decodeBackingCode(ctx, d)).toThrow(CodeError);
     expect(() => decodeBackingCode({ ...ctx, cluster: 'localnet' }, b)).toThrow(/another network/);
     expect(() => decodeBackingCode(ctx, b.slice(0, -3))).toThrow(CodeError);
@@ -112,19 +114,35 @@ describe('kinds 10 and 11 in the v2 frame', () => {
 });
 
 describe('the code-kind registry', () => {
-  it('every kind is used once, none is a reserved reputation kind (7, 8, 9), and each has a name', () => {
+  it('every kind is used once, none is reserved (reputation 7-9, solvency 10-11), and each has a name', () => {
     const kinds = Object.values(CODE_KIND);
     expect(new Set(kinds).size).toBe(kinds.length);
-    expect(Object.keys(RESERVED_CODE_KINDS).map(Number)).toEqual([7, 8, 9]);
+    expect(Object.keys(RESERVED_CODE_KINDS).map(Number)).toEqual([7, 8, 9, 10, 11]);
     for (const k of kinds) expect(RESERVED_CODE_KINDS[k], `kind ${k} is reserved`).toBeUndefined();
     for (const k of [...Object.values(PREFIX_KIND)]) expect(KIND_NAMES[k], `kind ${k} has a name`).toBeDefined();
   });
-  it('a reputation code (kind 8 or 9) is never read as a backed-line code, even under a backing prefix', () => {
+  it('a reputation (7-9) or solvency (10-11) code is never read as a backed-line code, even under a backing prefix', () => {
     const body = new Uint8Array(40);
-    for (const k of [7, 8, 9]) {
+    for (const k of [7, 8, 9, 10, 11]) {
       expect(() => decodeBackingCode(ctx, frameV2(BACKING_PREFIX, k, ctx, body))).toThrow(/not a backing code/);
       expect(() => decodeDrawKeyCode(ctx, frameV2(DRAW_KEY_PREFIX, k, ctx, new Uint8Array(64)))).toThrow(/not a draw key code/);
     }
+  });
+  it('across branches: no kind names two codes and every kind another branch uses is reserved here (scripts/check-code-kinds.mjs)', () => {
+    // the other branches' tables as committed (feat/zk-reputation, feat/prove-solvency); `npm run check:code-kinds`
+    // reads the live ones from every local branch
+    const others: KindTable[] = [
+      { source: 'feat/zk-reputation', kinds: { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, reputation: 7, repRequest: 8, repSig: 9 } },
+      { source: 'feat/prove-solvency', kinds: { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, solvencyAsk: 10, solvency: 11 } },
+    ];
+    const src = readFileSync(new URL('../../integrations/core/codes.ts', import.meta.url), 'utf8');
+    const mine = parseCodeKinds(src)!;
+    expect(mine).toEqual({ ...CODE_KIND });
+    expect(parseReserved(src)).toEqual(Object.keys(RESERVED_CODE_KINDS).map(Number));
+    expect(findClashes([{ source: 'here', kinds: mine }, ...others])).toEqual([]);
+    expect(unreserved(mine, parseReserved(src), others)).toEqual([]);
+    // the clash this registry once had (backed lines on 10/11) is caught
+    expect(findClashes([{ source: 'old', kinds: { ...mine, backing: 10, drawKey: 11 } }, ...others]).map((c) => c.kind)).toEqual([10, 11]);
   });
 });
 

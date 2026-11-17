@@ -53,8 +53,8 @@ Both keys are re-derivable from the agent key, so a line can be managed again af
 `payout_to`, by default the draw key's USDG account.
 
 ```
-A: h081_back_draw key                               -> "h081-draw-key:" code (kind 11) -> B
-B: h081_back open (Backing + vault), stake          -> "h081-backing:" code (kind 10, loanRef 0) -> A
+A: h081_back_draw key                               -> "h081-draw-key:" code (kind 13) -> B
+B: h081_back open (Backing + vault), stake          -> "h081-backing:" code (kind 12, loanRef 0) -> A
 L: h081_lend open (existing open_slot)              -> loan ref -> A
 A: h081_back_draw request(loanRef, advance, lender fee, term, ttl)   reserves the cover
                                                     -> "h081-backing:" code with loanRef -> L
@@ -282,24 +282,29 @@ plan unless `confirm: true`, and every plan carries the privacy note of section 
   `h081BackDraw` methods.
 - `@h081lll/agent`: `H081.back` / `H081.draw`; routes `POST/GET /v1/backing` and `POST/GET /v1/draws`;
   `/v1/loans/lend` takes `backingCode` and `minCoverBps`; CLI `h081 back …` and `h081 draw …`; `h081 check` reads
-  kinds 10 and 11; `openapi.json` regenerated. Nothing is published.
+  kinds 12 and 13; `openapi.json` regenerated. Nothing is published.
 
 ## 8. Codes (v2 frame, `integrations/core/codes.ts`)
 
 | kind | prefix | body |
 |---|---|---|
-| 10 | `h081-backing:` | backing 32 ‖ loan_ref u64 LE (0 = none), 40 B |
-| 11 | `h081-draw-key:` | draw key 32 ‖ payout account 32, 64 B |
+| 12 | `h081-backing:` | backing 32 ‖ loan_ref u64 LE (0 = none), 40 B |
+| 13 | `h081-draw-key:` | draw key 32 ‖ payout account 32, 64 B |
 
 Network tag: the loan code context (cluster, stream_loan program, USDG). **Kind allocation.** This branch first used 8
 and 9, which collide with the reputation branch (`feat/zk-reputation`: 7 `h081-rep:`, 8 `h081-rep-ask:`, 9
-`h081-rep-sig:`). No branch, published package or the site ever shipped a kind above 6 (main, `fix/rpc-429-seed` (the
-published agent 0.1.2), `feat/agent-api`, `feat/prove-solvency` and the site all stop at 6 or below), so the backed-line
-codes moved to **10 and 11** without breaking a shipped code. `codes.ts` now carries the registry: 1-6 shipped, 7-9
-`RESERVED_CODE_KINDS` for the reputation codes, 10-11 backed lines; a new kind takes the next free number. A unit test
-checks every kind is used once, none is reserved, and a kind 7/8/9 frame is never read as a backed-line code. The
-reputation branch needs no change. Confirm the registry when both branches merge (section 11, D8). **The site's
-`src/lib/live/codes.ts` mirror is not in this branch** (it lives in the site repo).
+`h081-rep-sig:`), then 10 and 11, which collide with the solvency branch (`feat/prove-solvency`: 10
+`h081-solvency-ask:`, 11 `h081-solvency:`, committed before this branch moved there; its own registry note already
+proposes 7-9 reputation, 10/11 solvency, 12/13 backer). No published package or the site ever shipped a kind above 6
+(main, `fix/rpc-429-seed` (the published agent 0.1.2), `feat/agent-api` and the site stop at 6), so the backed-line
+codes moved to **12 and 13** without breaking a shipped code. `codes.ts` carries the registry: 1-6 shipped, 7-9
+(reputation) and 10-11 (solvency) in `RESERVED_CODE_KINDS`, 12-13 backed lines; a new kind takes the next free number.
+`npm run check:code-kinds` (`scripts/check-code-kinds.mjs`) reads `CODE_KIND` from the working tree and every local
+branch's `codes.ts` and fails when one number names two codes or another branch's kind is not reserved here. A unit
+test checks every kind is used once, none is reserved, a kind 7-11 frame is never read as a backed-line code, and the
+reputation and solvency tables as committed do not clash with this one. The reputation and solvency branches need no
+change. Confirm the registry when the branches merge (section 11, D8). **The site's `src/lib/live/codes.ts` mirror is
+not in this branch** (it lives in the site repo).
 
 ## 9. Privacy: what leaks
 
@@ -351,11 +356,11 @@ deposit volume), a pinned lender hints at who the backer is, and the lender is n
   before the go.
 - **D4. Fee sponsorship** (section 9). Without it, v1 lines are linkable to the paying wallet.
 - **D5. The upgrade** (section 16): owner-only, rehearsed on localnet first, upgrade authority kept, never `--final`.
-- **D6. The site mirror** of kinds 10 and 11, and the "backed" label in the site's loan views (section 16). The x402
+- **D6. The site mirror** of kinds 12 and 13, and the "backed" label in the site's loan views (section 16). The x402
   loans market and `lendStatus` in this repo are done.
 - **D7. v2 confidential stake** (section 12): a new circuit, a stipend_pool upgrade and a ceremony.
-- **D8. Code kinds at merge.** This branch takes 10 and 11 and reserves 7-9 for the reputation codes (section 8).
-  Confirm that registry when the two branches merge; nothing shipped changes.
+- **D8. Code kinds at merge.** This branch takes 12 and 13 and reserves 7-9 for the reputation codes and 10-11 for the
+  solvency codes (section 8). Run `npm run check:code-kinds` before each merge; nothing shipped changes.
 - **D9. safety_pool cover on a backed loan.** safety_pool `insure` accepts a backed loan (it reads only the Slot), but
   its slash can never pay: stream_loan's `record_slash` cannot create the Subrogation the backed loan already has
   (shown on localnet, section 14). A premium paid for it buys nothing; the underwriter's co-sign (off on mainnet) is
@@ -390,8 +395,8 @@ repayment before expiry and a minimum fee paid.
   default, the backer never above stake + fee, and a full repayment balances exactly.
 - **TypeScript unit** (`test/sdk/backer.test.ts`, `test/integrations/backer-ops.test.ts`): the shared vectors, key
   derivation, instruction layouts, decoders, the `loanStatus` backed flag, the error table, the ops' zod checks, plan
-  unless confirm, the lend-fund routing, kinds 10/11 framing and the kind registry (no duplicate, none of the reserved
-  7-9, a kind 7/8/9 frame never read as a backed-line code), and `H081_MAX_BACK` / `H081_MAX_DRAW`; the readers
+  unless confirm, the lend-fund routing, kinds 12/13 framing and the kind registry (no duplicate, none of the reserved
+  7-11, a kind 7-11 frame never read as a backed-line code, no clash with the reputation and solvency tables), and `H081_MAX_BACK` / `H081_MAX_DRAW`; the readers
   (`subrogationKindOf`, batched `subrogationKinds`, `backedLenderPosition` with fee-first pending, 100% and 20% cover);
   plus the updated plugin, MCP and OpenAPI tests.
 - **Readers, unit** (`test/relayer/x402-services.test.ts`, `test/integrations/core-lend.test.ts`): the x402 market

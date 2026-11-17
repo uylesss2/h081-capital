@@ -566,6 +566,21 @@ describe('h081_lend on a backed loan (status labels, claim, settle)', () => {
     expect(((await runOp(after.bank, 'h081_lend', { action: 'settle', loanRef: '3' })) as { plan: { warning: string } }).plan.warning).toMatch(/stake already paid its cover \(515 USDG\)/);
   });
 
+  it('settle never tells the lender to claim once the Draw is released or closed (back_claim needs a funded Draw)', async () => {
+    const late = NOW - 40n * DAY;
+    // released after the claim window without a claim (state 3, nothing claimed)
+    const rel = await backedLoan({ repaid: USD(10), subPaid: USD(10), subOwed: USD(10), claimed: 0n, state: 3, expiry: late });
+    const relWarn = ((await runOp(rel.bank, 'h081_lend', { action: 'settle', loanRef: '3' })) as { plan: { warning: string } }).plan.warning;
+    expect(relWarn).not.toMatch(/claim first|including the backer's cover/);
+    expect(relWarn).toMatch(/released without a claim.*no default claim is possible any more.*no cover was paid/);
+    // the Draw closed (after a claim paid in full, or a release): the cover paid is no longer on chain
+    const gone = await backedLoan({ repaid: USD(10), subPaid: USD(525), subOwed: USD(525), claimed: USD(515), state: 2, expiry: late });
+    gone.conn.accounts.delete(drawPda(backing, 3n, LOAN).toBase58());
+    const goneWarn = ((await runOp(gone.bank, 'h081_lend', { action: 'settle', loanRef: '3' })) as { plan: { warning: string } }).plan.warning;
+    expect(goneWarn).not.toMatch(/claim first|including the backer's cover/);
+    expect(goneWarn).toMatch(/Draw is closed, so no default claim is possible any more/);
+  });
+
   it('a stream loan slashed by a safety pool is still labelled a slash', async () => {
     const { bank, conn, signer } = await openAgent();
     putSlot([conn], slotData({ loanRef: 3n, lender: signer.publicKey, funded: true, principal: USD(40), repaid: USD(10), pledgeBps: 4000, expiry: NOW - 8n * DAY }));

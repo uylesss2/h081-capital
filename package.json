@@ -34,6 +34,7 @@
     "test:integrations": "vitest run test/integrations",
     "build:integrations": "npm run build --prefix integrations/mcp && npm run build --prefix integrations/solana-agent-kit && npm run build --prefix integrations/agent",
     "test:agent": "vitest run test/integrations/agent-",
+    "check:code-kinds": "node scripts/check-code-kinds.mjs",
     "test:solana:backer": "node scripts/solana-backer-localnet.mjs restart base && vitest run --config vitest.solana-backer.config.ts",
     "solana:backer:stop": "node scripts/solana-backer-localnet.mjs stop"
   },

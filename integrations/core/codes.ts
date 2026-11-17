@@ -4,9 +4,9 @@
 //   h081-loan-proof:  { ref, payout, proof: {a, b, c}, args: StreamArgs }       (borrower -> lender)   (kind 2)
 //   h081-address:     a shielded H081 address (spending pk + viewing key) that others pay privately   (kind 5)
 //   h081-key:         the agent key backup: the 32-byte Solana secret seed (CLI only, never sent anywhere)   (kind 6)
-//   h081-backing:     a backed line, and the loan slot a draw on it is requested for   (backer -> borrower -> lender)   (kind 10)
-//   h081-draw-key:    a borrower's per-line draw key and the account its advance is paid to   (borrower -> backer)   (kind 11)
-// Kind 7 is reserved for the reputation proof code.
+//   h081-backing:     a backed line, and the loan slot a draw on it is requested for   (backer -> borrower -> lender)   (kind 12)
+//   h081-draw-key:    a borrower's per-line draw key and the account its advance is paid to   (borrower -> backer)   (kind 13)
+// Kinds 7-9 (reputation) and 10-11 (solvency) are reserved for codes built on other branches.
 // Loan codes in the first (v1) format still decode: JSON with bigints, keys and bytes tagged, base64url, prefixed
 // (stipend-site/src/lib/live/bank.ts). encodeTerms / encodeProofCode make them only to test that compatibility.
 import bs58 from 'bs58';
@@ -96,14 +96,18 @@ export function decodeProofCode(code: string): LoanProofCode {
 //
 // Kind registry (one byte; a number is never reused for another body): 1-6 shipped (above and the agent key);
 // 7, 8, 9 reserved for the reputation codes (h081-rep, h081-rep-ask, h081-rep-sig on feat/zk-reputation);
-// 10 and 11 the backed-line codes below. A new kind takes the next number after the highest allocated or reserved one.
+// 10 and 11 reserved for the solvency codes (h081-solvency-ask, h081-solvency on feat/prove-solvency); 12 and 13 the
+// backed-line codes below. A new kind takes the next number after the highest allocated or reserved one; the cross-branch
+// table is scripts/check-code-kinds.mjs (npm run check:code-kinds), run against every local branch's codes.ts.
 
 export const FRAME_VERSION = 2;
-export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, backing: 10, drawKey: 11 } as const;
+export const CODE_KIND = { terms: 1, proof: 2, zkproof: 3, practice: 4, address: 5, key: 6, backing: 12, drawKey: 13 } as const;
 /** Kinds held for codes built on other branches: never allocate them here. */
-export const RESERVED_CODE_KINDS: Readonly<Record<number, string>> = { 7: 'reputation proof (h081-rep:)', 8: 'reputation request (h081-rep-ask:)', 9: 'reputation signature (h081-rep-sig:)' };
+export const RESERVED_CODE_KINDS: Readonly<Record<number, string>> = { 7: 'reputation proof (h081-rep:)', 8: 'reputation request (h081-rep-ask:)', 9: 'reputation signature (h081-rep-sig:)',
+  10: 'solvency request (h081-solvency-ask:)', 11: 'solvency proof (h081-solvency:)',
+};
 const KIND_NAME: Record<number, string> = {
-  1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code', 10: 'backing code', 11: 'draw key code',
+  1: 'loan terms code', 2: 'borrower proof code', 3: 'proof code', 4: 'practice proof code', 5: 'shielded address code', 6: 'agent key code', 12: 'backing code', 13: 'draw key code',
 };
 
 /** Which network, program and asset a code belongs to. */
@@ -286,7 +290,7 @@ export function decodeKeyCode(ctx: CodeContext, code: string): Uint8Array {
   return body;
 }
 
-// ---- backed lines (docs/BACKER-SPEC.md): kinds 10 and 11, in the loan code context (the stream_loan program)
+// ---- backed lines (docs/BACKER-SPEC.md): kinds 12 and 13, in the loan code context (the stream_loan program)
 
 export const BACKING_PREFIX = 'h081-backing:';
 export const DRAW_KEY_PREFIX = 'h081-draw-key:';
@@ -296,7 +300,7 @@ export interface BackingCodeBody { backing: PublicKey; loanRef: bigint }
 /** A borrower's draw key for one line, and the token account its advance is paid to. */
 export interface DrawKeyCodeBody { drawKey: PublicKey; payoutTo: PublicKey }
 
-/** "h081-backing:<base58>": kind 10, body = backing (32) | loanRef u64 LE (0 = none). */
+/** "h081-backing:<base58>": kind 12, body = backing (32) | loanRef u64 LE (0 = none). */
 export function encodeBackingCode(ctx: CodeContext, b: BackingCodeBody): string {
   if (b.loanRef < 0n || b.loanRef >= 1n << 64n) throw new Error('loanRef out of range');
   return frameV2(BACKING_PREFIX, CODE_KIND.backing, ctx, Uint8Array.from([...b.backing.toBytes(), ...u64le(b.loanRef)]));
@@ -307,7 +311,7 @@ export function decodeBackingCode(ctx: CodeContext, code: string): BackingCodeBo
   return { backing: new PublicKey(body.slice(0, 32)), loanRef: readU64le(body, 32) };
 }
 
-/** "h081-draw-key:<base58>": kind 11, body = draw key (32) | payout token account (32). */
+/** "h081-draw-key:<base58>": kind 13, body = draw key (32) | payout token account (32). */
 export function encodeDrawKeyCode(ctx: CodeContext, d: DrawKeyCodeBody): string {
   return frameV2(DRAW_KEY_PREFIX, CODE_KIND.drawKey, ctx, Uint8Array.from([...d.drawKey.toBytes(), ...d.payoutTo.toBytes()]));
 }
