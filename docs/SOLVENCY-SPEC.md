@@ -165,13 +165,14 @@ signature = ed25519(walletKey, sha256("h081-solvency-present|v1|" || requestDige
   reserve's figures anywhere".
 - `min` snaps UP to the reputation ladder (1 / 2.5 / 5 x 10^k USDG) when asking, DOWN when proving directly. The
   prover refuses a 5th distinct bound per verifierKey per UTC day and a 9th across all (kept in the cache dir, in
-  memory without one): a verifier cannot binary-search the reserve. Every ATTEMPT counts, recorded before the reserve
-  is looked at, so a request that ends in a plan or a refusal (bound above the reserve) uses a slot like a proof does.
+  memory without one): a verifier cannot binary-search the reserve. For the per-key cap every ATTEMPT counts, recorded
+  before the reserve is looked at, so a request that ends in a plan or a refusal (bound above the reserve) uses that
+  key's slot like a proof does; the global cap counts PROVEN bounds only, so refused asks cannot lock out other askers.
   (Leak is bounded anyway: bounds are ladder steps and the reserve's size is the agent's choice, not its balance.)
   Limits, not closed: `verifierKey` is not authenticated and keys are free, so the per-key cap does not stop one asker
-  using many keys (only the global cap does), and anyone can use up the global cap for the UTC day with 8 asks, after
-  which the prover refuses new bounds to everyone until midnight UTC (a repeat of a bound already proven that day still
-  works). Signing requests would not help (a new key per ask is free); an allow-list of trusted askers would.
+  using many keys (only the global cap does), and anyone whose 8 asks at distinct bounds this agent ANSWERS uses up the
+  global cap for the UTC day, after which the prover refuses new bounds to everyone until midnight UTC (a repeat of a
+  bound already proven that day still works). Signing requests would not help (a new key per ask is free); an allow-list of trusted askers would.
 
 ## 3. Verification paths
 
@@ -243,7 +244,7 @@ Unit (`npm test`, vitest):
 - codes 10/11: round trip; wrong kind, wrong network, bad checksum, cut off, pasted with wrappers/zero-width chars; a
   kind 3 / reputation / backer code pasted gets the "that is a ... code" message.
 - audience and signature: fixed vectors; any changed byte of request, wallet or args breaks it.
-- ladder snapping up/down; probing cap (5th bound per verifier per day, 9th overall; a repeated bound is free).
+- ladder snapping up/down; probing cap (5th bound per verifier per day counting attempts, 9th proven overall; a repeated bound is free).
 - verify refusals, one test each: expired, reused nonce, other request, other wallet, `expectWallet` mismatch,
   `kind != 0`, `bound < min`, tampered proof, tampered args, unpinned vkey, stale root, unknown root, asset floor.
 - Groth16 with the real `disclose` artifacts (hash-checked against `CIRCUIT_HASHES.disclose`).

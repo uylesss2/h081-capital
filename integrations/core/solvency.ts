@@ -16,9 +16,10 @@
 //   - the asset is private in the circuit: the claim is reported asset-sound only when the bound is above what any
 //     non-USDG vault could back (assetFloor). A read failure there is a failure, never a pass;
 //   - bounds snap to the 1 / 2.5 / 5 ladder and the prover refuses a 5th distinct bound per verifier key per UTC day and
-//     a 9th across all (probing cap; every attempt counts, answered or not). Limits: the verifier key is unauthenticated
-//     and keys are free, so the per-key cap does not stop one asker with many keys (the global cap does), and anyone
-//     can use up the global cap for the day; the ladder alone already limits what any number of asks can learn;
+//     a 9th proven bound across all (probing cap; for the per-key cap every attempt counts, answered or not). Limits:
+//     the verifier key is unauthenticated and keys are free, so the per-key cap does not stop one asker with many keys
+//     (the global cap does), and anyone whose asks this agent ANSWERS can use up the global 8 for the day; asks it
+//     refuses no longer do. The ladder alone already limits what any number of asks can learn;
 //   - every verify result carries `doesNotSay` (spec section 6) verbatim.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -147,14 +148,24 @@ function writeStore<T>(host: SolvencyHost, name: string, entries: T[]): void {
   }
 }
 
-/** The probing cap, checked (and with `record`, recorded) for one bound to one verifier key. Exported for tests. */
-export function checkSolvencyProbe(host: SolvencyHost, verifierKey: Uint8Array, bound: bigint, record: boolean, nowMs = Date.now()): void {
+/**
+ * The probing cap, checked (and with `record`, recorded) for one bound to one verifier key; `proven` false records an
+ * attempt (counts toward that key's cap only). Exported for tests.
+ */
+export function checkSolvencyProbe(host: SolvencyHost, verifierKey: Uint8Array, bound: bigint, record: boolean, nowMs = Date.now(), proven = true): void {
   const day = utcDay(nowMs);
   const log = readStore<ProbeEntry>(host, 'probes').filter((e) => e.day >= day - 1);
   const verifier = bs58.encode(verifierKey);
   const why = probeBlock(log, verifier, bound, nowMs);
   if (why) throw new Error(why);
-  if (record && !log.some((e) => e.day === day && e.verifier === verifier && e.bound === bound.toString())) writeStore(host, 'probes', [...log, { day, verifier, bound: bound.toString() }]);
+  if (record) recordProbe(host, log, { day, verifier, bound: bound.toString(), proven });
+}
+
+function recordProbe(host: SolvencyHost, log: ProbeEntry[], e: Required<ProbeEntry>): void {
+  const same = (x: ProbeEntry) => x.day === e.day && x.verifier === e.verifier && x.bound === e.bound;
+  // an attempt is noted once; a proof is noted once (an older attempt for the same bound may stay: it counts the same)
+  if (log.some((x) => same(x) && (!e.proven || x.proven !== false))) return;
+  writeStore(host, 'probes', [...log, e]);
 }
 
 interface SeenNonce { nonce: string; expiry: number }
@@ -510,8 +521,8 @@ export async function proveSolvency(host: SolvencyHost, req: ProveSolvencyArgs):
   // the bound: the request's minimum on the ladder (a hostile asker cannot pick a fine-grained bound)
   const bound = snapUp(r.min, d);
   // counted as an ATTEMPT, before the reserve is looked at: a request that ends in a plan or a refusal (the bound is
-  // above the reserve) tells the asker as much as a proof does, so it uses up a slot too
-  checkSolvencyProbe(host, r.verifierKey, bound, true);
+  // above the reserve) still uses up one of that asker key's slots; only a proof counts toward the global cap
+  checkSolvencyProbe(host, r.verifierKey, bound, true, Date.now(), false);
   await host.sync();
   const notes = reserveNotes(host).filter(isPlain);
   let reserve = notes.filter((n) => n.allowance.remaining >= bound).at(-1); // the smallest that suffices
@@ -557,6 +568,7 @@ export async function proveSolvency(host: SolvencyHost, req: ProveSolvencyArgs):
   const argsBytes = encodeDiscloseArgs(made.args);
   const signature = ed25519.sign(presentationMessage(r.digest, argsBytes), host.signer.secretKey.subarray(0, 32));
   const code = encodeSolvencyCode(host.codeContext, { requestDigest: r.digest, proof: encodeProof(made.proof.proof), args: argsBytes, wallet: me.toBytes(), signature });
+  { const nowMs = Date.now(); recordProbe(host, readStore<ProbeEntry>(host, 'probes').filter((e) => e.day >= utcDay(nowMs) - 1), { day: utcDay(nowMs), verifier: bs58.encode(r.verifierKey), bound: bound.toString(), proven: true }); }
   // verify it as the asker would, before handing it over (no nonce store: that is the asker's)
   const self = await verifySolvency(host, code, { request: req.request, selfCheck: true, allowUnboundAsset: true, now });
   // an RPC that refuses getProgramAccounts leaves the asset floor unknown: the proof is still good, the asker's check decides

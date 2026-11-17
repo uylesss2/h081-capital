@@ -204,11 +204,14 @@ export function solvencyStatement(o: { bound: string; symbol: string; rootAge: n
 /** UTC day number of a unix-millisecond time. */
 export const utcDay = (ms: number): number => Math.floor(ms / 86_400_000);
 
-export interface ProbeEntry { day: number; verifier: string; bound: string }
+/** One ask the prover took up: `proven` false for an attempt that ended in a plan or a refusal (absent = proven). */
+export interface ProbeEntry { day: number; verifier: string; bound: string; proven?: boolean }
 
 /**
- * The probing cap (spec 2.3): refuses, within one UTC day, a 5th distinct bound to one verifier key and a 9th distinct
- * bound across all verifiers. A bound already proven today (to that verifier, or at all for the global cap) is free.
+ * The probing cap (spec 2.3): refuses, within one UTC day, a 5th distinct bound to one verifier key (attempts count,
+ * answered or not) and a 9th distinct PROVEN bound across all verifiers. A bound already asked by that verifier today,
+ * or proven to anyone today for the global cap, is free. Unanswered attempts stay out of the global count: they taught
+ * nobody anything beyond their own key's slots, and counting them let anyone lock out every asker for the day.
  * Returns the reason, or undefined when allowed. Pure: the caller keeps the log.
  */
 export function probeBlock(log: readonly ProbeEntry[], verifier: string, bound: bigint, nowMs: number): string | undefined {
@@ -218,7 +221,7 @@ export function probeBlock(log: readonly ProbeEntry[], verifier: string, bound: 
   if (!mine.has(b) && mine.size >= SOLVENCY_MAX_BOUNDS_PER_VERIFIER_DAY) {
     return `this verifier already received ${SOLVENCY_MAX_BOUNDS_PER_VERIFIER_DAY} different solvency bounds from this account today; a 5th would let it narrow down the reserve. Repeat a bound already proven today, or try again tomorrow (UTC). Nothing was proven.`;
   }
-  const all = new Set(today.map((e) => e.bound));
+  const all = new Set(today.filter((e) => e.proven !== false).map((e) => e.bound));
   if (!all.has(b) && all.size >= SOLVENCY_MAX_BOUNDS_PER_DAY) {
     return `this account already proved ${SOLVENCY_MAX_BOUNDS_PER_DAY} different solvency bounds today across all verifiers; one verifier asking under several keys could narrow down the reserve. Repeat a bound already proven today, or try again tomorrow (UTC). Nothing was proven.`;
   }

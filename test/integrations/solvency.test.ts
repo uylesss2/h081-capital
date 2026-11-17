@@ -174,6 +174,22 @@ describe('the ladder and the probing cap', () => {
     await expect(proveSolvency(h, { request: ask(10n) })).rejects.toThrow(/Deposit first/);
   });
 
+  it('refused asks under many keys do not lock out everyone: the global cap counts only proven bounds', async () => {
+    const h = {
+      config: { cluster: 'mainnet-beta', poolProgramId: POOL }, signer: Keypair.generate(), decimals: 6, codeContext: CTX, usdg: USDG, log: () => {}, sync: async () => {},
+      reserve: { keys: { pk: 5n } }, owner: { registerMint: () => 1n, grantedAllowances: () => [], balance: () => 0n }, grantCeiling: () => {},
+    } as unknown as SolvencyHost;
+    const ask = (key: number, usdg: bigint) => request({ verifierKey: new Uint8Array(32).fill(key), min: usdg * U, expiry: BigInt(Math.floor(Date.now() / 1000) + 600) }).code;
+    const bounds = [1n, 2n, 5n, 10n, 25n, 50n, 100n, 250n];
+    for (const [k, b] of bounds.entries()) await expect(proveSolvency(h, { request: ask(10 + k, b) })).rejects.toThrow(/Deposit first/);
+    // a ninth asker with a ninth bound still reaches the reserve check (no proof was ever made, so nothing was learned)
+    await expect(proveSolvency(h, { request: ask(99, 500n) })).rejects.toThrow(/Deposit first/);
+    // proven bounds do fill the global cap
+    const log = bounds.map((b, k) => ({ day: Math.floor(Date.now() / 86_400_000), verifier: 'K' + k, bound: (b * U).toString(), proven: true }));
+    expect(probeBlock(log, 'Z', 500n * U, Date.now())).toMatch(/8 different solvency bounds today across all verifiers/);
+    expect(probeBlock(log.map((e) => ({ ...e, proven: false })), 'Z', 500n * U, Date.now())).toBeUndefined();
+  });
+
   it('the bank keeps the log (in memory without a cache dir) and records only on request', () => {
     const host = { config: { cluster: 'mainnet-beta', poolProgramId: POOL }, signer: Keypair.generate(), log: () => {} } as unknown as SolvencyHost;
     const v = new Uint8Array(32).fill(3);
