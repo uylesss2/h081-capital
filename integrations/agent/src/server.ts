@@ -320,7 +320,7 @@ export const ROUTES: RouteDef[] = [
     method: 'POST', path: '/v1/reputation/prove', auth: true, summary: 'Prover: answer a request with an h081-rep: code (local proof)',
     description: 'Proves locally (the account secret is in the witness; no service proves for you), 3-15 s. Sends nothing.',
     body: obj({ ...(JSON_SCHEMA.h081_prove_reputation.properties as Json) }, [], 'exactly one of request, or audience with thresholds'),
-    result: '{code, presentation?, presNullifier, expiresAt, thresholds, counted, binding, setup, statement, next}',
+    result: '{code, presentation?, audience, nonce, challenge, presNullifier, expiresAt, thresholds, counted, binding, setup, statement, next, snapped?}',
     handle: async (c) => {
       only(c.body, Object.keys(JSON_SCHEMA.h081_prove_reputation.properties as Json));
       return done(await c.h.proveReputation(c.body as never));
@@ -328,9 +328,9 @@ export const ROUTES: RouteDef[] = [
   },
   {
     method: 'POST', path: '/v1/reputation/verify', auth: true, summary: 'Verifier: check an h081-rep: code',
-    description: 'Checks challenge, presenter binding, expiry, root and proof. ok means a lower bound on repaid loans; it says nothing about defaults.',
+    description: 'Checks challenge, presenter binding, expiry, root and proof, and (without a request) the thresholds you give. A nonce the prover drew proves no freshness: only the expiry and your list of accepted nonces stop a replay. ok means a lower bound on repaid loans; it says nothing about defaults.',
     body: obj({ ...(JSON_SCHEMA.h081_verify_reputation.properties as Json) }, ['code']),
-    result: '{ok, reason?, thresholds, presNullifier, presenter, lowerBoundOnly, statement, setup}',
+    result: '{ok, reason?, thresholds, presNullifier, presenter, onChain?, lowerBoundOnly, statement, setup}',
     handle: async (c) => {
       only(c.body, Object.keys(JSON_SCHEMA.h081_verify_reputation.properties as Json));
       const code = optStr(c.body.code, 'code');

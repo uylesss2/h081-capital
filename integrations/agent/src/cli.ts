@@ -53,7 +53,7 @@ usage: h081 <command> [options]
   stake view | stake <h081> | request-unstake <h081> | unstake   [--yes]
   rep ask --audience A [--min-loans N] [--min-volume X] [--min-lenders N] [--span DAYS] [--months N --month-floor X] [--bind <pubkey>]
     | prove (<h081-rep-ask:...> | --audience A [--nonce N] [thresholds]) [--bind <pubkey>]
-    | verify <h081-rep:...> (--ask <h081-rep-ask:...> | --audience A --nonce N) [--sig <h081-rep-sig:...>] [--on-chain]
+    | verify <h081-rep:...> (--ask <h081-rep-ask:...> | --audience A --nonce N [thresholds you require]) [--sig <h081-rep-sig:...>] [--on-chain]
     | attest [--self-sign] [--yes] | status        private reputation (a lower bound on repaid loans; beta setup)
   check <code>                                  validate any h081-* code: kind, network, checksum
   serve [--port 8081] [--poll 20] [--allow-origin <url>]   the local API on 127.0.0.1
@@ -343,7 +343,7 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
             return ok('done', await h.proveReputation(request ? { request, bindTo: str('bind') } : { audience: str('audience'), nonce: str('nonce'), ...given, bindTo: str('bind') }));
           }
           case 'verify': {
-            const r = await h.verifyReputation(arg(2, '<h081-rep:...>'), { request: str('ask'), audience: str('audience'), nonce: str('nonce'), presentation: str('sig'), onChain: flags['on-chain'] === true, allowBearer: flags['allow-bearer'] === true }) as { ok: boolean; reason?: string };
+            const r = await h.verifyReputation(arg(2, '<h081-rep:...>'), { request: str('ask'), audience: str('audience'), nonce: str('nonce'), ...given, presentation: str('sig'), onChain: flags['on-chain'] === true, allowBearer: flags['allow-bearer'] === true }) as { ok: boolean; reason?: string };
             ok('done', r, () => out(r.ok ? `valid: ${JSON.stringify(r, null, 2)}` : `not valid: ${r.reason}`));
             return r.ok ? 0 : 1;
           }

@@ -76,6 +76,8 @@ export interface ThresholdArgs {
   minLoans?: number; minVolume?: string | bigint; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string | bigint;
 }
 
+const REP_THRESHOLD_KEYS = ['minLoans', 'minVolume', 'minLenders', 'minSpanDays', 'minMonths', 'monthFloor'] as const;
+
 export interface RepView extends Omit<RepThresholds, 'minVolume' | 'monthFloor'> { minVolume: string; minVolumeUnits: string; monthFloor: string; monthFloorUnits: string }
 
 export interface ReputationRequestResult { code: string; audience: string; nonce: string; expiresAt: number; thresholds: RepView; bindTo?: string; note: string }
@@ -83,20 +85,30 @@ export interface ProveReputationResult {
   code: string; presentation?: string;
   /** the verifier's name hashed (0x hex) and the challenge this code answers: a verifier without a request checks with { audience, nonce } */
   audience: string; nonce: string;
+  /**
+   * who chose the nonce: the verifier's request, a nonce the verifier gave (`nonce`), or one the prover drew itself. A
+   * prover-drawn nonce proves no freshness to the verifier (it is copied out of the code): only the expiry and the
+   * verifier's own list of nonces it accepted stop a replay. A verifier that needs a live answer issues a request code.
+   */
+  challenge: 'request' | 'verifier' | 'prover-chosen';
   presNullifier: string; expiresAt: number; thresholds: RepView; counted: { loans: number };
   binding: 'request' | 'given-key' | 'session-key'; setup: string; statement: string; next: string; snapped?: string;
 }
 export interface VerifyReputationResult {
   ok: boolean; reason?: string; thresholds?: RepView; asset?: string; presNullifier?: string; audience?: string; expiresAt?: number;
   presenter?: 'request-binding' | 'signed-session-key' | 'bearer';
-  /** ran: false = the simulation could not run (no fee payer), which is not a refusal */
+  /** ran: false = the simulation could not run (a fee payer that cannot pay, a transaction the cluster rejected before the program ran, an RPC failure), which is not a refusal */
   onChain?: { ok: boolean; ran?: false; computeUnits?: number; error?: string };
   lowerBoundOnly: true; statement: string; setup: string;
 }
 export interface ReputationStatus {
   attested: { count: number; volume: string; lenders: number; spanDays: number; months: number };
   pending: Array<{ loanRef: string; principal: string }>;
-  /** repaid loans rep_registry refuses for good: backed (the Subrogation is a backer's fee or recovery, not a slash), slashed, too small */
+  /**
+   * repaid loans rep_registry refuses for good, as they can appear here: slashed or too small. (The reason type is shared
+   * with the relayer and the lender close, which also see `backed` and `no_agent_key`: a backed loan has agent key 0, so
+   * it never matches this account's loan keys and never shows up in a borrower's status at all.)
+   */
   never: Array<{ loanRef: string; principal: string; reason: 'backed' | 'slashed' | 'no_agent_key' | 'too_small' }>;
   legacy: number; loanKeys: number;
   warnings: string[]; statement: string; setup: string;
@@ -248,6 +260,7 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
   const d = env.config.decimals, ctx = repContext(env);
   requireProvingArtifacts(env);
   let audience: bigint, nonce: bigint, expiry: bigint, bindTo = 0n, binding: ProveReputationResult['binding'] = 'session-key';
+  let challenge: ProveReputationResult['challenge'] = 'request';
   let asked: RepRequirement, snappedNote: string | undefined;
   const now = Math.floor(Date.now() / 1000);
   if (req.request) {
@@ -261,6 +274,7 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
     audience = audienceOf(req.audience);
     // the verifier's own challenge when it gave one out of band (it then checks with { audience, nonce }); else a fresh one
     nonce = req.nonce === undefined ? randomNonce() : nonceOf(req.nonce);
+    challenge = req.nonce === undefined ? 'prover-chosen' : 'verifier';
     const ttl = req.expiresInSec ?? REP_DEFAULT_TTL_SEC;
     if (!(ttl > 0) || ttl > REP_MAX_TTL_SEC) throw new Error(`expiresInSec must be 1..${REP_MAX_TTL_SEC}`);
     expiry = BigInt(now + ttl);
@@ -308,12 +322,15 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
     ? encodeRepSig(ctx, { pub: ed25519.getPublicKey(session), sig: ed25519.sign(repPresentationMessage(audience, nonce, publicSignals.presNullifier), session) })
     : undefined;
   return {
-    code, ...(presentation ? { presentation } : {}), audience: hex(audience), nonce: hex(nonce), presNullifier: hex(publicSignals.presNullifier), expiresAt: Number(expiry), thresholds: repView(asked, d),
+    code, ...(presentation ? { presentation } : {}), audience: hex(audience), nonce: hex(nonce), challenge, presNullifier: hex(publicSignals.presNullifier), expiresAt: Number(expiry), thresholds: repView(asked, d),
     counted: { loans: chosen.length }, binding, setup: setupLabel(env), statement: REP_STATEMENT_NOTE,
     ...(snappedNote ? { snapped: snappedNote } : {}),
-    next: presentation
+    next: (presentation
       ? 'give the verifier the code, and the presentation (h081-rep-sig:) only when you present it, over the channel the verifier knows you by; whoever holds both can present it until it expires'
-      : 'give the verifier the code; it is bound to the key in the request (or bindTo), so only that key\'s holder can use it',
+      : 'give the verifier the code; it is bound to the key in the request (or bindTo), so only that key\'s holder can use it')
+      + (challenge === 'prover-chosen'
+        ? '. The nonce was drawn here, not by the verifier: it proves no freshness (only the expiry and the verifier\'s list of accepted nonces stop a replay), and the verifier must check the thresholds itself; a verifier that needs a live answer sends a request code'
+        : ''),
   };
 }
 
@@ -327,7 +344,13 @@ function nonceOf(s: string): bigint {
 
 // ---- verify (verifier side)
 
-export async function verifyReputation(env: RepEnv, code: string, opts: { request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean; now?: number } = {}): Promise<VerifyReputationResult> {
+/**
+ * opts: the request code you issued, or `audience` + `nonce` (the nonce you gave the prover, or, when the prover drew
+ * it, the one it handed you: that proves no freshness, only the expiry plus your own record of accepted nonces). On the
+ * `audience` path the thresholds you require (`minLoans`, `minVolume`, ...) are checked when given: without them any
+ * claim the prover chose passes, and `thresholds` in the result is what you must compare yourself.
+ */
+export async function verifyReputation(env: RepEnv, code: string, opts: ThresholdArgs & { request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean; now?: number } = {}): Promise<VerifyReputationResult> {
   const d = env.config.decimals, ctx = repContext(env);
   const base = { lowerBoundOnly: true as const, statement: REP_STATEMENT_NOTE, setup: setupLabel(env) };
   const fail = (reason: string, extra: Partial<VerifyReputationResult> = {}): VerifyReputationResult => ({ ok: false, reason, ...base, ...extra });
@@ -339,6 +362,7 @@ export async function verifyReputation(env: RepEnv, code: string, opts: { reques
   // 1. the code answers this verifier's challenge
   let requestBind = 0n;
   if (opts.request) {
+    if (REP_THRESHOLD_KEYS.some((k) => opts[k] !== undefined)) return fail('a request code carries the thresholds it asks for; do not add any next to it', view);
     let q;
     try { q = decodeRepRequest(ctx, opts.request); } catch (e) { return fail(`the request: ${(e as Error).message}`, view); }
     if (c.audience !== q.audience) return fail('the code was made for another audience', view);
@@ -348,12 +372,19 @@ export async function verifyReputation(env: RepEnv, code: string, opts: { reques
     if (q.minMonths > 0 && c.monthFloor < q.monthFloor) return fail('the code counts periods with a lower per-loan floor than the request asks', view);
     requestBind = q.bindTo;
   } else {
-    if (!opts.audience) return fail('give the request code you issued (request), or your audience name and the nonce you issued (audience, nonce)', view);
+    if (!opts.audience) return fail('give the request code you issued (request), or your audience name and the nonce (audience, nonce)', view);
     if (c.audience !== audienceOf(opts.audience)) return fail('the code was made for another audience', view);
-    if (!opts.nonce) return fail('give the nonce you issued: without it a captured code could be replayed to you', view);
+    if (!opts.nonce) return fail('give the nonce: the one you gave the prover, or the one it handed you with the code (a nonce the prover drew proves no freshness: only the expiry and your list of accepted nonces stop a replay; a request code gives a live challenge)', view);
     let n: bigint;
     try { n = BigInt(opts.nonce); } catch { return fail('the nonce must be a number (0x hex or decimal)', view); }
     if (c.nonce !== n) return fail('the code answers another challenge (nonce)', view);
+    // the thresholds this verifier requires, when it states them (without a request nothing else does)
+    let want: RepRequirement;
+    try { want = requirementOf(opts, d); } catch (e) { return fail((e as Error).message, view); }
+    if (opts.minLoans === undefined) want.minLoans = 0;
+    const short = (['minLoans', 'minVolume', 'minLenders', 'minSpanDays', 'minMonths'] as const).filter((k) => c[k] < want[k]);
+    if (short.length) return fail(`the code proves less than you ask (${short.join(', ')})`, view);
+    if (want.minMonths > 0 && c.monthFloor < want.monthFloor) return fail('the code counts periods with a lower per-loan floor than you ask', view);
   }
   // 2. who may present it
   let presenter: VerifyReputationResult['presenter'];
@@ -412,20 +443,34 @@ function proofJson(b: Uint8Array) {
 
 /** Simulates verify_reputation (read-only: nothing is signed or sent). */
 async function simulateOnChain(env: RepEnv, c: RepCode, pub: RepPublic): Promise<NonNullable<VerifyReputationResult['onChain']>> {
-  // a simulation still needs a fee payer that exists: a fresh verifier wallet with no SOL would come back
-  // AccountNotFound, which says nothing about the proof
-  if ((await env.connection.getBalance(env.signer.publicKey, 'confirmed')) === 0) {
-    return { ok: false, ran: false, error: `this wallet (${env.signer.publicKey.toBase58()}), the fee payer of the read-only simulation, has no SOL on ${env.config.cluster}; the proof passed every off-chain check. Fund it with any amount, or verify without onChain` };
-  }
-  const { blockhash } = await env.connection.getLatestBlockhash('confirmed');
-  const msg = new TransactionMessage({
-    payerKey: env.signer.publicKey, recentBlockhash: blockhash,
-    instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), verifyReputationIx(c.proof, pub, programOf(env), c.treeVersion)],
-  }).compileToV0Message();
-  const sim = await env.connection.simulateTransaction(new VersionedTransaction(msg), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' });
-  if (!sim.value.err) return { ok: true, computeUnits: sim.value.unitsConsumed };
+  // Only an error raised while an instruction ran is the program's answer. Everything else says nothing about the proof
+  // and is "could not run": a fee payer that cannot pay (a fresh verifier wallet comes back AccountNotFound, one with
+  // dust InsufficientFundsForFee), a transaction the cluster rejects before executing it, or an RPC that fails.
+  const couldNot = (why: string, then = 'Retry') => ({ ok: false, ran: false as const, error: `${why}; the proof passed every off-chain check. ${then}, or verify without onChain` });
+  const who = `this wallet (${env.signer.publicKey.toBase58()}), the fee payer of the read-only simulation,`;
+  let msg;
+  try {
+    const { blockhash } = await env.connection.getLatestBlockhash('confirmed');
+    msg = new TransactionMessage({
+      payerKey: env.signer.publicKey, recentBlockhash: blockhash,
+      instructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }), verifyReputationIx(c.proof, pub, programOf(env), c.treeVersion)],
+    }).compileToV0Message();
+    let fee = 5000;
+    try { fee = (await env.connection.getFeeForMessage(msg, 'confirmed')).value ?? fee; } catch { /* the usual one-signature fee */ }
+    const balance = await env.connection.getBalance(env.signer.publicKey, 'confirmed');
+    if (balance < fee) {
+      return couldNot(`${who} has ${balance === 0 ? 'no SOL' : `${balance} lamports`} on ${env.config.cluster}, less than the ${fee}-lamport fee`, `Fund it with at least ${fee} lamports`);
+    }
+  } catch (e) { return couldNot(`the RPC failed before the simulation (${(e as Error).message})`); }
+  let sim;
+  try {
+    sim = await env.connection.simulateTransaction(new VersionedTransaction(msg), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' });
+  } catch (e) { return couldNot(`the RPC failed during the simulation (${(e as Error).message})`); }
+  const err = sim.value.err;
+  if (!err) return { ok: true, computeUnits: sim.value.unitsConsumed };
+  if (!(typeof err === 'object' && 'InstructionError' in err)) return couldNot(`the cluster rejected the transaction before the program ran (${typeof err === 'string' ? err : JSON.stringify(err)})`);
   const m = /custom program error: 0x([0-9a-f]+)/i.exec((sim.value.logs ?? []).join('\n'));
-  return { ok: false, computeUnits: sim.value.unitsConsumed, error: m ? REP_ERROR_NAME[parseInt(m[1], 16)] ?? m[0] : JSON.stringify(sim.value.err) };
+  return { ok: false, computeUnits: sim.value.unitsConsumed, error: m ? REP_ERROR_NAME[parseInt(m[1], 16)] ?? m[0] : JSON.stringify(err) };
 }
 
 // ---- status and attest (borrower side)

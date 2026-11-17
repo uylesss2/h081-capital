@@ -250,7 +250,7 @@ export async function opProveReputation(bank: BankLike, args: Args) {
 
 export async function opVerifyReputation(bank: BankLike, args: Args) {
   return bank.verifyReputation(String(args.code), {
-    request: args.request as string | undefined, audience: args.audience as string | undefined, nonce: args.nonce as string | undefined,
+    request: args.request as string | undefined, audience: args.audience as string | undefined, nonce: args.nonce as string | undefined, ...repThresholdArgs(args),
     presentation: args.presentation as string | undefined, allowBearer: args.allowBearer === true, onChain: args.onChain === true,
   });
 }

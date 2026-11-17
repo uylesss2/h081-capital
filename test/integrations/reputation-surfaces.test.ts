@@ -126,3 +126,22 @@ describe('@h081lll/agent: h.proveReputation({ audience, minLoans, minVolume }) a
     expect((await g.api('POST', '/v1/reputation/prove', { audience: 'acme-desk', minVolume: '1', minVolumeUsdg: '1' })).status).toBe(400);
   });
 });
+
+describe('review pass 4: a verifier without a request states its thresholds; the prove route documents what it returns', () => {
+  it('the verify schema takes the thresholds next to audience + nonce (aliases too), refuses them next to a request; runOp folds the alias', async () => {
+    expect(VerifyRepZ.safeParse({ code: 'c', audience: 'a', nonce: '0x1', minLoans: 3, minVolume: '500', minMonths: 2, monthFloor: '10' }).success).toBe(true);
+    expect(VerifyRepZ.safeParse({ code: 'c', request: 'h081-rep-ask:x', minLoans: 3 }).success).toBe(false);
+    expect(VerifyRepZ.safeParse({ code: 'c', audience: 'a', nonce: '0x1', minVolume: '1', minVolumeUsdg: '1' }).success).toBe(false);
+    const props = (JSON_SCHEMA.h081_verify_reputation as { properties: Record<string, unknown> }).properties;
+    for (const k of ['minLoans', 'minVolume', 'minLenders', 'minSpanDays', 'minMonths', 'monthFloor']) expect(props).toHaveProperty(k);
+    const bank = { ...mockBank(), verifyReputation: vi.fn(async (_code: unknown, _opts: unknown) => ({ ok: true })) };
+    await runOp(bank as never, 'h081_verify_reputation', { code: 'h081-rep:x', audience: 'acme-desk', nonce: '0x1', minLoans: 3, minVolumeUsdg: '500' });
+    expect(bank.verifyReputation.mock.calls[0][1]).toMatchObject({ audience: 'acme-desk', nonce: '0x1', minLoans: 3, minVolume: '500' });
+  });
+
+  it('POST /v1/reputation/prove lists audience, nonce and challenge in its result', async () => {
+    const { ROUTES } = await import('../../integrations/agent/src/server.js');
+    const r = ROUTES.find((x) => x.path === '/v1/reputation/prove')!;
+    for (const k of ['audience', 'nonce', 'challenge']) expect(r.result).toMatch(new RegExp(`[{ ]${k}[,?}]`));
+  });
+});

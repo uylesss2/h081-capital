@@ -17,7 +17,9 @@ It reveals nothing else: not which loans, when, which lenders, which keys, or th
 ```ts
 // one call: the prover names the verifier and the thresholds
 const p = await agent.proveReputation({ audience: 'acme-desk', minLoans: 3, minVolume: '500' });
-// p.code ("h081-rep:", which carries the audience, nonce and thresholds), p.presentation ("h081-rep-sig:")
+// p.code ("h081-rep:", which carries the audience, nonce and thresholds), p.presentation ("h081-rep-sig:"),
+// p.challenge === 'prover-chosen'; the verifier states what it requires (nothing else does without a request):
+const v = await desk.verifyReputation(p.code, { audience: 'acme-desk', nonce: p.nonce, presentation: p.presentation, minLoans: 3, minVolume: '500' });
 
 // a desk that sets the thresholds and the challenge itself hands out a request code (framed: checksum, kind, network)
 const ask = await desk.reputationRequest({ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 });
@@ -29,11 +31,17 @@ The same one call exists on every surface (section 6): MCP `h081_prove_reputatio
 and `h081ProveReputation`, CLI `h081 rep prove --audience A --nonce N --min-loans 3 --min-volume 500`, local API
 `POST /v1/reputation/prove`. `minVolume` / `monthFloor` are decimal USDG; the first release's names `minVolumeUsdg` /
 `monthFloorUsdg` stay accepted as aliases (one of each pair; both is refused). Without `nonce` the prover draws one and
-returns it (`p.nonce`, also inside `p.code`); a verifier without a request checks with `{ audience, nonce }` and must
-remember the nonces it accepted. An optional `nonce` input lets a verifier's own challenge be passed in without a request
-code; it is a raw number copied between parties, which the code-framing rule (letters and digits, checksum, kind,
-network tag) discourages, so the documented flow for a verifier-set challenge is the request code, and whether to keep
-the raw input is listed for the owner (section 13).
+returns it (`p.nonce`, also inside `p.code`, and `p.challenge === 'prover-chosen'`). A verifier without a request
+checks with `{ audience, nonce }`, but that nonce came from the prover, so the check is a tautology: **the no-request
+flow gives no challenge freshness**. Whoever holds the code and its presentation can present it until it expires (at
+most a day); only the expiry and the verifier's own record of accepted nonces stop a replay. It also fixes no
+thresholds: verify on the `{ audience, nonce }` path checks the thresholds the verifier passes (`minLoans`,
+`minVolume`, ...; compared as given, not rounded) and otherwise accepts whatever claim the prover chose, which the
+verifier then has to compare in `thresholds` itself. A verifier that needs a live answer or fixed thresholds issues a
+request code. An optional `nonce` input lets a verifier's own challenge be passed in without a request code
+(`challenge: 'verifier'`); it is a raw number copied between parties, which the code-framing rule (letters and digits,
+checksum, kind, network tag) discourages, so the documented flow for a verifier-set challenge is the request code, and
+whether to keep the raw input is listed for the owner (section 13).
 
 ### What it guarantees (and what enforces it)
 
@@ -43,7 +51,7 @@ the raw input is listed for the owner (section 13).
 | A loan counts once across all proofs | one bit per loan ref in a bitmap page: `attest` refuses a second time |
 | A loan counts once within a proof | the circuit needs strictly increasing loan refs over the enabled slots |
 | Only the holder of the account secret can present it | every counted leaf's agent key must be `Poseidon(1, Poseidon(15, masterSk, k))` for the prover's one `masterSk` |
-| A proof cannot be replayed to another verifier or challenge | public audience, nonce and expiry; the verifier checks its own request; `presNullifier` is per audience |
+| A proof cannot be replayed to another verifier or challenge | public audience, nonce and expiry; the verifier checks its own request; `presNullifier` is per audience. Holds for a challenge the verifier issued (a request code, or a nonce it gave). A nonce the prover drew (`challenge: 'prover-chosen'`) binds the audience only: within the expiry, a replay to that verifier is stopped only by its record of accepted nonces |
 | A captured code is not a bearer token | bound by default: to the request's key, to a key the prover names, or to a fresh session key whose signature (`h081-rep-sig:`) is handed over separately at presentation; unbound codes are refused unless the verifier opts in |
 | All counted loans are in the stated asset | the leaf commits `fieldOf(mint)`, the circuit uses the public `asset` |
 | A raw-field caller cannot slip a wrapped threshold through | the circuit range-checks every threshold and the expiry; `verify_reputation` checks widths again and `now <= expiry <= now + 1 day` |
@@ -254,31 +262,41 @@ Bank (`integrations/core/reputation.ts`, delegated from `H081Bank`):
   Slots with one `agent_pk` would be linked on chain). Two processes that borrow at the same moment on one signer (an
   MCP server and the CLI) no longer pick the same key: the pick re-reads the key list under an exclusive lock file next
   to it (`<list>.lock`, `integrations/core/loankeys.ts`), takes the first free key and writes it back before the lock is
-  released; every other write to the list merges under the same lock. A lock older than 30 s (a crashed process; a pick
-  holds it for milliseconds) is taken over; a held one is waited for up to 10 s, then the borrow is refused with nothing
-  sent. Without a cache dir there is one process's memory only, as before.
+  released; every other write to the list merges under the same lock. Each lock holds a token unique to its holder, and
+  release removes it only while it still holds that token. A lock older than 30 s (a crashed process; a pick holds it
+  for milliseconds) is taken over, only under a short-lived `<list>.lock.takeover` file, inside which the waiter
+  re-reads the lock and removes it only if it still holds the token the waiter saw stale: two waiters that saw the same
+  stale lock cannot both take it. A held one is waited for up to 10 s, then the borrow is refused with nothing sent. Without a cache dir there is one process's memory only, as before.
 - `reputationRequest` → `h081-rep-ask:` (thresholds rounded UP to the ladder; optional `bindTo`).
 - `proveReputation({request} | {audience, nonce?, thresholds})` → `h081-rep:` and, when the request binds no key, an
-  `h081-rep-sig:` presentation from a fresh session key, plus the `audience` and `nonce` the code answers (0x hex). A
+  `h081-rep-sig:` presentation from a fresh session key, plus the `audience` and `nonce` the code answers (0x hex) and
+  `challenge` (`request`, `verifier` or `prover-chosen`: who chose the nonce). A
   `nonce` given without a request is the verifier's own challenge (1 .. 2^248 - 1, refused otherwise before proving);
-  without one a fresh random nonce is drawn. Thresholds snap DOWN when given directly. The prover refuses a
+  without one a fresh random nonce is drawn, and `next` says it proves no freshness. Thresholds snap DOWN when given directly. The prover refuses a
   fifth distinct threshold set per audience per UTC day, a fifth per `bindTo` key (from the request or the caller), and a
   ninth across all audiences (`REP_MAX_SETS_PER_DAY_ALL`): a verifier that knows the prover through its own channel
   cannot binary-search the record by asking under fresh audience names. A set already proven today is free again. The
   log is kept in the cache dir, and in memory for the life of the process when there is none (never skipped). Local proof only, verified locally before it is
   handed out.
-- `verifyReputation(code, {request} | {audience, nonce}, presentation?, allowBearer?, onChain?)` checks, in order:
-  frame, kind, network tag; audience, nonce and thresholds against the request; the binding (request key, or the
+- `verifyReputation(code, {request} | {audience, nonce, thresholds?}, presentation?, allowBearer?, onChain?)` checks,
+  in order: frame, kind, network tag; audience, nonce and thresholds against the request (thresholds given next to a
+  request are refused), or, without one, audience, nonce and the thresholds the verifier passes (each one compared as
+  given; none given means any claim passes); the binding (request key, or the
   presentation's key and signature, or refused as bearer); `now <= expiry <= now + 1 day`; the root in the on-chain
   ring; Groth16 against the vkey whose sha256 is pinned in `CIRCUIT_HASHES.reputation` (empty today: unreleased, so
   only a localnet dev setup with `H081_REP_DEV_SETUP=1` passes); optionally a read-only simulation of
-  `verify_reputation`. A simulation needs a fee payer that exists: a verifier wallet with no SOL gets `ok: false`,
-  `onChain.ran: false` and a reason that says the simulation could not run and that the off-chain checks passed (it
-  used to come back as "verify_reputation refused it: AccountNotFound", which read as a bad proof; found by the
-  validator test in section 8). Every result carries `lowerBoundOnly: true`, `statement` and `setup`.
+  `verify_reputation`. Only an `InstructionError` from the simulation is the program's answer ("verify_reputation
+  refused it: <error name>"). Everything else is `ok: false`, `onChain.ran: false` and a reason that says the
+  simulation could not run and that the off-chain checks passed: a fee payer whose balance is below the fee the RPC
+  quotes for the message (checked first; the reason names that fee), a transaction error before execution
+  (`AccountNotFound`, `InsufficientFundsForFee`, `BlockhashNotFound`, ...), or an RPC call that throws. (A wallet with no
+  SOL used to come back as "verify_reputation refused it: AccountNotFound", found by the validator test in section 8;
+  the first fix tested for a zero balance only, so a wallet holding dust still read as a refused proof.) Every result
+  carries `lowerBoundOnly: true`, `statement` and `setup`.
 - `reputationStatus` (attested count, volume, lenders, span, periods; pending repaid-but-unattested loans; `never`:
-  repaid loans rep_registry refuses for good, by reason, section 3.4; legacy loans under HMAC sub-accounts that can never
-  count, with warnings) and `reputationAttest` (plan unless confirm; via the relayer; never asks for a `never` loan).
+  repaid loans rep_registry refuses for good, by reason, section 3.4: in a borrower's status only `slashed` and
+  `too_small` can appear, since a backed loan has agent key 0 and never matches the account's loan keys; legacy loans
+  under HMAC sub-accounts that can never count, with warnings) and `reputationAttest` (plan unless confirm; via the relayer; never asks for a `never` loan).
 
 Ladder: loans 1, 2, 3, 5, 8, 12, 16; volume 0 and 1 / 2.5 / 5 × 10^k USDG; lenders 0, 1, 2, 3, 5, 8; span 0, 7, 30, 90,
 180, 365, 730 days; periods 0, 1, 2, 3, 6, 9, 12, 16.
@@ -390,10 +408,15 @@ Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL
   - `test/integrations/reputation.test.ts` (18, was 17 before this pass): adds the one-call prove with the
     verifier's nonce (returned, verified with `{ audience, nonce }`, another nonce refused, a fresh nonce returned when
     none is given, 0 and 2^248 refused before proving).
-  - `test/integrations/loankeys.test.ts` (4): two banks with stale in-memory key lists on one signer take different
-    keys; memory-only picking; a stale lock is taken over, a held one is waited for and then refused; and **two real
-    processes** reserving 25 keys each at the same time get 50 distinct keys (the same loop without the lock gave 28
-    distinct out of 50 when tried).
+  - `test/integrations/loankeys.test.ts` (6, was 4): two banks with stale in-memory key lists on one signer take
+    different keys; memory-only picking; a stale lock is taken over, a held one is waited for and then refused; **two
+    real processes** released together at a barrier take 50 keys each, interleaved, and get 100 distinct keys (with the
+    lock stubbed out: 61 to 68 distinct, 6 of 6 runs failed); a slow holder's release does not drop the lock a waiter
+    took over; a waiter that saw a stale lock someone else took over first leaves the fresh lock (fourth pass, 9.6).
+  - Fourth pass (9.6): `test/integrations/reputation.test.ts` 21 (was 18: who chose the nonce; the thresholds a verifier
+    without a request states; an on-chain check that could not run, on a mocked RPC) and
+    `test/integrations/reputation-surfaces.test.ts` 9 (was 7: verify thresholds through the schema and `runOp`; the
+    prove route's result string). Each failed before its fix.
   - `test/integrations/core-lend.test.ts` (+2): `lendClose` on a repaid backed loan and on a repaid slashed loan closes
     with no attest attempt and logs why.
 
@@ -444,7 +467,7 @@ test for stream_loan upgrades; rent model in section 14.
 | Gap | Resolution |
 |---|---|
 | The one-call API `proveReputation({ audience, minLoans, minVolume })` existed on the agent only; MCP, Agent Kit and the operation schema took `minVolumeUsdg` / `monthFloorUsdg`, and the local API renamed fields in between. A verifier without a request had no way to give the prover its challenge, and the result did not say which nonce the code answered | One shape on every surface (section 6), the old names kept as aliases; `nonce` in, `audience` and `nonce` out (section 5). Docs: section 0, the agent, MCP and Agent Kit READMEs. |
-| Backed loans (private-backer branch) would have been read as slashed: the relayer queued them and failed every sweep, `lendClose` sent an attest that could not land, and `reputationStatus` showed slashed or backed repaid loans as pending forever | Section 3.4: `repBlockOf` / `isBackedSlot` / `isBackedSubrogation` (minimal read-only port), used by the relayer, the lender close and the borrower status; `never` in the status. Tested on the validator. |
+| Backed loans (private-backer branch) would have been read as slashed: the relayer queued them and failed every sweep, `lendClose` sent an attest that could not land, and `reputationStatus` showed slashed repaid loans as pending forever (backed loans never appear in a borrower's status: agent key 0 matches no loan key) | Section 3.4: `repBlockOf` / `isBackedSlot` / `isBackedSubrogation` (minimal read-only port), used by the relayer, the lender close and the borrower status; `never` in the status (slashed and too-small loans). Tested on the validator. |
 | "Lender close attests first" and "borrower status / relayer queue" were tested on a mocked chain only | On the validator with the real bank and stream_loan's real `close_slot` (section 8). The suite now loads stream_loan built from this worktree (`node scripts/solana-rep-localnet.mjs loan-build`; `restart` builds it when missing). |
 | Two borrows at the same instant on one signer could take one loan key (spec 9.4, "left") | An exclusive lock file around re-read, pick and write of the key list (section 5); tested with two real processes. |
 | An on-chain check by a verifier wallet with no SOL read as a refused proof (found by the new validator test) | Reported as `onChain.ran: false` with a reason that says the simulation could not run (section 5). |
@@ -452,6 +475,17 @@ test for stream_loan upgrades; rent model in section 14.
 
 Not done here, and why: the site (another repository), the house fleet's close flow (kept out of git), the Vercel cron
 entry (a live deploy config; the exact entry is in section 6), and everything section 13 lists.
+
+### 9.6 Fourth pass (review of the third; code and docs only: no program change, no SOL, no ceremony)
+
+| Finding | Resolution |
+|---|---|
+| In the documented one-call flow the verifier's nonce check could never fail: the prover drew the nonce and returned it, and the docs told the verifier to verify with that same nonce. The verify error and schema text spoke of "the nonce you issued", and section 0 claimed no replay "to another challenge" | The prove result says who chose the nonce (`challenge: 'request' \| 'verifier' \| 'prover-chosen'`) and, when the prover drew it, `next` says it proves no freshness. Section 0, its guarantee row, the agent, MCP and Agent Kit READMEs and the verify error and schema text now say plainly that the no-request flow gives expiry plus the verifier's own nonce record only, and point to request codes for a live answer. Tested: the label for all three, the `next` text, the verify error. |
+| On the no-request path verify compared no thresholds: any claim the prover chose passed (as little as one loan, or snapped down by the ladder), and no doc told the verifier to compare `r.thresholds` | Verify takes the thresholds the verifier requires on the `{ audience, nonce }` path (`minLoans`, `minVolume`, `minLenders`, `minSpanDays`, `minMonths` with `monthFloor`; aliases folded) and refuses a code that proves less, compared as given, never rounded; next to a request they are refused (core and schema). Wired through the schema, JSON schema, `runOp`, MCP, Agent Kit, the agent method, the CLI (`rep verify ... [thresholds]`) and the local API; `openapi.json` regenerated. The docs say that without them `thresholds` must be compared by hand. Tested at bank level with real proofs (each threshold short, matching, weaker, malformed, next to a request) and through the schema and `runOp`. |
+| The two-process lock test could pass without exercising the lock: tsx start-up skew often let one child finish before the other began, and a sequential pair also yields distinct keys | The children meet at a barrier file before looping, take 50 keys each with a short random pause between picks (outside the lock, so a waiter can get in), and the test asserts their keys interleave. With the lock stubbed out it failed 6 of 6 runs (61 to 68 distinct of 100); with the lock it passed every run. |
+| Taking over a stale lock was racy (two waiters that saw one stale lock could both end up holding "the" lock), and release removed whatever lock file existed | Each lock holds a token unique to its holder; release removes it only while it holds that token. A stale lock is taken over only under a short-lived takeover file, inside which the waiter re-reads the lock and removes it only if it still holds the token it saw stale (section 5). Tested: a slow holder's release after a takeover leaves the new holder's lock; a waiter that saw a stale lock which another waiter took over in between (a test hook at that point) leaves the fresh lock and waits. |
+| The "could not run" on-chain path fired only for a zero balance: dust below the fee, a transaction rejected before execution, or an RPC failure still read as "verify_reputation refused it", and the message said "fund it with any amount" | Classified by the simulation's error: only an `InstructionError` is the program's refusal; any other error, a throw from the RPC, or a balance below the fee the RPC quotes for the message is `onChain.ran: false`, and the message names that fee ("at least N lamports"). Tested on a mocked RPC (1 lamport; `InsufficientFundsForFee`, `AccountNotFound`, `BlockhashNotFound` with enough balance; a throwing RPC; a program error; a pass) and on the validator (no SOL, then funded). |
+| Docs said the borrower's status shows backed loans under `never`, which cannot happen (agent key 0 matches no loan key); the local API's prove route result omitted `audience` and `nonce` | The MCP and Agent Kit READMEs, the `ReputationStatus` comment and the 9.5 row say only slashed and too-small loans appear there (the reason type stays shared with the relayer and the lender close, which do see `backed`). The route's result lists `audience, nonce, challenge` (tested against the route table) and `openapi.json` is regenerated. |
 
 ## 10. Privacy (honest)
 

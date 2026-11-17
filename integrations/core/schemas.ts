@@ -162,7 +162,10 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'and attested (h081_reputation_status, h081_reputation_attest). The proof is made locally (the account secret is in the witness; no ' +
     'service proves for you) and takes 3-15 s; at most 4 different threshold sets per verifier (and per bound key) per day, and 8 across all verifiers. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
   h081_verify_reputation:
-    'Check an "h081-rep:" code: against the `request` code you issued (or your `audience` name and the `nonce` you issued), the ' +
+    'Check an "h081-rep:" code: against the `request` code you issued (it sets the challenge and the thresholds), or your `audience` name ' +
+    'and the `nonce` (the one you gave the prover, or the one it handed you: a nonce the prover drew proves no freshness, only the expiry ' +
+    'and your list of accepted nonces stop a replay) plus the thresholds you require (`minLoans`, `minVolume`, ...; without them any claim ' +
+    'passes and you must compare `thresholds` yourself); the ' +
     'presenter binding (the request\'s bindTo, or the `presentation` signature; unbound bearer codes are refused unless `allowBearer`), the ' +
     'expiry, a recent on-chain root, and the Groth16 proof; `onChain: true` also simulates rep_registry verify_reputation (read-only). ' +
     'Returns ok, the proven thresholds and the presentation nullifier (the same account shows you the same value each time). Remember ' +
@@ -351,9 +354,11 @@ export const ProveRepZ = z.object({ request: z.string().min(1).optional(), audie
   .refine(notBoth, notBothMsg);
 export const VerifyRepZ = z.object({
   code: z.string({ required_error: 'must be given: the "h081-rep:" code' }).min(1), request: z.string().min(1).optional(), audience: nameZ.optional(),
-  nonce: nonceZ.optional(), presentation: z.string().min(1).optional(),
+  nonce: nonceZ.optional(), presentation: z.string().min(1).optional(), ...repThresholds,
   allowBearer: z.boolean().optional(), onChain: z.boolean().optional(),
-}).strict().refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the code you issued) or audience (with nonce)' });
+}).strict().refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the code you issued) or audience (with nonce)' })
+  .refine((o) => o.request === undefined || Object.keys(repThresholds).every((k) => (o as Record<string, unknown>)[k] === undefined), { message: 'a request code carries the thresholds it asks for; do not add any' })
+  .refine(notBoth, notBothMsg);
 export const RepAttestZ = z.object({ confirm: z.boolean().optional(), selfSign: z.boolean().optional() }).strict();
 export const RepStatusZ = z.object({}).strict();
 
@@ -542,8 +547,8 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   },
   h081_verify_reputation: {
     type: 'object',
-    properties: { code: { type: 'string', description: 'the "h081-rep:" code' }, request: { type: 'string', description: 'the "h081-rep-ask:" code you issued' }, audience: repAudienceJ, nonce: nonceJ('without a request: the nonce you issued (the prover passes it as `nonce`); accept each nonce once'), presentation: { type: 'string', description: 'the presenter\'s "h081-rep-sig:" code (needed when the code is bound to a session key)' }, allowBearer: { type: 'boolean', description: 'accept a code bound to no key (anyone who saw it could replay it); default false' }, onChain: { type: 'boolean', description: 'also simulate rep_registry verify_reputation (read-only)' } },
-    required: ['code'], additionalProperties: false, description: 'the code and exactly one of request, or audience with nonce',
+    properties: { code: { type: 'string', description: 'the "h081-rep:" code' }, request: { type: 'string', description: 'the "h081-rep-ask:" code you issued' }, audience: repAudienceJ, nonce: nonceJ('without a request: the nonce you gave the prover, or the one it handed you with the code (a nonce the prover drew proves no freshness: only the expiry and your list of accepted nonces stop a replay; a request code gives a live challenge); accept each nonce once'), ...repThresholdsJ, presentation: { type: 'string', description: 'the presenter\'s "h081-rep-sig:" code (needed when the code is bound to a session key)' }, allowBearer: { type: 'boolean', description: 'accept a code bound to no key (anyone who saw it could replay it); default false' }, onChain: { type: 'boolean', description: 'also simulate rep_registry verify_reputation (read-only)' } },
+    required: ['code'], additionalProperties: false, description: 'the code and exactly one of request, or audience with nonce (and, without a request, the thresholds you require: the code must prove at least each one; compared as given, not rounded)',
   },
   h081_reputation_attest: { type: 'object', properties: { confirm: { type: 'boolean', description: 'true to send; otherwise only the plan' }, selfSign: { type: 'boolean', description: 'send from this wallet instead of the relayer (links each loan to it on chain)' } }, additionalProperties: false },
   h081_reputation_status: { type: 'object', properties: {}, additionalProperties: false },

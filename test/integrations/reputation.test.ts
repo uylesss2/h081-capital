@@ -349,3 +349,80 @@ describe.skipIf(!haveArtifacts)('the one-call prove: { audience, minLoans, minVo
     await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1, nonce: '0x' + '1'.padEnd(63, '0') })).rejects.toThrow(/nonce must be between/);
   }, 300_000);
 });
+
+describe.skipIf(!haveArtifacts)('review pass 4: who chose the nonce, the thresholds a verifier asks for, and an on-chain check that could not run (dev setup)', () => {
+  const master = 0x6161n;
+  let w: ReturnType<typeof world>;
+  let e: RepEnv;
+  let fresh: Awaited<ReturnType<typeof proveReputation>>;
+  beforeAll(async () => {
+    w = world(master);
+    e = envFor(master, w);
+    fresh = await proveReputation(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50' });
+  }, 300_000);
+
+  it('the result says who chose the challenge: a prover-drawn nonce is labelled, and the next step says it proves no freshness', async () => {
+    expect(fresh.challenge).toBe('prover-chosen');
+    expect(fresh.next).toMatch(/proves no freshness/);
+    const given = await proveReputation(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50', nonce: '0x77' });
+    expect(given.challenge).toBe('verifier');
+    expect(given.next).not.toMatch(/proves no freshness/);
+    const ask = reputationRequest(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50' });
+    expect((await proveReputation(e, { request: ask.code })).challenge).toBe('request');
+    // the verify error without a nonce no longer claims the nonce must be one the verifier issued
+    const r = await verifyReputation(e, fresh.code, { audience: 'acme-desk', presentation: fresh.presentation });
+    expect(r.reason).toMatch(/give the nonce/);
+    expect(r.reason).toMatch(/proves no freshness/);
+  }, 300_000);
+
+  it('a verifier without a request can state the thresholds it requires: a weaker code is refused, a matching one passes', async () => {
+    const base = { audience: 'acme-desk', nonce: fresh.nonce, presentation: fresh.presentation };
+    expect(await verifyReputation(e, fresh.code, base)).toMatchObject({ ok: true, thresholds: { minLoans: 3, minVolume: '50' } });
+    expect((await verifyReputation(e, fresh.code, { ...base, minLoans: 4 })).reason).toMatch(/proves less than you ask \(minLoans\)/);
+    expect((await verifyReputation(e, fresh.code, { ...base, minVolume: '50.000001' })).reason).toMatch(/proves less than you ask \(minVolume\)/);
+    expect((await verifyReputation(e, fresh.code, { ...base, minLoans: 3, minLenders: 3, minSpanDays: 1 })).reason).toMatch(/\(minLenders, minSpanDays\)/);
+    expect((await verifyReputation(e, fresh.code, { ...base, minMonths: 1, monthFloor: '1' })).reason).toMatch(/minMonths/);
+    expect(await verifyReputation(e, fresh.code, { ...base, minLoans: 3, minVolume: '50' })).toMatchObject({ ok: true });
+    expect(await verifyReputation(e, fresh.code, { ...base, minLoans: 2, minVolume: '25' })).toMatchObject({ ok: true });
+    expect((await verifyReputation(e, fresh.code, { ...base, minVolume: 'lots' })).reason).toMatch(/minVolume must be an amount/);
+    // a request carries its own thresholds: extra ones next to it are refused, not silently ignored
+    expect((await verifyReputation(e, fresh.code, { request: reputationRequest(e, { audience: 'acme-desk' }).code, minLoans: 1 })).reason).toMatch(/carries the thresholds/);
+  }, 300_000);
+
+  it('onChain: a fee payer that cannot pay, a transaction the cluster rejects before the program, or an RPC failure is "could not run"; a program error is a refusal', async () => {
+    const blockhash = Keypair.generate().publicKey.toBase58();
+    const chain = (balance: number, sim: () => Promise<unknown>) => ({
+      ...envFor(master, w),
+      connection: {
+        ...w.connection,
+        getBalance: async () => balance,
+        getFeeForMessage: async () => ({ value: 5000 }),
+        getLatestBlockhash: async () => ({ blockhash, lastValidBlockHeight: 1 }),
+        simulateTransaction: sim,
+      } as unknown as Connection,
+    });
+    const opts = { audience: 'acme-desk', nonce: fresh.nonce, presentation: fresh.presentation, onChain: true };
+    // 1 lamport: below the fee, said before simulating
+    const sim = vi.fn(async () => ({ value: { err: 'InsufficientFundsForFee', logs: [], unitsConsumed: 0 } }));
+    const dust = await verifyReputation(chain(1, sim), fresh.code, opts);
+    expect(dust).toMatchObject({ ok: false, onChain: { ok: false, ran: false } });
+    expect(dust.reason).toMatch(/could not run: .*1 lamports.*at least 5000 lamports/);
+    expect(dust.reason).not.toMatch(/refused it/);
+    // enough by the balance, but the cluster still rejects the transaction before the program runs
+    for (const err of ['InsufficientFundsForFee', 'AccountNotFound', 'BlockhashNotFound']) {
+      const r = await verifyReputation(chain(10_000, async () => ({ value: { err, logs: [], unitsConsumed: 0 } })), fresh.code, opts);
+      expect(r).toMatchObject({ ok: false, onChain: { ok: false, ran: false } });
+      expect(r.reason).toMatch(new RegExp(`could not run: .*${err}`));
+    }
+    // the RPC itself fails
+    const down = await verifyReputation(chain(10_000, async () => { throw new Error('fetch failed'); }), fresh.code, opts);
+    expect(down).toMatchObject({ ok: false, onChain: { ok: false, ran: false } });
+    expect(down.reason).toMatch(/could not run: .*fetch failed/);
+    // the program ran and refused: a refusal
+    const refused = await verifyReputation(chain(10_000, async () => ({ value: { err: { InstructionError: [1, { Custom: 6000 }] }, logs: ['Program log: custom program error: 0x1770'], unitsConsumed: 1234 } })), fresh.code, opts);
+    expect(refused.onChain?.ran).toBeUndefined();
+    expect(refused.reason).toMatch(/^verify_reputation refused it: /);
+    const passed = await verifyReputation(chain(10_000, async () => ({ value: { err: null, logs: [], unitsConsumed: 146_541 } })), fresh.code, opts);
+    expect(passed).toMatchObject({ ok: true, onChain: { ok: true, computeUnits: 146_541 } });
+  }, 300_000);
+});

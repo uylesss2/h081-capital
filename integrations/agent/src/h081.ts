@@ -782,8 +782,8 @@ export class H081 {
     return plain(await runOp(await this.bank(), 'h081_prove_reputation', repArgs(o, ['request', 'audience', 'nonce', 'bindTo', 'expiresInSec'])));
   }
 
-  /** Verifier: checks a code against its request (or audience + nonce); a lower bound on repaid loans only. */
-  async verifyReputation(code: string, o: { request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean } = {}): Promise<unknown> {
+  /** Verifier: checks a code against its request (or audience + nonce, and the thresholds it requires); a lower bound on repaid loans only. */
+  async verifyReputation(code: string, o: RepThresholdOpts & { request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean } = {}): Promise<unknown> {
     return plain(await runOp(await this.bank(), 'h081_verify_reputation', { code, ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) }));
   }
 

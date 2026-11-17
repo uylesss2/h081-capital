@@ -131,16 +131,22 @@ const r = await desk.verifyReputation(q.code, { request: ask.code, presentation:
 - `minVolume` and `monthFloor` are decimal USDG (`"500"`); the first release's names `minVolumeUsdg` / `monthFloorUsdg`
   still work (give one of each pair). The other thresholds: `minLenders`, `minSpanDays`, `minMonths`. They are rounded
   DOWN to a public ladder when proving.
-- Without a request the prover draws the challenge (nonce) and returns it (it is inside the code too); a verifier then
-  checks with `verifyReputation(code, { audience, nonce, presentation })` and must remember the nonces it accepted. A
-  desk that wants to set the challenge hands out a request code, as above. (An optional `nonce` input exists for a
-  challenge given out of band; prefer the request code, which is checksummed and network-tagged.)
+- Without a request the prover draws the challenge (nonce) and returns it (`p.challenge === 'prover-chosen'`; it is
+  inside the code too). Checking that nonce proves no freshness: whoever holds the code and its presentation can present
+  it until it expires (at most a day); only the expiry and the verifier's own list of accepted nonces stop a replay. Such
+  a verifier must also say what it requires, since no request does:
+  `verifyReputation(code, { audience, nonce, presentation, minLoans: 3, minVolume: '500' })` refuses a code that proves
+  less (compared as given, not rounded). Without the thresholds any claim the prover chose passes (as little as one
+  loan), and `r.thresholds` is what the verifier must compare itself. A desk that needs a live answer, or wants to set
+  the thresholds once, hands out a request code, as above. (An optional `nonce` input exists for a challenge given out
+  of band, `p.challenge === 'verifier'`; prefer the request code, which is checksummed and network-tagged.)
 - Same call elsewhere: CLI `h081 rep prove --audience acme-desk --min-loans 3 --min-volume 500`; local API
   `POST /v1/reputation/prove {"audience": "acme-desk", "minLoans": 3, "minVolume": "500"}`; MCP tool
   `h081_prove_reputation` and Agent Kit action `H081_PROVE_REPUTATION` with the same arguments.
 - `verifyReputation(…, { onChain: true })` also simulates rep_registry's on-chain check (read-only); the verifier's
-  wallet needs some SOL to pay for the simulation, and a wallet with none is told so (`onChain.ran: false`), never
-  reported as a refused proof.
+  wallet needs at least the transaction fee in SOL to pay for the simulation. A wallet that cannot pay, a transaction
+  the cluster rejects before the program runs, or an RPC failure is reported as `onChain.ran: false` ("could not run"),
+  never as a refused proof; only an error from the program itself is a refusal.
 - What it says: at least that many fully repaid, attested loans under this account's loan keys. It says nothing about
   defaults, and it is a pricing input, not a credit line. Backed loans (funded against a backer's stake) never count.
   Beta: a single-party trusted setup, not deployed on mainnet yet.
@@ -172,8 +178,8 @@ Global flags: `--json` (the API's envelope on stdout, logs on stderr), `--yes` (
 | `GET /v1/loans/lent[?loanRef=]` | This agent's loan slots |
 | `GET /v1/stake` / `POST /v1/stake` | `{action: stake\|request_unstake\|unstake, h081?, confirm?}` |
 | `POST /v1/codes/check` | `{code}` → `{kind, network, valid, reason?}` |
-| `POST /v1/reputation/prove` | `{audience, nonce?, minLoans?, minVolume?, …}` or `{request}` → `{code, presentation?, audience, nonce, …}` (local proof; sends nothing) |
-| `POST /v1/reputation/request` / `POST /v1/reputation/verify` | Verifier: make a request code; check a code against it (or against `{audience, nonce}`) |
+| `POST /v1/reputation/prove` | `{audience, nonce?, minLoans?, minVolume?, …}` or `{request}` → `{code, presentation?, audience, nonce, challenge, …}` (local proof; sends nothing) |
+| `POST /v1/reputation/request` / `POST /v1/reputation/verify` | Verifier: make a request code; check a code against it (or against `{audience, nonce}` plus the thresholds you require, `minLoans`, `minVolume`, …) |
 | `GET /v1/reputation` / `POST /v1/reputation/attest` | Prover: what counts, what is pending, what never counts; have the relayer queue repaid loans (`{confirm?}`) |
 | `GET /v1/events` | Server-sent events: `balance.changed`, `allowance.changed`, `op.completed`, `op.failed` |
 

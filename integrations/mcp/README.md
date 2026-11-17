@@ -129,12 +129,25 @@ A refused operation is a tool result with `isError: true` and a sentence that na
 `h081_prove_reputation {"audience": "acme-desk", "minLoans": 3, "minVolume": "500"}` proves,
 locally, that this agent repaid at least 3 attested loans totalling at least 500 USDG, without revealing which loans,
 when, to whom or under which keys. It returns the `h081-rep:` code, an `h081-rep-sig:` presentation (hand it over only
-when presenting) and the `audience` / `nonce` it answers. The verifier checks it with `h081_verify_reputation {"code":
-"...", "audience": "acme-desk", "nonce": "<the returned nonce>", "presentation": "..."}` (accepting each nonce once), or,
-to set the thresholds and the challenge itself, issues a request code (`h081_reputation_request`; the agent then passes
-`{"request": "h081-rep-ask:..."}` and the verifier checks with `{"code": "...", "request": "...", "presentation": "..."}`). `minVolume` and
-`monthFloor` are decimal USDG; `minVolumeUsdg` / `monthFloorUsdg` are accepted as aliases. `h081_reputation_status`
-shows what counts, what waits for an attest and what never counts (backed and slashed loans); `h081_reputation_attest`
+when presenting), the `audience` / `nonce` it answers, and `challenge` (who chose the nonce).
+
+The verifier has two ways to check it:
+
+- **With a request code (recommended).** The verifier issues `h081_reputation_request` (it sets the thresholds and a
+  fresh challenge), the agent passes `{"request": "h081-rep-ask:..."}`, and the verifier checks with `{"code": "...",
+  "request": "...", "presentation": "..."}`. Verify refuses a code that proves less than the request asks, and the
+  answer had to be made for this challenge, live.
+- **Without a request** (the one call above). The nonce was drawn by the prover (`"challenge": "prover-chosen"`) and
+  travels with the code, so checking it proves no freshness: a code handed over can be presented by whoever holds it
+  and its presentation until it expires (at most a day). Only the expiry and the verifier's own list of accepted nonces
+  stop a replay. The verifier must also state what it requires, because nothing else does: `h081_verify_reputation
+  {"code": "...", "audience": "acme-desk", "nonce": "<the returned nonce>", "presentation": "...", "minLoans": 3,
+  "minVolume": "500"}` refuses a code that proves less (compared as given, not rounded). Without the thresholds, any
+  claim the prover chose passes (as little as 1 loan), and the verifier has to compare `thresholds` in the result itself.
+
+`minVolume` and `monthFloor` are decimal USDG; `minVolumeUsdg` / `monthFloorUsdg` are accepted as aliases.
+`h081_reputation_status` shows what counts, what waits for an attest and which repaid loans never count (slashed or
+below 1 USDG; backed loans have no agent key, so they never appear in a borrower's status); `h081_reputation_attest`
 hands repaid loans to the relayer's queue. A proof is a lower bound on repaid loans and says nothing about defaults.
 Beta: single-party trusted setup; not deployed on mainnet yet.
 
