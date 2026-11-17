@@ -23,6 +23,7 @@
     "test:solana:loan": "node scripts/solana-loan-localnet.mjs restart && vitest run --config vitest.solana-loan.config.ts",
     "solana:loan:build": "node scripts/solana-loan-localnet.mjs build",
     "test:solana:pool": "node scripts/solana-localnet.mjs restart && vitest run --config vitest.solana.config.ts",
+    "test:solana:solvency": "node scripts/solana-solvency-localnet.mjs restart && vitest run --config vitest.solana-solvency.config.ts",
     "solana:verifiable-build": "node scripts/solana-verifiable-build.mjs",
     "solana:hash": "tsx scripts/solana-program-hash.mts",
     "solana:preflight": "tsx scripts/solana-preflight.mts",
