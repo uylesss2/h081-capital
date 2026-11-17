@@ -191,6 +191,14 @@ Over an allowance note as of a known root: `remaining >= bound`, `spent <= bound
 every spend must rewrite the note. A grant's total is openable off-chain from its `TotalCommitment`.
 Each payment also emits a `ReceiptCommitment` the payer can open to a counterparty.
 
+**Prove solvency in one line** (docs/SOLVENCY-SPEC.md) is the default step before an agent deal: the party carrying the
+risk sends an `h081-solvency-ask:` code for the amount at risk; the other answers with an `h081-solvency:` code, a
+`remainingAtLeast` disclosure made locally over its dedicated reserve and bound to that request and its wallet; the
+asker checks the request, the signature, the proof, the root's age and that no non-USDG vault could back the amount,
+then deals only with that wallet. It does not lock the funds or show the total balance; every result says so
+(`doesNotSay`). Exposed as `h081_solvency_request` / `h081_prove_solvency` / `h081_verify_solvency` /
+`h081_solvency_reserve` (MCP, Agent Kit), `h081 solvency ask|prove|verify|reserve` and `/v1/solvency/*`.
+
 ## Layout
 
 ```

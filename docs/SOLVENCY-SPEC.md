@@ -1,8 +1,9 @@
 # H081 prove solvency in one line (spec)
 
-Status: SPEC ONLY, branch `feat/prove-solvency` (off `d01d882`). Nothing is built, deployed, published or pushed. No new
-circuit, no ceremony, no program change: everything below reuses the ceremony'd `disclose` circuit and the live
+Status: BUILT on branch `feat/prove-solvency` (off `d01d882`), not deployed, published or pushed. No new circuit, no
+ceremony, no program change: everything below reuses the ceremony'd `disclose` circuit and the live
 `stipend_pool.verify_disclosure`. One **config** change (not a program change) is recommended to the owner (section 2.1).
+Section 9 says where each part lives and what differs from the text below.
 
 ```ts
 const ask = await desk.solvencyRequest({ min: '2500', label: 'acme-desk' });       // -> "h081-solvency-ask:..."
@@ -270,3 +271,45 @@ Does NOT say (every verifier surface prints this):
 - D6 if a cryptographic asset binding or key check is required: either the stream route (pledged reserve, discloses
   more, lender-share routing on reclaim) or a new circuit + ceremony + verifier program change. This spec stops there.
 - D7 count other USD stablecoin vaults (e.g. a USDC vault, if one is ever opened) as sound instead of in the floor.
+
+## 9. As built (branch `feat/prove-solvency`)
+
+Where it lives:
+
+| Part | File |
+|---|---|
+| audience, signed message, ladder, probing rule, root age, asset floor, `doesNotSay` | `src/solvency.ts` |
+| the ONE simulated on-chain check | `src/solana/disclosure.ts` (`simulateDisclosureCheck`) |
+| kinds 10 / 11 | `integrations/core/codes.ts` (`encodeSolvencyRequest` returns the digest; `decodeSolvencyRequest` recomputes it) |
+| reserve key | `integrations/core/keys.ts` `deriveReserveSk(keypair, derivation)` |
+| request / prove / verify / reserve | `integrations/core/solvency.ts`, wired in `H081Bank` (`balance().reserve`) |
+| four operations | `integrations/core/{schemas,operations}.ts`; MCP, Agent Kit (`actions/solvency.ts`), `@h081lll/agent` (SDK, `h081 solvency`, `/v1/solvency/*`) |
+| tests | `test/integrations/solvency.test.ts` (codes, vectors, ladder, cap, one test per refusal over a real disclose proof), `test/integrations/solvency-surfaces.test.ts`, `test/solana/solvency.test.ts` (`npm run test:solana:solvency`, private validator on rpc 28899) |
+
+Measured on localnet (`solana/compute-units-solvency.json`): the one-transaction simulated check is **821 bytes**
+(limit 1,232) and uses **119,231 CU**; it ran with a fee payer whose key the test never held, and that payer's balance
+was unchanged afterwards. So 3.3's "expected to fit" is now a measured fact; the 3-transaction fallback is not needed.
+
+Localnet also showed, with real proofs: plan then confirm (nothing sent before confirm); a second verify of the same
+code is `nonce_reused`; `pay` never picks the reserve; a larger request reclaims the smaller reserve and grants one;
+a released reserve's proof still verified one operation later and was `stale_root` three operations later with
+`maxRootAge: 2`; a junk mint at the default caps (scaled to 10 units) made a valid proof that was reported
+`asset_not_bound` (and an honest USDG claim of the same size too), `set_asset_caps(junk, 0, 0)` plus the drained
+vault made the floor 0 again, and after `set_default_caps(0, 0)` a new vault refused a deposit.
+
+Decisions taken while building (not owner decisions; each is easy to change):
+
+- The seen-nonce store records a nonce only when a check PASSES, so an RPC failure or a stale root does not burn the
+  asker's request; replaying a valid code is what it stops (tested both ways).
+- A verify whose AssetCap read fails is `ok: false, reason: asset_floor_unavailable` (fails closed). The prover's own
+  check treats that one reason as a warning (an RPC that refuses `getProgramAccounts` should not stop an honest proof);
+  the asker's check still decides.
+- The bound proven is the request's minimum snapped UP to the ladder (a hostile asker cannot pick a fine-grained bound),
+  and a request that lives longer than a day is refused by the prover.
+- Without a cache dir the probing log and the nonce store live in memory for the life of the process.
+- `onChain: "send"` is refused by the local HTTP API; the SDK and CLI need `confirm: true` for it; MCP and Agent Kit take
+  it as the explicit opt-in.
+- `vkeyPin` on the bank host is a test-only hook for a dev-setup build tree (CI); the bank never sets it.
+
+Not built: the direct mode `{ min, audienceCode? }` of 4 (section 3.1 verifies against a request, so there is nothing
+for a verifier to check it with); the site parts (out of this repo); a relayer verify route (D3).

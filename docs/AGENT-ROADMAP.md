@@ -13,7 +13,7 @@ does almost all of it; agents reach a subset of it through the operations in `in
 | Capacity stake | yes (`h081_stake`) |
 | Private payment from an allowance | yes (`h081_pay`: to a wallet or an `h081-address:` code; `H081_MAX_PAY` ceiling) |
 | Allowances for sub-agents (grant / delegate / reclaim) | yes (`h081_allowance_grant`, `h081_allowance_delegate`, `h081_allowance_reclaim`: plan unless `confirm: true`; `H081_MAX_GRANT` ceiling; delegate needs the delegate artifacts the site does not ship yet) |
-| Proof of funds | only via paid x402 `prove-disclose` (`SolanaWallet.prove`) |
+| Proof of funds (solvency) | yes (`h081_solvency_request` / `h081_prove_solvency` / `h081_verify_solvency` / `h081_solvency_reserve`, branch feat/prove-solvency, docs/SOLVENCY-SPEC.md): the default step before a deal; proven locally over a dedicated reserve, never through x402 `prove-disclose` |
 | Lend (open, fund, status, claim, collect, settle, close) | yes (`h081_lend`: open / fund / settle / close are a plan unless `confirm: true`; `H081_MAX_LEND` ceiling; close is refused until the SDK has `close_slot`) |
 | Safety pool | no (instruction builders only) |
 | Pay x402 APIs from the private balance | no (`src/x402.ts` is EVM-only) |
