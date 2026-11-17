@@ -15,10 +15,21 @@ An agent proves, to one named audience and for one challenge:
 It reveals nothing else: not which loans, when, which lenders, which keys, or the exact totals.
 
 ```ts
+// one call: the prover names the verifier, the thresholds, and the challenge the verifier gave it
+const p = await agent.proveReputation({ audience: 'acme-desk', nonce: '0x1f2e', minLoans: 3, minVolume: '500' });
+const r = await desk.verifyReputation(p.code, { audience: 'acme-desk', nonce: '0x1f2e', presentation: p.presentation });
+
+// or with a request code, when the desk wants to fix the thresholds and the challenge itself
 const ask = await desk.reputationRequest({ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 });
 const { code, presentation } = await agent.proveReputation({ request: ask.code });
-const r = await desk.verifyReputation(code, { request: ask.code, presentation });   // r.ok, r.lowerBoundOnly === true
+const r2 = await desk.verifyReputation(code, { request: ask.code, presentation });   // r2.ok, r2.lowerBoundOnly === true
 ```
+
+The same one call exists on every surface (section 6): MCP `h081_prove_reputation`, Agent Kit `H081_PROVE_REPUTATION`
+and `h081ProveReputation`, CLI `h081 rep prove --audience A --nonce N --min-loans 3 --min-volume 500`, local API
+`POST /v1/reputation/prove`. `minVolume` / `monthFloor` are decimal USDG; the first release's names `minVolumeUsdg` /
+`monthFloorUsdg` stay accepted as aliases (one of each pair; both is refused). Without `nonce` the prover draws one and
+returns it (`p.nonce`); the verifier then relies on remembering nonces it accepted.
 
 ### What it guarantees (and what enforces it)
 
@@ -160,6 +171,32 @@ good needs stream_loan to keep `agent_pk` and `funded_at` in `ClosedSlot` (an up
 decision). The house fleet's lend/close flows need the attest-before-close change too (they are kept out of git and
 were not touched here).
 
+### 3.4 Backed loans and slashed loans: never counted, and never mislabelled
+
+The backed-line feature (branch `feat/private-backer`, docs/BACKER-SPEC.md there, section 13) funds a slot through
+`fund_backed` with `pledge_bps = 0` and `agent_pk = 0`, and creates the loan's **Subrogation at funding**: it routes the
+backer's fee or recovery to the Backing's vault. It is not a slash. A safety-pool slash leaves a Subrogation too.
+
+- **On chain nothing changes.** `attest` refuses any loan whose Subrogation PDA holds data, so a backed loan is refused
+  with error `Slashed` (6010) whatever its agent key (tested on the validator with both a live and a missing Backing).
+  The program was not rebuilt for this; its error name stays `Slashed`, and the SDK readers below say which one it is.
+- **Readers** use `repBlockOf(connection, slot, loanProgram)` (`src/solana/reputation.ts`): `backed` when the slot is
+  funded with `pledge_bps == 0` (checked first, so a closed or missing Backing never turns a backed loan into a slash),
+  else `backed` when the Subrogation's `safety_config` is a Backing account of the loan program (owner, discriminator,
+  278 bytes: `isBackedSubrogation`), else `slashed`; `no_agent_key` for a zero key. `isBackedSlot`,
+  `isBackedSubrogation` and `isBackingAccount` are a minimal **read-only port** of the same-named helpers in that
+  branch's `src/solana/backer.ts` (same names and rules); nothing else of the backer feature is on this branch, and no
+  branch was merged. When the two branches meet, keep one copy (the backer branch's) and re-export it here.
+- **Relayer:** `POST /v1/rep/attest` answers `409 backed` ("the backer's fee or recovery, not a slash") or `409
+  slashed` and queues nothing. The sweep never makes a backed slot a candidate, and reports slashed ones under
+  `skipped` (never sent, never `failed`, so they no longer show as a send failure every run).
+- **Lender close:** `lendClose` sends no attest for a backed, slashed, keyless or sub-1-USDG loan (it would fail) and
+  logs why.
+- **Borrower:** `reputationStatus` lists repaid loans that can never count under `never` (`backed`, `slashed`,
+  `no_agent_key`, `too_small`) with a warning, instead of showing them as `pending` forever; `reputationAttest` does not
+  ask the relayer for them. A backed loan has agent key 0, so it never matches an account's loan keys and does not show
+  up in an account's status at all; a slashed-then-repaid stream loan does (tested: loan 25 below).
+
 ## 4. Circuit `circuits/main/reputation.circom`, `Reputation(levels = 20, N = 16)`
 
 Public inputs (13, in this order): `repRoot, asset, minLoans, minVolume, minLenders, minSpanDays, minMonths, monthFloor,
@@ -210,11 +247,17 @@ Bank (`integrations/core/reputation.ts`, delegated from `H081Bank`):
   grant, and recovery scans slots and events with a gap limit of 20. Before it picks a key, `borrow` also adds every key
   the account's own grants (in the synced pool log, spent ones included) already used, scanning 20 past the highest, so
   a lost cache dir, a restore on another machine, or a second process on the same signer never reuses a loan key (two
-  Slots with one `agent_pk` would be linked on chain). Two processes that both borrow at the same moment, before either
-  grant lands, can still pick the same key: run one borrower per signer at a time.
+  Slots with one `agent_pk` would be linked on chain). Two processes that borrow at the same moment on one signer (an
+  MCP server and the CLI) no longer pick the same key: the pick re-reads the key list under an exclusive lock file next
+  to it (`<list>.lock`, `integrations/core/loankeys.ts`), takes the first free key and writes it back before the lock is
+  released; every other write to the list merges under the same lock. A lock older than 30 s (a crashed process; a pick
+  holds it for milliseconds) is taken over; a held one is waited for up to 10 s, then the borrow is refused with nothing
+  sent. Without a cache dir there is one process's memory only, as before.
 - `reputationRequest` → `h081-rep-ask:` (thresholds rounded UP to the ladder; optional `bindTo`).
-- `proveReputation({request} | {audience, thresholds})` → `h081-rep:` and, when the request binds no key, an
-  `h081-rep-sig:` presentation from a fresh session key. Thresholds snap DOWN when given directly. The prover refuses a
+- `proveReputation({request} | {audience, nonce?, thresholds})` → `h081-rep:` and, when the request binds no key, an
+  `h081-rep-sig:` presentation from a fresh session key, plus the `audience` and `nonce` the code answers (0x hex). A
+  `nonce` given without a request is the verifier's own challenge (1 .. 2^248 - 1, refused otherwise before proving);
+  without one a fresh random nonce is drawn. Thresholds snap DOWN when given directly. The prover refuses a
   fifth distinct threshold set per audience per UTC day, a fifth per `bindTo` key (from the request or the caller), and a
   ninth across all audiences (`REP_MAX_SETS_PER_DAY_ALL`): a verifier that knows the prover through its own channel
   cannot binary-search the record by asking under fresh audience names. A set already proven today is free again. The
@@ -225,10 +268,13 @@ Bank (`integrations/core/reputation.ts`, delegated from `H081Bank`):
   presentation's key and signature, or refused as bearer); `now <= expiry <= now + 1 day`; the root in the on-chain
   ring; Groth16 against the vkey whose sha256 is pinned in `CIRCUIT_HASHES.reputation` (empty today: unreleased, so
   only a localnet dev setup with `H081_REP_DEV_SETUP=1` passes); optionally a read-only simulation of
-  `verify_reputation`. Every result carries `lowerBoundOnly: true`, `statement` and `setup`.
-- `reputationStatus` (attested count, volume, lenders, span, periods; pending repaid-but-unattested loans; legacy loans
-  under HMAC sub-accounts that can never count, with warnings) and `reputationAttest` (plan unless confirm; via the
-  relayer).
+  `verify_reputation`. A simulation needs a fee payer that exists: a verifier wallet with no SOL gets `ok: false`,
+  `onChain.ran: false` and a reason that says the simulation could not run and that the off-chain checks passed (it
+  used to come back as "verify_reputation refused it: AccountNotFound", which read as a bad proof; found by the
+  validator test in section 8). Every result carries `lowerBoundOnly: true`, `statement` and `setup`.
+- `reputationStatus` (attested count, volume, lenders, span, periods; pending repaid-but-unattested loans; `never`:
+  repaid loans rep_registry refuses for good, by reason, section 3.4; legacy loans under HMAC sub-accounts that can never
+  count, with warnings) and `reputationAttest` (plan unless confirm; via the relayer; never asks for a `never` loan).
 
 Ladder: loans 1, 2, 3, 5, 8, 12, 16; volume 0 and 1 / 2.5 / 5 × 10^k USDG; lenders 0, 1, 2, 3, 5, 8; span 0, 7, 30, 90,
 180, 365, 730 days; periods 0, 1, 2, 3, 6, 9, 12, 16.
@@ -243,11 +289,24 @@ Ladder: loans 1, 2, 3, 5, 8, 12, 16; volume 0 and 1 / 2.5 / 5 × 10^k USDG; lend
 | `@h081lll/agent` | `reputationRequest`, `proveReputation`, `verifyReputation`, `reputation`, `reputationAttest`; `checkCode` reads kinds 7-9; `CIRCUIT_MB` gains `disclose` and `reputation` |
 | CLI | `h081 rep ask \| prove \| verify \| attest \| status` |
 | local API | `POST /v1/reputation/{request,prove,verify,attest}`, `GET /v1/reputation`; `openapi.json` regenerated |
-| relayer | `GET /v1/rep/leaves` (incremental, single-flight), `GET /v1/rep/roots`, `POST /v1/rep/attest` (202, queued), `GET /v1/rep/sweep` (cron, `CRON_SECRET`) and a sweep timer in `main.ts`; every rep route takes a rate-limit token; `RELAYER_REP_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` (default 10 USDG), `RELAYER_REP_SWEEP_MIN` (default 15). No proving route. No free verify route (owner decision) |
+| relayer | `GET /v1/rep/leaves` (incremental, single-flight), `GET /v1/rep/roots`, `POST /v1/rep/attest` (202, queued; `409 backed` / `409 slashed` / `409 no_agent_key` never queued, section 3.4), `GET /v1/rep/sweep` (cron, `CRON_SECRET`; its result lists `skipped` loans that can never count) and a sweep timer in `main.ts`; every rep route takes a rate-limit token; `RELAYER_REP_PROGRAM_ID`, `RELAYER_REP_MIN_PRINCIPAL` (default 10 USDG), `RELAYER_REP_SWEEP_MIN` (default 15). No proving route. No free verify route (owner decision) |
+
+**The one-call shape** `proveReputation({ audience, minLoans, minVolume })` (section 0) is the same on every surface:
+the operation schema takes `minVolume` / `monthFloor` (decimal USDG) with `minVolumeUsdg` / `monthFloorUsdg` kept as
+aliases (zod refuses both of a pair; `runOp` folds the alias), and a prover-side `nonce` (refused next to a
+`request`, which carries its own). The agent method, the local API body (no renaming layer any more: the methods fold
+the aliases), the CLI (`--nonce`), MCP and Agent Kit (actions, methods and examples now use `minVolume`) all pass it
+through; `openapi.json` regenerated.
 
 Not built here (other repo or deploy config): the site (code kinds in `src/lib/live/codes.ts`, a LiveBank panel, a
-docs page, a `drive-live-localnet.mjs` check), and the Vercel cron entry that calls `GET /v1/rep/sweep` (with
-`CRON_SECRET` set on the relayer project).
+docs page, a `drive-live-localnet.mjs` check), and the Vercel cron entry that calls `GET /v1/rep/sweep`. The cron is
+left to the owner because it changes a live deploy config and Vercel's plan limits decide whether a 15-minute schedule
+deploys at all. The entry, for `deploy/relayer-vercel/vercel.json` `crons` (with `CRON_SECRET` and
+`RELAYER_REP_PROGRAM_ID` set on the relayer project; without them the route answers 503 and sends nothing):
+
+```json
+{ "path": "/v1/rep/sweep", "schedule": "*/15 * * * *" }
+```
 
 ## 7. Codes (v2 frame, base58)
 
@@ -263,6 +322,18 @@ All three are in `CODE_KIND`, `KIND_NAME` and `PREFIX_KIND`; a pasted code of th
 … code" message.
 
 ## 8. Tests (what ran on this branch)
+
+Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL), after the third pass (section 9.5):
+
+| Command | Result |
+|---|---|
+| `npm run test:solana:rep` (validator on rpc 8899: rep_registry + stream_loan built from this worktree, fixtures) | 16 passed (was 14) |
+| `npx vitest run test/circuits/reputation.test.ts test/sdk/rep-consistency.test.ts` | 21 passed (18 circuit, 3 drift) |
+| `npx vitest run test/integrations test/relayer` | 337 passed, 9 skipped (localnet-only files without their validator); was 324 before the pass |
+| `cargo test -p rep_registry` (WSL; the program is unchanged in this pass) | 9 passed |
+| `npm run typecheck` | clean |
+| `npm run build:integrations` | mcp, plugin and agent build |
+| `npm test` (everything but test/solana) | 466 passed, 36 failed, 49 skipped. The 35 failures in `test/e2e/pool.test.ts` (and the skipped e2e files) need the pool's proving keys (`missing proving key for transact; run npm run circuits:setup`), which are not in this worktree's build/circuits and were deliberately not generated (that is the pool setup). The other one was `agent-auth` "a wrong token gives 401": the test makes the wrong token by replacing the last character with `x`, which is the right token when it already ends in `x` (about 1 run in 64); it passed on re-run. Neither touches reputation. |
 
 - Circuit, witness only (`test/circuits/reputation.test.ts`, 18): accepts 1, 3 and 16 loans, mixed keys, every bound
   exactly met; rejects one over each bound, a duplicate, an unsorted pair, another master's leaf, a bad leaf or path,
@@ -284,10 +355,43 @@ All three are in `CODE_KIND`, `KIND_NAME` and `PREFIX_KIND`; a pasted code of th
   leaf; the relayer attests with only its hot wallet as signer, refuses below its floor, twice, unfunded, closed and
   malformed, its sweep attests the rest, and its leaf list is accepted by a client.
   Slots are fixture accounts loaded with `--account-dir` at their real PDAs: real stream proofs would need the pool's
-  ceremony proving keys, which this work does not use. So the "bank borrower auto-attests / lendClose attests first"
-  flow is covered by unit tests with a mocked chain, not end to end.
+  ceremony proving keys, which this work does not use.
+  Added in the third pass (16 now):
+  - **Backed loans** (fixtures 20 and 22: `pledge_bps = 0`, agent key 0, a Subrogation naming a Backing account, live
+    for 20 and missing for 22): `attest` refuses both (error `Slashed`); `repBlockOf` reads both as `backed` and the
+    safety-pool slash (7) as `slashed`; `isBackedSubrogation` is true for 20 only. The relayer answers `409 backed` for
+    20 and 22 and `409 slashed` for 7; its sweep never makes 20/22 candidates and lists 7 and 25 under `skipped` with
+    `failed` empty.
+  - **The bank flow end to end on the validator**, with the real `H081Bank` (account C, fixtures 23-25): status lists 23
+    and 24 as pending and 25 (slashed, then repaid) under `never`; the plan names 23 and 24; `reputationAttest` queues
+    23 at a local relayer (202) and reports 24 below that relayer's 25 USDG floor; the sweep attests 23 from the hot
+    wallet only. Then the **lender** bank (signer LENDER_K, the slot's lender) runs `lendClose` on 24: two
+    signatures, the first one a rep_registry attest from the lender wallet, the second **stream_loan's real
+    `close_slot`** (the program built from this worktree, loaded at its localnet id): the slot is gone, the
+    ClosedSlot receipt exists, and the leaf survived. Status then shows 2 loans, 45 USDG, 2 lenders, nothing pending.
+    Finally the **one call** `proveReputation({ audience, nonce, minLoans: 2, minVolume: '25' })` is checked by a
+    second bank with `{ audience, nonce, presentation, onChain: true }` (the `verify_reputation` simulation passes), a
+    wrong nonce is refused, and an out-of-reach claim names what is short. This test found a bug: an on-chain check
+    from a verifier wallet with no SOL came back as "verify_reputation refused it: AccountNotFound" (section 5); fixed.
+  - What still is not end to end: a **borrow** (a real grant and stream proof) and a **fund**; both need the pool's
+    ceremony proving keys (not in this worktree, see the `npm test` row above). `borrow`'s loan-key choice is covered by
+    unit tests (below), and every attest path after funding is now covered on the validator.
 - Integrations: schemas, MCP, plugin, agent CLI, OpenAPI route list, relayer routes and config, a drift test between
-  the Rust source and the SDK (ids, error table, sizes, public-input order).
+  the Rust source and the SDK (ids, error table, sizes, public-input order). Third pass:
+  - `test/integrations/reputation-surfaces.test.ts` (6): the one-call shape `{ audience, minLoans, minVolume, nonce? }`
+    through the zod schema, `runOp`, MCP `tools/call`, the Agent Kit action and method, the agent method and
+    `POST /v1/reputation/prove`; the `minVolumeUsdg` / `monthFloorUsdg` aliases reach the bank as `minVolume` /
+    `monthFloor`; both of a pair, a nonce or thresholds next to a request, and malformed nonces are refused before the
+    bank.
+  - `test/integrations/reputation.test.ts` (18, was 12 at the first write-up): adds the one-call prove with the
+    verifier's nonce (returned, verified with `{ audience, nonce }`, another nonce refused, a fresh nonce returned when
+    none is given, 0 and 2^248 refused before proving).
+  - `test/integrations/loankeys.test.ts` (4): two banks with stale in-memory key lists on one signer take different
+    keys; memory-only picking; a stale lock is taken over, a held one is waited for and then refused; and **two real
+    processes** reserving 25 keys each at the same time get 50 distinct keys (the same loop without the lock gave 28
+    distinct out of 50 when tried).
+  - `test/integrations/core-lend.test.ts` (+2): `lendClose` on a repaid backed loan and on a repaid slashed loan closes
+    with no attest attempt and logs why.
 
 ## 9. Soundness and economics (review findings and how each was resolved)
 
@@ -326,10 +430,24 @@ test for stream_loan upgrades; rent model in section 14.
 
 | Finding | Resolution |
 |---|---|
-| `borrow` chose the loan key from the local cache only: a lost cache, a restore elsewhere, or two processes on one signer reused key 0 and linked two Slots by `agent_pk` | Before choosing, `borrow` adds every key the account's own grants already used (synced pool log, spent grants included; gap limit 20). Tested with an empty cache dir and grants under keys 0 (spent) and 3: the borrow takes key 1 and the cache learns 0, 1, 3. Left: two borrows at the same instant on one signer (section 5). |
+| `borrow` chose the loan key from the local cache only: a lost cache, a restore elsewhere, or two processes on one signer reused key 0 and linked two Slots by `agent_pk` | Before choosing, `borrow` adds every key the account's own grants already used (synced pool log, spent grants included; gap limit 20). Tested with an empty cache dir and grants under keys 0 (spent) and 3: the borrow takes key 1 and the cache learns 0, 1, 3. The case left then, two borrows at the same instant on one signer, is closed in 9.5. |
 | The probing cap was per audience (presNullifier) and did nothing without a cache dir | Also at most 4 sets per `bindTo` key and 8 across all audiences per day; the log is kept in memory when there is no cache dir, and merged with the file when there is one. Tested with 5 audience names on one day. |
 | Attests sent back to back on request clustered one borrower's loans on chain by timing | The relayer queues (202) and the sweep attests in loanRef order with every other repaid loan; the bank posts in random order. The operator-side link that remains is in section 3.3. |
 | Every attest dropped the relayer's leaf cache, so the next `GET /v1/rep/leaves` refetched every attest transaction; GETs took no rate-limit token and concurrent misses each refetched | The leaf list is kept and topped up with `getSignaturesForAddress(tree, { until })` (only new transactions), with a full rebuild only when the rebuilt root does not match; one refresh in flight; every rep route takes a token. Tested: two attests then three GETs cost one incremental fetch of the two new transactions. |
+
+### 9.5 Third pass (this branch; code only: no program change, no SOL, no ceremony)
+
+| Gap | Resolution |
+|---|---|
+| The one-call API `proveReputation({ audience, minLoans, minVolume })` existed on the agent only; MCP, Agent Kit and the operation schema took `minVolumeUsdg` / `monthFloorUsdg`, and the local API renamed fields in between. A verifier without a request had no way to give the prover its challenge, and the result did not say which nonce the code answered | One shape on every surface (section 6), the old names kept as aliases; `nonce` in, `audience` and `nonce` out (section 5). Docs: section 0, the agent, MCP and Agent Kit READMEs. |
+| Backed loans (private-backer branch) would have been read as slashed: the relayer queued them and failed every sweep, `lendClose` sent an attest that could not land, and `reputationStatus` showed slashed or backed repaid loans as pending forever | Section 3.4: `repBlockOf` / `isBackedSlot` / `isBackedSubrogation` (minimal read-only port), used by the relayer, the lender close and the borrower status; `never` in the status. Tested on the validator. |
+| "Lender close attests first" and "borrower status / relayer queue" were tested on a mocked chain only | On the validator with the real bank and stream_loan's real `close_slot` (section 8). The suite now loads stream_loan built from this worktree (`node scripts/solana-rep-localnet.mjs loan-build`; `restart` builds it when missing). |
+| Two borrows at the same instant on one signer could take one loan key (spec 9.4, "left") | An exclusive lock file around re-read, pick and write of the key list (section 5); tested with two real processes. |
+| An on-chain check by a verifier wallet with no SOL read as a refused proof (found by the new validator test) | Reported as `onChain.ran: false` with a reason that says the simulation could not run (section 5). |
+| The suite's validator used the default gossip, faucet and dynamic ports (8000, 9900, 8000-10000), which collided with another local validator running at the same time, and its health check accepted any validator on 8899 | Pinned to 8902, 8903 and 8910-8990 (rpc stays 8899); the start script only reports healthy when its own validator (by ledger path) is running. |
+
+Not done here, and why: the site (another repository), the house fleet's close flow (kept out of git), the Vercel cron
+entry (a live deploy config; the exact entry is in section 6), and everything section 13 lists.
 
 ## 10. Privacy (honest)
 
@@ -398,6 +516,9 @@ and house-fleet lenders attesting before close.
 9. stream_loan changes that would close the remaining gaps: keep `agent_pk`/`funded_at` in `ClosedSlot` (close race);
    record a repayment time (duration-weighted volume); bind the stream prover to the pledging account (gifting).
 10. Default attests (outcome 0) and the contiguous-key "no hidden defaults on this account" mode.
+11. Whether backed loans ever count (default and today: never; section 3.4). The backer spec names what that would
+    take: a proof of the borrower key at funding, no BackingClaimed, repayment before expiry, a minimum fee paid.
+12. The Vercel sweep cron (section 6 has the exact entry) and the relayer env it needs.
 
 ## 14. Cost (mainnet, estimates at 6,960 lamports per byte)
 

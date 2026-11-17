@@ -52,7 +52,7 @@ usage: h081 <command> [options]
        | collect <loanRef> | claim <loanRef> [--usdg X] | settle <loanRef>   [--yes]
   stake view | stake <h081> | request-unstake <h081> | unstake   [--yes]
   rep ask --audience A [--min-loans N] [--min-volume X] [--min-lenders N] [--span DAYS] [--months N --month-floor X] [--bind <pubkey>]
-    | prove (<h081-rep-ask:...> | --audience A [thresholds]) [--bind <pubkey>]
+    | prove (<h081-rep-ask:...> | --audience A [--nonce N] [thresholds]) [--bind <pubkey>]
     | verify <h081-rep:...> (--ask <h081-rep-ask:...> | --audience A --nonce N) [--sig <h081-rep-sig:...>] [--on-chain]
     | attest [--self-sign] [--yes] | status        private reputation (a lower bound on repaid loans; beta setup)
   check <code>                                  validate any h081-* code: kind, network, checksum
@@ -339,8 +339,8 @@ export async function main(argv: string[] = process.argv.slice(2), io: CliIO = {
           }
           case 'prove': {
             const request = pos[2];
-            if (!request && !str('audience')) throw new UsageError('rep prove <h081-rep-ask:...> | rep prove --audience A [thresholds]');
-            return ok('done', await h.proveReputation(request ? { request, bindTo: str('bind') } : { audience: str('audience'), ...given, bindTo: str('bind') }));
+            if (!request && !str('audience')) throw new UsageError('rep prove <h081-rep-ask:...> | rep prove --audience A [--nonce N] [thresholds]');
+            return ok('done', await h.proveReputation(request ? { request, bindTo: str('bind') } : { audience: str('audience'), nonce: str('nonce'), ...given, bindTo: str('bind') }));
           }
           case 'verify': {
             const r = await h.verifyReputation(arg(2, '<h081-rep:...>'), { request: str('ask'), audience: str('audience'), nonce: str('nonce'), presentation: str('sig'), onChain: flags['on-chain'] === true, allowBearer: flags['allow-bearer'] === true }) as { ok: boolean; reason?: string };

@@ -31,9 +31,10 @@ export const h081Lend = (agent: AgentLike, input: {
 
 export const h081Transfer = (agent: AgentLike, input: { amount?: string; usdg?: string; toAddressCode: string }) => run(agent, 'h081_transfer', input);
 
-type RepThresholds = { minLoans?: number; minVolumeUsdg?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloorUsdg?: string };
+// minVolume / monthFloor in decimal USDG; minVolumeUsdg / monthFloorUsdg are the first release's names, kept as aliases (give one of each pair)
+type RepThresholds = { minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string; minVolumeUsdg?: string; monthFloorUsdg?: string };
 export const h081ReputationRequest = (agent: AgentLike, input: { audience: string; ttlSec?: number; bindTo?: string; label?: string } & RepThresholds) => run(agent, 'h081_reputation_request', input);
-export const h081ProveReputation = (agent: AgentLike, input: { request?: string; audience?: string; bindTo?: string; expiresInSec?: number } & RepThresholds) => run(agent, 'h081_prove_reputation', input);
+export const h081ProveReputation = (agent: AgentLike, input: { request?: string; audience?: string; nonce?: string; bindTo?: string; expiresInSec?: number } & RepThresholds) => run(agent, 'h081_prove_reputation', input);
 export const h081VerifyReputation = (agent: AgentLike, input: { code: string; request?: string; audience?: string; nonce?: string; presentation?: string; allowBearer?: boolean; onChain?: boolean }) => run(agent, 'h081_verify_reputation', input);
 export const h081ReputationAttest = (agent: AgentLike, input: { confirm?: boolean; selfSign?: boolean } = {}) => run(agent, 'h081_reputation_attest', input);
 export const h081ReputationStatus = (agent: AgentLike, input: Record<string, never> = {}) => run(agent, 'h081_reputation_status', input);

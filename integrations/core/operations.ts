@@ -235,8 +235,9 @@ export async function opTransfer(bank: BankLike, args: Args) {
 // ---- private reputation
 
 const repThresholdArgs = (args: Args) => ({
-  minLoans: args.minLoans as number | undefined, minVolume: args.minVolumeUsdg as string | undefined, minLenders: args.minLenders as number | undefined,
-  minSpanDays: args.minSpanDays as number | undefined, minMonths: args.minMonths as number | undefined, monthFloor: args.monthFloorUsdg as string | undefined,
+  // minVolume / monthFloor (decimal USDG); minVolumeUsdg / monthFloorUsdg are the first release's names, kept as aliases
+  minLoans: args.minLoans as number | undefined, minVolume: (args.minVolume ?? args.minVolumeUsdg) as string | undefined, minLenders: args.minLenders as number | undefined,
+  minSpanDays: args.minSpanDays as number | undefined, minMonths: args.minMonths as number | undefined, monthFloor: (args.monthFloor ?? args.monthFloorUsdg) as string | undefined,
 });
 
 export async function opReputationRequest(bank: BankLike, args: Args) {
@@ -244,7 +245,7 @@ export async function opReputationRequest(bank: BankLike, args: Args) {
 }
 
 export async function opProveReputation(bank: BankLike, args: Args) {
-  return bank.proveReputation({ request: args.request as string | undefined, audience: args.audience as string | undefined, ...repThresholdArgs(args), bindTo: args.bindTo as string | undefined, expiresInSec: args.expiresInSec as number | undefined });
+  return bank.proveReputation({ request: args.request as string | undefined, audience: args.audience as string | undefined, ...repThresholdArgs(args), nonce: args.nonce as string | undefined, bindTo: args.bindTo as string | undefined, expiresInSec: args.expiresInSec as number | undefined });
 }
 
 export async function opVerifyReputation(bank: BankLike, args: Args) {

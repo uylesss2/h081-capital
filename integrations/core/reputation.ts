@@ -26,14 +26,14 @@ import { Connection, Keypair, PublicKey, TransactionMessage, VersionedTransactio
 import { loanPk } from '../../src/crypto.js';
 import type { Prover } from '../../src/prover.js';
 import {
-  REP_MAX_TTL_SEC, REP_SETUP_STATUS, REP_STATEMENT_NOTE, ReputationUnreachable, assertRequirementRange, audienceOf, isOnLadder, randomNonce,
+  REP_MAX_TTL_SEC, REP_MIN_PRINCIPAL, REP_SETUP_STATUS, REP_STATEMENT_NOTE, ReputationUnreachable, assertRequirementRange, audienceOf, isOnLadder, randomNonce,
   repPublicList, reputationInput, selectLoans, snapRequirement, snapRequirementUp, statsOf, type RepPublic, type RepRequirement,
 } from '../../src/reputation.js';
 import { encodeProof, fieldOf, fromBe } from '../../src/solana/field.js';
 import { decodeSlot, slotPda } from '../../src/solana/lender.js';
 import {
-  REP_ERROR_NAME, attestIx, eventsOfSnapshot, fetchRepEvents, fetchRepTree, isAttested, isKnownRepRootIn, myRepLoans, rebuildRepTree,
-  verifyReputationIx, type RepAttestedEvent, type RepSnapshot,
+  REP_BLOCK_NOTE, REP_ERROR_NAME, attestIx, eventsOfSnapshot, fetchRepEvents, fetchRepTree, isAttested, isKnownRepRootIn, myRepLoans, rebuildRepTree,
+  repBlockOf, verifyReputationIx, type RepAttestedEvent, type RepBlock, type RepSnapshot,
 } from '../../src/solana/reputation.js';
 import {
   CodeError, decodeRepCode, decodeRepRequest, decodeRepSig, encodeRepCode, encodeRepRequest, encodeRepSig, repPresentationMessage,
@@ -80,17 +80,25 @@ export interface RepView extends Omit<RepThresholds, 'minVolume' | 'monthFloor'>
 
 export interface ReputationRequestResult { code: string; audience: string; nonce: string; expiresAt: number; thresholds: RepView; bindTo?: string; note: string }
 export interface ProveReputationResult {
-  code: string; presentation?: string; presNullifier: string; expiresAt: number; thresholds: RepView; counted: { loans: number };
+  code: string; presentation?: string;
+  /** the verifier's name hashed (0x hex) and the challenge this code answers: a verifier without a request checks with { audience, nonce } */
+  audience: string; nonce: string;
+  presNullifier: string; expiresAt: number; thresholds: RepView; counted: { loans: number };
   binding: 'request' | 'given-key' | 'session-key'; setup: string; statement: string; next: string; snapped?: string;
 }
 export interface VerifyReputationResult {
   ok: boolean; reason?: string; thresholds?: RepView; asset?: string; presNullifier?: string; audience?: string; expiresAt?: number;
-  presenter?: 'request-binding' | 'signed-session-key' | 'bearer'; onChain?: { ok: boolean; computeUnits?: number; error?: string };
+  presenter?: 'request-binding' | 'signed-session-key' | 'bearer';
+  /** ran: false = the simulation could not run (no fee payer), which is not a refusal */
+  onChain?: { ok: boolean; ran?: false; computeUnits?: number; error?: string };
   lowerBoundOnly: true; statement: string; setup: string;
 }
 export interface ReputationStatus {
   attested: { count: number; volume: string; lenders: number; spanDays: number; months: number };
-  pending: Array<{ loanRef: string; principal: string }>; legacy: number; loanKeys: number;
+  pending: Array<{ loanRef: string; principal: string }>;
+  /** repaid loans rep_registry refuses for good: backed (the Subrogation is a backer's fee or recovery, not a slash), slashed, too small */
+  never: Array<{ loanRef: string; principal: string; reason: 'backed' | 'slashed' | 'no_agent_key' | 'too_small' }>;
+  legacy: number; loanKeys: number;
   warnings: string[]; statement: string; setup: string;
 }
 
@@ -236,7 +244,7 @@ export function checkProbeCap(env: RepEnv, nf: bigint, t: RepThresholds, bindTo?
   if (file) { try { mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, JSON.stringify(log)); } catch (e) { env.log(`could not save the presentation log (kept in memory): ${(e as Error).message}`); } }
 }
 
-export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audience?: string; request?: string; bindTo?: string; expiresInSec?: number }): Promise<ProveReputationResult> {
+export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audience?: string; request?: string; nonce?: string; bindTo?: string; expiresInSec?: number }): Promise<ProveReputationResult> {
   const d = env.config.decimals, ctx = repContext(env);
   requireProvingArtifacts(env);
   let audience: bigint, nonce: bigint, expiry: bigint, bindTo = 0n, binding: ProveReputationResult['binding'] = 'session-key';
@@ -251,7 +259,8 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
   } else {
     if (!req.audience) throw new Error('give the verifier\'s request code (request) or its audience name (audience)');
     audience = audienceOf(req.audience);
-    nonce = randomNonce();
+    // the verifier's own challenge when it gave one out of band (it then checks with { audience, nonce }); else a fresh one
+    nonce = req.nonce === undefined ? randomNonce() : nonceOf(req.nonce);
     const ttl = req.expiresInSec ?? REP_DEFAULT_TTL_SEC;
     if (!(ttl > 0) || ttl > REP_MAX_TTL_SEC) throw new Error(`expiresInSec must be 1..${REP_MAX_TTL_SEC}`);
     expiry = BigInt(now + ttl);
@@ -299,13 +308,21 @@ export async function proveReputation(env: RepEnv, req: ThresholdArgs & { audien
     ? encodeRepSig(ctx, { pub: ed25519.getPublicKey(session), sig: ed25519.sign(repPresentationMessage(audience, nonce, publicSignals.presNullifier), session) })
     : undefined;
   return {
-    code, ...(presentation ? { presentation } : {}), presNullifier: hex(publicSignals.presNullifier), expiresAt: Number(expiry), thresholds: repView(asked, d),
+    code, ...(presentation ? { presentation } : {}), audience: hex(audience), nonce: hex(nonce), presNullifier: hex(publicSignals.presNullifier), expiresAt: Number(expiry), thresholds: repView(asked, d),
     counted: { loans: chosen.length }, binding, setup: setupLabel(env), statement: REP_STATEMENT_NOTE,
     ...(snappedNote ? { snapped: snappedNote } : {}),
     next: presentation
       ? 'give the verifier the code, and the presentation (h081-rep-sig:) only when you present it, over the channel the verifier knows you by; whoever holds both can present it until it expires'
       : 'give the verifier the code; it is bound to the key in the request (or bindTo), so only that key\'s holder can use it',
   };
+}
+
+/** A challenge given as 0x hex or decimal: nonzero and below 2^248 (what a request's random nonce is). */
+function nonceOf(s: string): bigint {
+  let n: bigint;
+  try { n = BigInt(s); } catch { throw new Error('nonce must be a number (0x hex or decimal)'); }
+  if (n <= 0n || n >= 1n << 248n) throw new Error('nonce must be between 1 and 2^248 - 1');
+  return n;
 }
 
 // ---- verify (verifier side)
@@ -376,7 +393,9 @@ export async function verifyReputation(env: RepEnv, code: string, opts: { reques
   if (!ok) return fail('the proof does not verify', view);
   let onChain: VerifyReputationResult['onChain'];
   if (opts.onChain) onChain = await simulateOnChain(env, c, pub);
-  return { ok: !onChain || onChain.ok, ...(onChain && !onChain.ok ? { reason: `verify_reputation refused it: ${onChain.error}` } : {}), ...view, presenter, ...(onChain ? { onChain } : {}), ...base };
+  // a simulation that could not run is not a refusal: say which one it was
+  const why = onChain && !onChain.ok ? (onChain.ran === false ? `the on-chain check could not run: ${onChain.error}` : `verify_reputation refused it: ${onChain.error}`) : undefined;
+  return { ok: !onChain || onChain.ok, ...(why ? { reason: why } : {}), ...view, presenter, ...(onChain ? { onChain } : {}), ...base };
 }
 
 /** The 256-byte program encoding back to snarkjs JSON (a is stored negated). */
@@ -392,7 +411,12 @@ function proofJson(b: Uint8Array) {
 }
 
 /** Simulates verify_reputation (read-only: nothing is signed or sent). */
-async function simulateOnChain(env: RepEnv, c: RepCode, pub: RepPublic): Promise<{ ok: boolean; computeUnits?: number; error?: string }> {
+async function simulateOnChain(env: RepEnv, c: RepCode, pub: RepPublic): Promise<NonNullable<VerifyReputationResult['onChain']>> {
+  // a simulation still needs a fee payer that exists: a fresh verifier wallet with no SOL would come back
+  // AccountNotFound, which says nothing about the proof
+  if ((await env.connection.getBalance(env.signer.publicKey, 'confirmed')) === 0) {
+    return { ok: false, ran: false, error: `this wallet (${env.signer.publicKey.toBase58()}), the fee payer of the read-only simulation, has no SOL on ${env.config.cluster}; the proof passed every off-chain check. Fund it with any amount, or verify without onChain` };
+  }
   const { blockhash } = await env.connection.getLatestBlockhash('confirmed');
   const msg = new TransactionMessage({
     payerKey: env.signer.publicKey, recentBlockhash: blockhash,
@@ -406,7 +430,7 @@ async function simulateOnChain(env: RepEnv, c: RepCode, pub: RepPublic): Promise
 
 // ---- status and attest (borrower side)
 
-interface MySlot { loanRef: bigint; principal: bigint; repaid: bigint; funded: boolean; keyIndex?: number; legacy: boolean }
+interface MySlot { loanRef: bigint; principal: bigint; repaid: bigint; funded: boolean; pledgeBps: bigint; agentPk: bigint; keyIndex?: number; legacy: boolean }
 
 /** Live stream_loan slots whose agent key is one of this account's loan keys or legacy sub-accounts (matched locally). */
 async function mySlots(env: RepEnv): Promise<{ slots: MySlot[]; scanned: boolean }> {
@@ -428,11 +452,22 @@ async function mySlots(env: RepEnv): Promise<{ slots: MySlot[]; scanned: boolean
     try { s = decodeSlot(a.account.data); } catch { continue; }
     if (!slotPda(s.loanRef, loanProgram).equals(a.pubkey)) continue;
     const k = pks.get(s.agentPk);
-    if (k !== undefined) out.push({ loanRef: s.loanRef, principal: s.principal, repaid: s.repaid, funded: s.funded, keyIndex: k, legacy: false });
-    else if (legacy.has(s.agentPk)) out.push({ loanRef: s.loanRef, principal: s.principal, repaid: s.repaid, funded: s.funded, legacy: true });
+    const base = { loanRef: s.loanRef, principal: s.principal, repaid: s.repaid, funded: s.funded, pledgeBps: s.pledgeBps, agentPk: s.agentPk };
+    if (k !== undefined) out.push({ ...base, keyIndex: k, legacy: false });
+    else if (legacy.has(s.agentPk)) out.push({ ...base, legacy: true });
   }
   env.rememberLoanKeys(out.filter((s) => s.keyIndex !== undefined).map((s) => s.keyIndex!));
   return { slots: out, scanned: true };
+}
+
+type NeverReason = RepBlock | 'too_small';
+const NEVER_NOTE: Record<NeverReason, string> = { ...REP_BLOCK_NOTE, too_small: 'the principal is below the 1 USDG minimum that counts' };
+
+/** Why a repaid loan can never be attested (rep_registry would refuse it), or undefined. */
+async function neverCounts(env: RepEnv, x: MySlot): Promise<NeverReason | undefined> {
+  const block = await repBlockOf(env.connection, x, env.config.loanProgramId);
+  if (block) return block;
+  return x.principal < REP_MIN_PRINCIPAL ? 'too_small' : undefined;
 }
 
 export async function reputationStatus(env: RepEnv): Promise<ReputationStatus> {
@@ -441,20 +476,25 @@ export async function reputationStatus(env: RepEnv): Promise<ReputationStatus> {
   const mine = myRepLoans(events, env.accountSk, { maxKey: Math.max(-1, ...env.loanKeys()), gap: REP_GAP_LIMIT, assetF: fieldOf(env.config.usdgMint) });
   const s = statsOf(mine);
   const { slots, scanned } = await mySlots(env);
-  const pending: ReputationStatus['pending'] = [];
+  const pending: ReputationStatus['pending'] = [], never: ReputationStatus['never'] = [];
   for (const x of slots) {
     if (x.legacy || !x.funded || x.repaid < x.principal) continue;
-    if (!(await isAttested(env.connection, x.loanRef, program))) pending.push({ loanRef: x.loanRef.toString(), principal: fromUnits(x.principal, d) });
+    if (await isAttested(env.connection, x.loanRef, program)) continue;
+    // repaid but refused by rep_registry for good: backed (a backer's fee, not a slash), slashed, or below the minimum
+    const why = await neverCounts(env, x);
+    if (why) never.push({ loanRef: x.loanRef.toString(), principal: fromUnits(x.principal, d), reason: why });
+    else pending.push({ loanRef: x.loanRef.toString(), principal: fromUnits(x.principal, d) });
   }
   const legacy = slots.filter((x) => x.legacy && x.funded).length;
   const warnings: string[] = [];
   if (legacy > 0) warnings.push(`${legacy} loan(s) were taken under legacy sub-account keys (agentIndex 0..15): they can never count toward reputation. Borrow without agentIndex (this package version uses fresh loan keys) so future loans count.`);
   if (!scanned) warnings.push('the RPC would not list loan slots (getProgramAccounts): pending and legacy counts are unknown; use a private RPC.');
+  if (never.length) warnings.push(`${never.length} repaid loan(s) can never count: ${[...new Set(never.map((x) => x.reason))].map((r) => `${r} (${NEVER_NOTE[r]})`).join('; ')}.`);
   if (pending.length) warnings.push(`${pending.length} repaid loan(s) are not attested yet: h081_reputation_attest asks the relayer to attest them (never from your wallet, which would link them to you). A lender that closes a loan before it is attested erases it for good.`);
   warnings.push('loans whose principal was paid to this wallet\'s public token account are linked to this wallet on chain by their payout_to; a verifier who knows the wallet can estimate your record without the proof. Never use this wallet as bindTo.');
   return {
     attested: { count: s.loans, volume: fromUnits(s.volume, d), lenders: s.lenders, spanDays: s.spanDays, months: s.months },
-    pending, legacy, loanKeys: env.loanKeys().length, warnings, statement: REP_STATEMENT_NOTE, setup: setupLabel(env),
+    pending, never, legacy, loanKeys: env.loanKeys().length, warnings, statement: REP_STATEMENT_NOTE, setup: setupLabel(env),
   };
 }
 
@@ -479,7 +519,10 @@ export async function reputationAttest(env: RepEnv, opts: { confirm?: boolean; s
   if (!refs) {
     const { slots } = await mySlots(env);
     refs = [];
-    for (const x of slots) if (!x.legacy && x.funded && x.repaid >= x.principal && !(await isAttested(env.connection, x.loanRef, program))) refs.push(x.loanRef);
+    for (const x of slots) {
+      if (x.legacy || !x.funded || x.repaid < x.principal || (await isAttested(env.connection, x.loanRef, program))) continue;
+      if (!(await neverCounts(env, x))) refs.push(x.loanRef); // backed, slashed or tiny: rep_registry refuses it; never asked for
+    }
   }
   const via = opts.selfSign
     ? 'this wallet (links each loan to it on chain)'

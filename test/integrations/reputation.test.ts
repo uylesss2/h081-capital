@@ -326,3 +326,21 @@ describe('reputationAttest (borrower side) hands loans to the relayer queue', ()
     expect(r.note).toMatch(/next sweep/);
   });
 });
+
+describe.skipIf(!haveArtifacts)('the one-call prove: { audience, minLoans, minVolume } and the verifier nonce (dev setup)', () => {
+  const master = 0x5151n;
+  it('returns the audience and nonce it answers; a verifier checks with { audience, nonce }; a bad nonce is refused before proving', async () => {
+    const w = world(master);
+    const e = envFor(master, w);
+    const given = await proveReputation(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50', nonce: '0xabc123' });
+    expect(BigInt(given.nonce)).toBe(0xabc123n);
+    expect(BigInt(given.audience)).toBe(audienceOf('acme-desk'));
+    expect(await verifyReputation(e, given.code, { audience: 'acme-desk', nonce: '0xabc123', presentation: given.presentation })).toMatchObject({ ok: true });
+    expect((await verifyReputation(e, given.code, { audience: 'acme-desk', nonce: '0xabc124', presentation: given.presentation })).reason).toMatch(/another challenge/);
+    // without a nonce: a fresh one, returned so the prover can hand it over with the code
+    const fresh = await proveReputation(e, { audience: 'acme-desk', minLoans: 3, minVolume: '50' });
+    expect(await verifyReputation(e, fresh.code, { audience: 'acme-desk', nonce: fresh.nonce, presentation: fresh.presentation })).toMatchObject({ ok: true });
+    await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1, nonce: '0x0' })).rejects.toThrow(/nonce must be between 1 and 2\^248/);
+    await expect(proveReputation(e, { audience: 'acme-desk', minLoans: 1, nonce: '0x' + '1'.padEnd(63, '0') })).rejects.toThrow(/nonce must be between/);
+  }, 300_000);
+});

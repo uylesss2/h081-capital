@@ -78,6 +78,9 @@ Every method returns plain JSON (bigints as decimal strings).
 | `H081_ALLOWANCE_RECLAIM` | `h081_allowance_reclaim` | `{allowanceId, confirm?: boolean}` |
 | `H081_LEND` | `h081_lend` | `{action: 'open' \| 'fund' \| 'status' \| 'claim' \| 'collect' \| 'settle' \| 'close' \| 'sweep', pledgeBps?, proofCode?, loanRef?, principal? \| principalUsdg?, amount? \| usdg?, confirm?: boolean}` |
 | `H081_TRANSFER` | `h081_transfer` | `{amount|usdg, toAddressCode: "h081-address:…"}` (from the main shielded balance, sent by the agent key) |
+| `H081_PROVE_REPUTATION` | `h081_prove_reputation` | `{audience, nonce?, minLoans?, minVolume?, minLenders?, minSpanDays?, minMonths?, monthFloor?}` or `{request: "h081-rep-ask:…"}` (one call, local proof; `minVolume` / `monthFloor` decimal USDG, aliases `minVolumeUsdg` / `monthFloorUsdg`). Returns `{code, presentation?, audience, nonce}`. A lower bound on repaid loans; says nothing about defaults; beta setup, not on mainnet yet |
+| `H081_REPUTATION_REQUEST` / `H081_VERIFY_REPUTATION` | `h081_reputation_request` / `h081_verify_reputation` | Verifier: `{audience, minLoans?, minVolume?, …}` → a request code; `{code, request \| audience + nonce, presentation?, onChain?}` → `{ok, lowerBoundOnly: true, …}` |
+| `H081_REPUTATION_STATUS` / `H081_REPUTATION_ATTEST` | `h081_reputation_status` / `h081_reputation_attest` | `{}` / `{confirm?}`: what counts, what is pending, what never counts (backed, slashed); the relayer queue |
 
 The three allowance actions send nothing without `confirm: true`: they return the plan of exactly what would be sent. A delegated child can never be looser than its parent; the error names the limit. `h081_allowance_delegate` needs the delegate proving artifacts, which the site does not ship yet.
 

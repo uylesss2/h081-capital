@@ -111,6 +111,57 @@ export async function isAttested(connection: Connection, loanRef: bigint, progra
   return ((info.data[8 + 4 + 1 + (bit >> 3)] >> (bit & 7)) & 1) === 1;
 }
 
+// ---- what can never be attested: backed loans and slashed loans
+//
+// A backed loan (stream_loan fund_backed, docs/BACKER-SPEC.md on the private-backer branch) is funded with
+// pledge_bps = 0 and agent_pk = 0, and gets a Subrogation at funding that routes the backer's fee or recovery to the
+// Backing's vault. A safety-pool slash also leaves a Subrogation. rep_registry refuses both the same way (any
+// Subrogation: error Slashed, 6010), so a reader must not call a backed loan "slashed". The helpers below are a
+// minimal READ-ONLY port of isBackedSlot / isBackedSubrogation from that branch's src/solana/backer.ts (same names and
+// rules: Backing discriminator and size, owner = the stream_loan program); nothing else of the backer feature is here.
+
+/** Size of stream_loan's Backing account (private-backer branch, BACKING_ACCOUNT_SIZE). */
+export const BACKING_ACCOUNT_SIZE = 278;
+const BACKING_DISC = disc('account', 'Backing');
+/** True when `data` is a stream_loan Backing account (discriminator and size). */
+export const isBackingAccount = (data: Uint8Array) => data.length >= BACKING_ACCOUNT_SIZE && BACKING_DISC.every((b, i) => data[i] === b);
+
+/** A slot funded by fund_backed: no pledge (stream slots always have pledge_bps > 0). */
+export const isBackedSlot = (s: { funded: boolean; pledgeBps: bigint }) => s.funded && s.pledgeBps === 0n;
+
+/** True when a loan's Subrogation belongs to a backed line (its safety_config is a Backing of `loanProgram`), not to a slash. */
+export async function isBackedSubrogation(connection: Pick<Connection, 'getAccountInfo'>, sub: { safetyConfig: PublicKey }, loanProgram = LOCALNET_LOAN_PROGRAM_ID): Promise<boolean> {
+  const info = await connection.getAccountInfo(sub.safetyConfig, 'confirmed');
+  return !!info && info.owner.equals(loanProgram) && isBackingAccount(info.data);
+}
+
+export type RepBlock = 'backed' | 'slashed' | 'no_agent_key';
+export const REP_BLOCK_NOTE: Record<RepBlock, string> = {
+  backed: 'a backed loan (funded against a backer\'s stake: no pledge, no agent key); its Subrogation is the backer\'s fee or recovery, not a slash. Backed loans never count toward reputation',
+  slashed: 'the loan was slashed (a safety pool covered it and holds a Subrogation); it never counts toward reputation, even once recovered',
+  no_agent_key: 'the loan has no agent key, so no account can ever prove it',
+};
+
+/**
+ * Why a funded loan can never be attested, or undefined when nothing here blocks it (repaid and the minimum principal
+ * are the caller's rules). The slot says backed (pledge_bps 0) first, so a closed or missing Backing never turns a backed
+ * loan into a "slash"; then any Subrogation, labelled by isBackedSubrogation; then a zero agent key.
+ */
+export async function repBlockOf(
+  connection: Pick<Connection, 'getAccountInfo'>, slot: { loanRef: bigint; funded: boolean; pledgeBps: bigint; agentPk: bigint }, loanProgram = LOCALNET_LOAN_PROGRAM_ID,
+): Promise<RepBlock | undefined> {
+  if (isBackedSlot(slot)) return 'backed';
+  const info = await connection.getAccountInfo(subrogationPda(slot.loanRef, loanProgram), 'confirmed');
+  if (info && info.data.length > 0) {
+    // Subrogation: disc 8, loan_ref 8, safety_config 32 (offset 16), to 32, owed 8, paid 8, bump 1
+    const backed = info.owner.equals(loanProgram) && info.data.length >= 48
+      && await isBackedSubrogation(connection, { safetyConfig: new PublicKey(info.data.subarray(16, 48)) }, loanProgram).catch(() => false);
+    return backed ? 'backed' : 'slashed';
+  }
+  if (slot.agentPk === 0n) return 'no_agent_key';
+  return undefined;
+}
+
 // ---- events
 
 export interface RepAttestedEvent {

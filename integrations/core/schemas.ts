@@ -150,13 +150,13 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'transact circuit. Give `amount` (base units) or `usdg` (decimal). ' + NOTICE_SHORT,
   h081_reputation_request:
     'Verifier side of private reputation: make an "h081-rep-ask:" request code naming you (`audience`, any stable name), a fresh ' +
-    'challenge (nonce) and what you require: `minLoans`, `minVolumeUsdg`, `minLenders`, `minSpanDays` (days between the first and last ' +
-    'funding), `minMonths` with `monthFloorUsdg` (distinct 30-day periods holding a loan of at least that size). Thresholds are rounded UP ' +
+    'challenge (nonce) and what you require: `minLoans`, `minVolume` (decimal USDG; alias `minVolumeUsdg`), `minLenders`, `minSpanDays` (days between the first and last ' +
+    'funding), `minMonths` with `monthFloor` (alias `monthFloorUsdg`) (distinct 30-day periods holding a loan of at least that size). Thresholds are rounded UP ' +
     'to a public ladder. `bindTo` (a Solana key you know the presenter by) binds the answer to that key. Hand the code to the agent, keep it, ' +
     'and check the answer with h081_verify_reputation and this request; accept each nonce once. Sends nothing. ' + REP_NOTE + ' ' + REP_DEPLOY,
   h081_prove_reputation:
     'Prove this agent\'s repayment record to one verifier without revealing which loans, when, to whom, or under which keys: give the ' +
-    'verifier\'s "h081-rep-ask:" `request` code, or its `audience` name plus thresholds (rounded DOWN to the public ladder). Returns an ' +
+    'verifier\'s "h081-rep-ask:" `request` code, or its `audience` name plus thresholds (`minLoans`, `minVolume` in decimal USDG, ...; rounded DOWN to the public ladder) and the `nonce` it gave you, if any. Returns an ' +
     '"h081-rep:" code and, unless the request binds a key, a separate "h081-rep-sig:" `presentation` to give the verifier only when you ' +
     'present (whoever holds both can use the code until it expires, at most a day). Counts only loans repaid under this account\'s loan keys ' +
     'and attested (h081_reputation_status, h081_reputation_attest). The proof is made locally (the account secret is in the witness; no ' +
@@ -327,20 +327,30 @@ export const TransferZ = z.object({
 const nameZ = z.string().trim().min(1, 'must be a non-empty name').max(128);
 const repThresholds = {
   minLoans: z.number().int().min(1).max(16).optional(),
-  minVolumeUsdg: decimalZ.optional(),
+  minVolume: decimalZ.optional(),
   minLenders: z.number().int().min(0).max(255).optional(),
   minSpanDays: z.number().int().min(0).max(65535).optional(),
   minMonths: z.number().int().min(0).max(255).optional(),
+  monthFloor: decimalZ.optional(),
+  // the first release's names, kept as aliases (decimal USDG, exactly like minVolume / monthFloor)
+  minVolumeUsdg: decimalZ.optional(),
   monthFloorUsdg: decimalZ.optional(),
 };
+type RepAliasable = { minVolume?: string; minVolumeUsdg?: string; monthFloor?: string; monthFloorUsdg?: string };
+const notBoth = (o: RepAliasable) => !(o.minVolume !== undefined && o.minVolumeUsdg !== undefined) && !(o.monthFloor !== undefined && o.monthFloorUsdg !== undefined);
+const notBothMsg = { message: 'give minVolume or its alias minVolumeUsdg (and monthFloor or monthFloorUsdg), not both' };
 const ttlZ = z.number().int().min(1).max(86_400);
-export const RepRequestZ = z.object({ audience: nameZ, ...repThresholds, ttlSec: ttlZ.optional(), bindTo: b58Z.optional(), label: z.string().max(32).optional() }).strict();
-export const ProveRepZ = z.object({ request: z.string().min(1).optional(), audience: nameZ.optional(), ...repThresholds, bindTo: b58Z.optional(), expiresInSec: ttlZ.optional() }).strict()
+const NONCE_RE = /^(0x[0-9a-fA-F]{1,62}|\d{1,75})$/;
+const nonceZ = z.string().regex(NONCE_RE, 'a number (0x hex or decimal)');
+export const RepRequestZ = z.object({ audience: nameZ, ...repThresholds, ttlSec: ttlZ.optional(), bindTo: b58Z.optional(), label: z.string().max(32).optional() }).strict()
+  .refine(notBoth, notBothMsg);
+export const ProveRepZ = z.object({ request: z.string().min(1).optional(), audience: nameZ.optional(), ...repThresholds, nonce: nonceZ.optional(), bindTo: b58Z.optional(), expiresInSec: ttlZ.optional() }).strict()
   .refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the verifier\'s "h081-rep-ask:" code) or audience (its name)' })
-  .refine((o) => o.request === undefined || Object.keys(repThresholds).every((k) => (o as Record<string, unknown>)[k] === undefined), { message: 'a request code carries its own thresholds; do not add any' });
+  .refine((o) => o.request === undefined || [...Object.keys(repThresholds), 'nonce'].every((k) => (o as Record<string, unknown>)[k] === undefined), { message: 'a request code carries its own thresholds and challenge; do not add any' })
+  .refine(notBoth, notBothMsg);
 export const VerifyRepZ = z.object({
   code: z.string({ required_error: 'must be given: the "h081-rep:" code' }).min(1), request: z.string().min(1).optional(), audience: nameZ.optional(),
-  nonce: z.string().regex(/^(0x[0-9a-fA-F]+|\d+)$/, 'a number (0x hex or decimal)').optional(), presentation: z.string().min(1).optional(),
+  nonce: nonceZ.optional(), presentation: z.string().min(1).optional(),
   allowBearer: z.boolean().optional(), onChain: z.boolean().optional(),
 }).strict().refine((o) => (o.request !== undefined) !== (o.audience !== undefined), { message: 'give exactly one of request (the code you issued) or audience (with nonce)' });
 export const RepAttestZ = z.object({ confirm: z.boolean().optional(), selfSign: z.boolean().optional() }).strict();
@@ -360,12 +370,15 @@ export const ZOD: Record<OpName, z.ZodType<any>> = {
 const repAudienceJ = { type: 'string', minLength: 1, maxLength: 128, description: 'the verifier\'s name (any stable string); the proof is only good for it' };
 const repThresholdsJ = {
   minLoans: { type: 'integer', minimum: 1, maximum: 16, description: 'at least this many repaid loans (ladder 1, 2, 3, 5, 8, 12, 16)' },
-  minVolumeUsdg: { type: 'string', pattern: DECIMAL.source, description: 'at least this much principal in total, USDG (ladder 1 / 2.5 / 5 x 10^k)' },
+  minVolume: { type: 'string', pattern: DECIMAL.source, description: 'at least this much principal in total, decimal USDG like "500" (ladder 1 / 2.5 / 5 x 10^k)' },
   minLenders: { type: 'integer', minimum: 0, maximum: 255, description: 'from at least this many different lender wallets (cheap to fake: wallets are free)' },
   minSpanDays: { type: 'integer', minimum: 0, maximum: 65535, description: 'first and last funding at least this many days apart' },
-  minMonths: { type: 'integer', minimum: 0, maximum: 255, description: 'in at least this many distinct 30-day periods, counting loans of at least monthFloorUsdg' },
-  monthFloorUsdg: { type: 'string', pattern: DECIMAL.source, description: 'smallest loan that makes its 30-day period count' },
+  minMonths: { type: 'integer', minimum: 0, maximum: 255, description: 'in at least this many distinct 30-day periods, counting loans of at least monthFloor' },
+  monthFloor: { type: 'string', pattern: DECIMAL.source, description: 'smallest loan that makes its 30-day period count, decimal USDG' },
+  minVolumeUsdg: { type: 'string', pattern: DECIMAL.source, description: 'alias of minVolume (the first release\'s name); give one, not both' },
+  monthFloorUsdg: { type: 'string', pattern: DECIMAL.source, description: 'alias of monthFloor (the first release\'s name); give one, not both' },
 };
+const nonceJ = (description: string) => ({ type: 'string', pattern: NONCE_RE.source, description });
 const amountJ = { type: 'string', pattern: BASE.source, description: 'base units (USDG has 6 decimals): "1000000" = 1 USDG' };
 const decimalJ = (unit: string) => ({ type: 'string', pattern: DECIMAL.source, description: `decimal ${unit} amount, e.g. "12.5"` });
 const b58J = { type: 'string', pattern: BASE58.source, description: 'base58 Solana wallet address' };
@@ -523,12 +536,12 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   },
   h081_prove_reputation: {
     type: 'object',
-    properties: { request: { type: 'string', description: 'the verifier\'s "h081-rep-ask:" code (carries audience, challenge and thresholds)' }, audience: repAudienceJ, ...repThresholdsJ, bindTo: { ...b58J, description: 'optional: bind the proof to this key (default: a fresh session key, signed separately)' }, expiresInSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'without a request: lifetime of the proof, default 600' } },
+    properties: { request: { type: 'string', description: 'the verifier\'s "h081-rep-ask:" code (carries audience, challenge and thresholds)' }, audience: repAudienceJ, ...repThresholdsJ, nonce: nonceJ('without a request: the challenge the verifier gave you (0x hex or decimal); default a fresh random one, returned as nonce'), bindTo: { ...b58J, description: 'optional: bind the proof to this key (default: a fresh session key, signed separately)' }, expiresInSec: { type: 'integer', minimum: 1, maximum: 86400, description: 'without a request: lifetime of the proof, default 600' } },
     additionalProperties: false, description: 'exactly one of request, or audience with thresholds',
   },
   h081_verify_reputation: {
     type: 'object',
-    properties: { code: { type: 'string', description: 'the "h081-rep:" code' }, request: { type: 'string', description: 'the "h081-rep-ask:" code you issued' }, audience: repAudienceJ, nonce: { type: 'string', pattern: '^(0x[0-9a-fA-F]+|\\d+)$', description: 'without a request: the nonce you issued' }, presentation: { type: 'string', description: 'the presenter\'s "h081-rep-sig:" code (needed when the code is bound to a session key)' }, allowBearer: { type: 'boolean', description: 'accept a code bound to no key (anyone who saw it could replay it); default false' }, onChain: { type: 'boolean', description: 'also simulate rep_registry verify_reputation (read-only)' } },
+    properties: { code: { type: 'string', description: 'the "h081-rep:" code' }, request: { type: 'string', description: 'the "h081-rep-ask:" code you issued' }, audience: repAudienceJ, nonce: nonceJ('without a request: the nonce you issued (the prover passes it as `nonce`); accept each nonce once'), presentation: { type: 'string', description: 'the presenter\'s "h081-rep-sig:" code (needed when the code is bound to a session key)' }, allowBearer: { type: 'boolean', description: 'accept a code bound to no key (anyone who saw it could replay it); default false' }, onChain: { type: 'boolean', description: 'also simulate rep_registry verify_reputation (read-only)' } },
     required: ['code'], additionalProperties: false, description: 'the code and exactly one of request, or audience with nonce',
   },
   h081_reputation_attest: { type: 'object', properties: { confirm: { type: 'boolean', description: 'true to send; otherwise only the plan' }, selfSign: { type: 'boolean', description: 'send from this wallet instead of the relayer (links each loan to it on chain)' } }, additionalProperties: false },
@@ -572,8 +585,8 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
     { action: 'sweep', loanRef: '3' },
   ],
   h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
-  h081_reputation_request: [{ audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '500', minSpanDays: 90 }, { audience: 'acme-desk', minLoans: 5, minMonths: 3, monthFloorUsdg: '50', bindTo: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv' }],
-  h081_prove_reputation: [{ request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' }, { audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '500' }],
+  h081_reputation_request: [{ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 }, { audience: 'acme-desk', minLoans: 5, minMonths: 3, monthFloor: '50', bindTo: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv' }],
+  h081_prove_reputation: [{ request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' }, { audience: 'acme-desk', minLoans: 3, minVolume: '500' }],
   h081_verify_reputation: [{ code: 'h081-rep:7Yk3LmQ9pR2', request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4', presentation: 'h081-rep-sig:3Df8Kq2' }, { code: 'h081-rep:7Yk3LmQ9pR2', audience: 'acme-desk', nonce: '0x1f2e', onChain: true }],
   h081_reputation_attest: [{}, { confirm: true }],
   h081_reputation_status: [{}],

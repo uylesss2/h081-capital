@@ -56,7 +56,9 @@ import {
   reputationRequest as repRequest, reputationStatus as repStatus, verifyReputation as repVerify,
 } from './reputation.js';
 import { loanPk, loanSk } from '../../src/crypto.js';
-import { attestIx, isAttested } from '../../src/solana/reputation.js';
+import { attestIx, isAttested, repBlockOf } from '../../src/solana/reputation.js';
+import { REP_MIN_PRINCIPAL } from '../../src/reputation.js';
+import { lockLoanKeys, readLoanKeys, reserveLoanKey, writeLoanKeys } from './loankeys.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
 
@@ -379,17 +381,31 @@ export class H081Bank {
     const before = this.loanKeySet.size;
     for (const k of ks) if (Number.isInteger(k) && k >= 0 && k < 2 ** 32) this.loanKeySet.add(k);
     if (this.loanKeySet.size === before || !this.loanKeysFile) return;
+    // merged with what another process on this signer wrote meanwhile, under the same lock as reserveLoanKey: never
+    // overwrites a key it does not know
     try {
-      mkdirSync(join(this.loanKeysFile, '..'), { recursive: true });
-      writeFileSync(this.loanKeysFile, JSON.stringify({ keys: [...this.loanKeySet].sort((a, b) => a - b) }));
+      const release = lockLoanKeys(this.loanKeysFile);
+      try {
+        for (const k of readLoanKeys(this.loanKeysFile)) this.loanKeySet.add(k);
+        writeLoanKeys(this.loanKeysFile, this.loanKeySet);
+      } finally { release(); }
     } catch (e) { this.log(`could not save the loan key list: ${(e as Error).message}`); }
   }
 
-  /** The next unused loan key index (borrow runs seedLoanKeysFromChain first: the cache alone is not enough). */
+  /**
+   * The next unused loan key index, recorded before it is used (borrow runs seedLoanKeysFromChain first: the cache
+   * alone is not enough). Under the loan-key lock it re-reads the list another process on this signer may have
+   * extended, so two borrows at the same moment never take one key (integrations/core/loankeys.ts). A cache dir that
+   * cannot be written falls back to this process's own list, as before.
+   */
   private nextLoanKey(): number {
-    let k = 0;
-    while (this.loanKeySet.has(k)) k++;
-    return k;
+    try {
+      return reserveLoanKey(this.loanKeysFile, this.loanKeySet);
+    } catch (e) {
+      if (/loan-key lock/.test((e as Error).message)) throw e;
+      this.log(`could not save the loan key list: ${(e as Error).message}`);
+      return reserveLoanKey(undefined, this.loanKeySet);
+    }
   }
 
   /**
@@ -1426,7 +1442,7 @@ export class H081Bank {
     // The key is recorded before the grant, so a crash after it still finds the allowance.
     let i: number;
     if (rules.agentIndex !== undefined) i = rules.agentIndex;
-    else { this.seedLoanKeysFromChain(); const k = this.nextLoanKey(); this.rememberLoanKeys([k]); i = REP_LOAN_KEY_BASE + k; }
+    else { this.seedLoanKeysFromChain(); i = REP_LOAN_KEY_BASE + this.nextLoanKey(); }
     const a = this.agent(i);
     const now = await this.pool.now();
     const secs = BigInt(Math.max(1, Math.round(rules.unlockDays * 86400)));
@@ -1913,10 +1929,17 @@ export class H081Bank {
     };
   }
 
-  /** Lender side: attests a repaid, unattested loan from the lender wallet before close_slot erases its agent key. */
-  private async attestBeforeClose(ref: bigint, s: { funded: boolean; repaid: bigint; principal: bigint }): Promise<string | undefined> {
+  /**
+   * Lender side: attests a repaid, unattested loan from the lender wallet before close_slot erases its agent key. A
+   * backed loan (pledge_bps 0, its Subrogation the backer's fee), a slashed one, one without an agent key or one below
+   * rep_registry's 1 USDG minimum can never count: nothing is sent for it.
+   */
+  private async attestBeforeClose(ref: bigint, s: { funded: boolean; repaid: bigint; principal: bigint; pledgeBps: bigint; agentPk: bigint }): Promise<string | undefined> {
     const rep = this.config.repProgramId;
-    if (!rep || !s.funded || s.repaid < s.principal || (await isAttested(this.connection, ref, rep))) return undefined;
+    if (!rep || !s.funded || s.repaid < s.principal || s.principal < REP_MIN_PRINCIPAL) return undefined;
+    const block = await repBlockOf(this.connection, { loanRef: ref, ...s }, this.config.loanProgramId);
+    if (block) { this.log(`loan #${ref} is not attested before close: ${block}`); return undefined; }
+    if (await isAttested(this.connection, ref, rep)) return undefined;
     return sendLegacy(this.connection, this.signer, [this.signer], [attestIx(this.signer.publicKey, ref, { rep, loan: this.config.loanProgramId })]);
   }
 
@@ -1924,7 +1947,7 @@ export class H081Bank {
   reputationRequest(req: ThresholdArgs & { audience: string; ttlSec?: number; bindTo?: string; label?: string }) { return repRequest(this.repEnv(), req); }
 
   /** Prover: an "h081-rep:" code over this account's attested loans. Local only (the witness holds the account secret). */
-  proveReputation(req: ThresholdArgs & { audience?: string; request?: string; bindTo?: string; expiresInSec?: number }) { return repProve(this.repEnv(), req); }
+  proveReputation(req: ThresholdArgs & { audience?: string; request?: string; nonce?: string; bindTo?: string; expiresInSec?: number }) { return repProve(this.repEnv(), req); }
 
   /** Verifier: checks a code against its request (or audience + nonce), the presenter binding, the time, the root and the proof. */
   verifyReputation(code: string, opts: Parameters<typeof repVerify>[2] = {}) { return repVerify(this.repEnv(), code, opts); }

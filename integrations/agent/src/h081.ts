@@ -154,12 +154,21 @@ const PREFIX_KIND_NAME: Record<string, string> = {
   [REP_PREFIX]: 'reputation', [REP_ASK_PREFIX]: 'reputation-request', [REP_SIG_PREFIX]: 'reputation-presentation',
 };
 
-/** Reputation threshold options as operation args (USDG fields renamed, undefined dropped). */
+/** Reputation thresholds: minVolume / monthFloor in decimal USDG; minVolumeUsdg / monthFloorUsdg are aliases (the first release's names). */
+export type RepThresholdOpts = {
+  minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string;
+  minVolumeUsdg?: string; monthFloorUsdg?: string;
+};
+
+/** Reputation threshold options as operation args (aliases folded into minVolume / monthFloor, undefined dropped). */
 function repArgs(o: Record<string, unknown>, keep: string[]): Args {
   const out: Args = {};
   for (const k of [...keep, 'minLoans', 'minLenders', 'minSpanDays', 'minMonths']) if (o[k] !== undefined) out[k] = o[k];
-  if (o.minVolume !== undefined) out.minVolumeUsdg = String(o.minVolume);
-  if (o.monthFloor !== undefined) out.monthFloorUsdg = String(o.monthFloor);
+  for (const [name, alias] of [['minVolume', 'minVolumeUsdg'], ['monthFloor', 'monthFloorUsdg']] as const) {
+    if (o[name] !== undefined && o[alias] !== undefined) throw new Error(`give ${name} or its alias ${alias}, not both`);
+    const v = o[name] ?? o[alias];
+    if (v !== undefined) out[name] = String(v);
+  }
   return out;
 }
 
@@ -758,14 +767,19 @@ export class H081 {
   // ---- private reputation (docs/REPUTATION-SPEC.md). Proving is local; only attest sends anything.
 
   /** Verifier: an "h081-rep-ask:" request with a fresh challenge. Offline apart from nothing: no RPC call. */
-  async reputationRequest(o: { audience: string; minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string; ttlSec?: number; bindTo?: string; label?: string }): Promise<unknown> {
+  async reputationRequest(o: RepThresholdOpts & { audience: string; ttlSec?: number; bindTo?: string; label?: string }): Promise<unknown> {
     return plain(await runOp(await this.bank(), 'h081_reputation_request', repArgs(o, ['audience', 'ttlSec', 'bindTo', 'label'])));
   }
 
-  /** Prover: an "h081-rep:" code (and a presenter signature unless the request binds a key). Local proof, 3-15 s. */
-  async proveReputation(o: { request?: string; audience?: string; minLoans?: number; minVolume?: string; minLenders?: number; minSpanDays?: number; minMonths?: number; monthFloor?: string; bindTo?: string; expiresInSec?: number }): Promise<unknown> {
+  /**
+   * Prover, one call: `proveReputation({ audience, minLoans, minVolume })` (or `{ request }` with the verifier's
+   * "h081-rep-ask:" code). Returns the "h081-rep:" code, a presenter signature unless a key binds it, and the
+   * audience/nonce it answers. Local proof, 3-15 s. minVolume / monthFloor are decimal USDG ("500"); the first
+   * release's minVolumeUsdg / monthFloorUsdg are accepted as aliases.
+   */
+  async proveReputation(o: RepThresholdOpts & { request?: string; audience?: string; nonce?: string; bindTo?: string; expiresInSec?: number }): Promise<unknown> {
     if (o.request !== undefined) this.requireCode(o.request, REP_ASK_PREFIX, 'request');
-    return plain(await runOp(await this.bank(), 'h081_prove_reputation', repArgs(o, ['request', 'audience', 'bindTo', 'expiresInSec'])));
+    return plain(await runOp(await this.bank(), 'h081_prove_reputation', repArgs(o, ['request', 'audience', 'nonce', 'bindTo', 'expiresInSec'])));
   }
 
   /** Verifier: checks a code against its request (or audience + nonce); a lower bound on repaid loans only. */

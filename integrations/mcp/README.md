@@ -124,6 +124,19 @@ printf '%s\n' \
 
 A refused operation is a tool result with `isError: true` and a sentence that names the program's error (`DepositCapExceeded (6037, stipend_pool): the bank holds at most 10,000 USDG in total...`), never a protocol error; the model can read it and change course. Its `structuredContent` carries the same stable code the local API uses: `{"error": {"code": "cap_total", "retryable": false, "message": "..."}}`.
 
+## Private reputation: `h081_prove_reputation` in one call
+
+`h081_prove_reputation {"audience": "acme-desk", "nonce": "0x1f2e", "minLoans": 3, "minVolume": "500"}` proves,
+locally, that this agent repaid at least 3 attested loans totalling at least 500 USDG, without revealing which loans,
+when, to whom or under which keys. It returns the `h081-rep:` code, an `h081-rep-sig:` presentation (hand it over only
+when presenting) and the `audience` / `nonce` it answers. The verifier checks it with `h081_verify_reputation {"code":
+"...", "audience": "acme-desk", "nonce": "0x1f2e", "presentation": "..."}`, or answers a request code
+(`h081_reputation_request` gives one; the agent then passes `{"request": "h081-rep-ask:..."}`). `minVolume` and
+`monthFloor` are decimal USDG; `minVolumeUsdg` / `monthFloorUsdg` are accepted as aliases. `h081_reputation_status`
+shows what counts, what waits for an attest and what never counts (backed and slashed loans); `h081_reputation_attest`
+hands repaid loans to the relayer's queue. A proof is a lower bound on repaid loans and says nothing about defaults.
+Beta: single-party trusted setup; not deployed on mainnet yet.
+
 ## Loans: what `h081_loan_borrow` is and is not
 
 stream_loan has no offer book and no matching. A loan starts with a **lender** who opens a slot and hands the borrower an `h081-loan-terms:` code (the site makes one under Loans > Lend; it carries the slot, the pledge share in basis points and the lender's viewing key). The agent then:

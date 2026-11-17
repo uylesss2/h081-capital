@@ -111,11 +111,6 @@ const obj = (properties: Json, required: string[] = [], description?: string): J
   type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false, ...(description ? { description } : {}),
 });
 
-/** A reputation body as the agent methods take it (USDG fields by their short names). */
-const repBody = (b: Json): Json => {
-  const { minVolumeUsdg, monthFloorUsdg, ...rest } = b as Record<string, unknown>;
-  return { ...rest, ...(minVolumeUsdg !== undefined ? { minVolume: minVolumeUsdg } : {}), ...(monthFloorUsdg !== undefined ? { monthFloor: monthFloorUsdg } : {}) } as Json;
-};
 
 const fresh = (q: URLSearchParams) => { const f = q.get('fresh'); return f === '1' || f === 'true'; };
 
@@ -318,7 +313,7 @@ export const ROUTES: RouteDef[] = [
     result: '{code, audience, nonce, expiresAt, thresholds, note}',
     handle: async (c) => {
       only(c.body, Object.keys(JSON_SCHEMA.h081_reputation_request.properties as Json));
-      return done(await c.h.reputationRequest(repBody(c.body) as never));
+      return done(await c.h.reputationRequest(c.body as never));
     },
   },
   {
@@ -328,7 +323,7 @@ export const ROUTES: RouteDef[] = [
     result: '{code, presentation?, presNullifier, expiresAt, thresholds, counted, binding, setup, statement, next}',
     handle: async (c) => {
       only(c.body, Object.keys(JSON_SCHEMA.h081_prove_reputation.properties as Json));
-      return done(await c.h.proveReputation(repBody(c.body) as never));
+      return done(await c.h.proveReputation(c.body as never));
     },
   },
   {

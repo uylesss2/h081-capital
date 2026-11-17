@@ -1,6 +1,10 @@
 // rep_registry on a local validator (npm run test:solana:rep: rpc 8899, fixtures from test/solana/rep-fixtures.ts).
 // Attest rules, the event log and root rebuild, then proofs made with the DEV reputation setup (build/circuits) verified
-// off-chain and by verify_reputation on chain. Nothing here talks to a public cluster.
+// off-chain and by verify_reputation on chain. Backed loans (pledge_bps 0, a Subrogation naming a Backing) are refused
+// on chain and named "backed", never "slashed", by every reader. The bank's own flow runs against the validator too:
+// borrower status and the relayer queue, then a lender close through stream_loan's real close_slot (the program built
+// from this worktree) that attests first; then the one-call prove and an on-chain verify. Nothing here talks to a
+// public cluster.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as snarkjs from 'snarkjs';
@@ -13,13 +17,15 @@ import { MerkleTree } from '../../src/merkle.js';
 import { Prover } from '../../src/prover.js';
 import { NO_REQUIREMENT, REP_LEVELS, randomNonce, reputationInput, selectLoans, type RepPublic } from '../../src/reputation.js';
 import { encodeProof, fieldOf } from '../../src/solana/field.js';
-import { LOCALNET_LOAN_PROGRAM_ID, slotPda } from '../../src/solana/lender.js';
+import { LOCALNET_LOAN_PROGRAM_ID, closedSlotPda, decodeSlot, readSubrogation, slotPda } from '../../src/solana/lender.js';
 import {
-  LOCALNET_REP_PROGRAM_ID, REP_ERROR_NAME, attestIx, fetchRepLeaves, fetchRepTree, isAttested, isKnownRepRootIn, myRepLoans,
-  repBitsPda, repInitializeIx, snapshotOf, verifyReputationIx,
+  LOCALNET_REP_PROGRAM_ID, REP_ERROR_NAME, attestIx, fetchRepLeaves, fetchRepTree, isAttested, isBackedSubrogation, isKnownRepRootIn, myRepLoans,
+  repBitsPda, repBlockOf, repInitializeIx, snapshotOf, verifyReputationIx,
 } from '../../src/solana/reputation.js';
+import { H081Bank } from '../../integrations/core/bank.js';
+import { configFromEnv } from '../../integrations/core/constants.js';
 import { LOCALNET_UPGRADE_AUTHORITY } from './config-authority.js';
-import { CLOSED_REF, MASTER_A, MASTER_B, OTHER_MINT, U, USDG, fixtureLoans } from './rep-fixtures.js';
+import { CLOSED_REF, LENDER_K, MASTER_A, MASTER_B, MASTER_C, OTHER_MINT, U, USDG, fixtureLoans } from './rep-fixtures.js';
 import { RepRelayer } from '../../relayer/rep.js';
 import { RateLimiter } from '../../relayer/ratelimit.js';
 import { createRelayerServer } from '../../relayer/server.js';
@@ -139,6 +145,24 @@ describe('rep_registry: attest', () => {
     await expect(fetchRepLeaves(connection, { snapshot: bad })).rejects.toThrow(/does not match/);
   });
 
+  it('backed loans (pledge_bps 0) are refused on chain and read as backed, never as slashed', async () => {
+    // rep_registry refuses any loan with a Subrogation (its error is named Slashed, 6010); a backed loan has one from funding
+    await expect(attest(20n)).rejects.toThrow(/Slashed/);
+    await expect(attest(22n)).rejects.toThrow(/Slashed/);
+    const slot = async (ref: bigint) => decodeSlot((await connection.getAccountInfo(slotPda(ref, LOCALNET_LOAN_PROGRAM_ID)))!.data);
+    // 20: its Subrogation names a live Backing; 22: the Backing is gone, the slot alone (pledge_bps 0) still says backed
+    expect(await isBackedSubrogation(connection, (await readSubrogation(connection, 20n))!)).toBe(true);
+    expect(await isBackedSubrogation(connection, (await readSubrogation(connection, 22n))!)).toBe(false);
+    expect(await repBlockOf(connection, await slot(20n))).toBe('backed');
+    expect(await repBlockOf(connection, await slot(22n))).toBe('backed');
+    // a real slash stays a slash; a clean repaid loan has no block
+    expect(await isBackedSubrogation(connection, (await readSubrogation(connection, 7n))!)).toBe(false);
+    expect(await repBlockOf(connection, await slot(7n))).toBe('slashed');
+    expect(await repBlockOf(connection, await slot(14n))).toBeUndefined();
+    expect(await repBlockOf(connection, await slot(10n))).toBe('no_agent_key');
+    for (const r of [20n, 22n]) expect(await isAttested(connection, r)).toBe(false);
+  });
+
   it("finds each master's own loans by its loan keys only", async () => {
     const { events } = await fetchRepLeaves(connection);
     const a = myRepLoans(events, MASTER_A);
@@ -209,6 +233,84 @@ describe('rep_registry: verify_reputation (dev setup keys)', () => {
   });
 });
 
+describe('bank on the validator: borrower status and the relayer queue, a lender close that attests first, the one-call prove (rpc 8899)', () => {
+  it('C: status lists pending and never-counting loans; the queue and the sweep attest 23; lendClose attests 24 before close_slot erases its key; prove({audience, nonce, minLoans, minVolume}) verifies on chain', async () => {
+    const loanProgram = await connection.getAccountInfo(LOCALNET_LOAN_PROGRAM_ID);
+    expect(loanProgram?.executable, 'stream_loan is not loaded on 8899: node scripts/solana-rep-localnet.mjs loan-build, then restart').toBe(true);
+    const hot = Keypair.generate();
+    await fund(hot.publicKey, 2);
+    await fund(LENDER_K.publicKey, 2);
+    // a relayer whose floor (25 USDG) leaves 14 and 15 for the relayer test below, and refuses 24 (15 USDG)
+    const rep = new RepRelayer({ connection, payer: hot, repProgramId: LOCALNET_REP_PROGRAM_ID, loanProgramId: LOCALNET_LOAN_PROGRAM_ID, minPrincipal: 25n * U, cacheMs: 0 });
+    const server = createRelayerServer({ solana: { info: () => ({}), relay: async () => ({}) }, limiter: new RateLimiter({ perMinute: 120, burst: 30 }), rep });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const config = configFromEnv({
+      H081_CLUSTER: 'localnet', H081_RPC_URL: RPC, H081_USDG_MINT: USDG.toBase58(), H081_REP_DEV_SETUP: '1', H081_RELAYER_URL: url,
+      H081_CIRCUITS_DIR: resolve(import.meta.dirname, '..', '..', 'build', 'circuits'), H081_EVENTS_SEED_URL: 'off',
+    });
+    const open = async (signer: Keypair, accountSk: bigint) => H081Bank.open({ config, signer, accountSk, connection, prover, cacheDir: null, skipClusterCheck: true });
+    try {
+      const borrower = await open(Keypair.generate(), MASTER_C);
+      // 1. what counts: nothing attested yet; 23 and 24 pending; 25 (slashed, then repaid) never counts and is not "pending"
+      const s0 = await borrower.reputationStatus();
+      expect(s0.attested.count).toBe(0);
+      expect(s0.pending.map((p) => p.loanRef).sort()).toEqual(['23', '24']);
+      expect(s0.never).toEqual([{ loanRef: '25', principal: '30', reason: 'slashed' }]);
+      expect(s0.warnings.join(' ')).toMatch(/can never count: slashed/);
+      // 2. the plan names only what can count; the borrower posts to the relayer queue (202), nothing is sent then
+      const plan = await borrower.reputationAttest() as { plan: { loans: string[] } };
+      expect([...plan.plan.loans].sort()).toEqual(['23', '24']);
+      const sent = await borrower.reputationAttest({ confirm: true }) as { queued: string[]; failed: Array<{ loanRef: string; error: string }> };
+      expect(sent.queued).toEqual(['23']);
+      expect(sent.failed).toEqual([{ loanRef: '24', error: expect.stringMatching(/at least 25000000 base units/) }]);
+      expect(await isAttested(connection, 23n)).toBe(false);
+      // 3. the sweep attests 23 from the hot wallet; it skips 25 (slashed) and never considers 20/22 (backed)
+      const swept = await rep.sweep();
+      expect(swept.attested).toEqual(['23']);
+      expect(swept.skipped).toEqual([{ loanRef: '25', reason: 'slashed' }]);
+      expect(swept.failed).toEqual([]);
+      const tx = await connection.getTransaction(swept.signatures[0], { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      expect(tx!.transaction.message.staticAccountKeys[0].equals(hot.publicKey)).toBe(true);
+      // 4. the lender closes 24: the bank attests it from the lender wallet first, then stream_loan close_slot runs
+      const lender = await open(LENDER_K, 1n);
+      expect(await lender.lendClose({ loanRef: 24n })).toMatchObject({ sent: false });
+      const closed = await lender.lendClose({ loanRef: 24n, confirm: true }) as { sent: true; signatures: string[] };
+      expect(closed.signatures).toHaveLength(2);
+      expect(await isAttested(connection, 24n)).toBe(true);
+      expect(await connection.getAccountInfo(slotPda(24n, LOCALNET_LOAN_PROGRAM_ID))).toBeNull(); // the slot (and its agent key) is gone
+      expect(await connection.getAccountInfo(closedSlotPda(24n, LOCALNET_LOAN_PROGRAM_ID))).not.toBeNull(); // the ClosedSlot receipt
+      const first = await connection.getTransaction(closed.signatures[0], { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+      expect(first!.transaction.message.staticAccountKeys.some((k) => k.equals(LOCALNET_REP_PROGRAM_ID))).toBe(true);
+      // a lender closing a backed or slashed loan sends no attest for it (none could land): nothing to test on chain
+      // beyond the refusal above; the unit tests check that attestBeforeClose returns before sending.
+      // 5. the leaf outlived the close: both loans count; 25 still never does
+      const s1 = await borrower.reputationStatus();
+      expect(s1.attested).toMatchObject({ count: 2, volume: '45', lenders: 2 });
+      expect(s1.pending).toEqual([]);
+      expect(s1.never.map((x) => x.loanRef)).toEqual(['25']);
+      // 6. the one-call prove, with the verifier's own nonce, checked by a verifier with { audience, nonce } and on chain
+      const proved = await borrower.proveReputation({ audience: 'acme-desk', minLoans: 2, minVolume: '25', nonce: '0x1234abcd' });
+      expect(BigInt(proved.nonce)).toBe(0x1234abcdn);
+      expect(proved.counted.loans).toBe(2);
+      const deskKey = Keypair.generate();
+      const desk = await open(deskKey, 7n);
+      // a fresh verifier wallet with no SOL cannot pay for the simulation: said as such, not as a refusal of the proof
+      const unfunded = await desk.verifyReputation(proved.code, { audience: 'acme-desk', nonce: '0x1234abcd', presentation: proved.presentation, onChain: true });
+      expect(unfunded).toMatchObject({ ok: false, onChain: { ok: false, ran: false } });
+      expect(unfunded.reason).toMatch(/could not run: .*has no SOL.*passed every off-chain check/);
+      await fund(deskKey.publicKey, 1);
+      const ok = await desk.verifyReputation(proved.code, { audience: 'acme-desk', nonce: '0x1234abcd', presentation: proved.presentation, onChain: true });
+      expect(ok.reason).toBeUndefined();
+      expect(ok).toMatchObject({ ok: true, presenter: 'signed-session-key', lowerBoundOnly: true, onChain: { ok: true } });
+      expect((await desk.verifyReputation(proved.code, { audience: 'acme-desk', nonce: '0x1234abce', presentation: proved.presentation })).ok).toBe(false);
+      await expect(borrower.proveReputation({ audience: 'acme-desk', minLoans: 3 })).rejects.toThrow(/minLoans/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }, 600_000);
+});
+
 describe('relayer: attest for borrowers, the sweep, and the leaf snapshot (rpc 8899)', () => {
   it('queues an attest request (nothing sent then), refuses below its floor, sweeps queued and unasked loans together from its own wallet, and serves a leaf list clients accept', async () => {
     const hot = Keypair.generate();
@@ -227,11 +329,18 @@ describe('relayer: attest for borrowers, the sweep, and the leaf snapshot (rpc 8
       expect(await isAttested(connection, 14n)).toBe(false);
       expect((await j(post('16'))).error.code).toBe('below_floor');
       expect((await j(post('5'))).error.code).toBe('not_funded');
+      // never queued: a backed loan (named for what it is, not a slash) and a slashed one
+      expect((await j(post('20'))).error).toMatchObject({ code: 'backed', message: expect.stringMatching(/backer's fee or recovery, not a slash/) });
+      expect((await j(post('22'))).error.code).toBe('backed');
+      expect((await j(post('7'))).error.code).toBe('slashed');
       expect((await j(post('11'))).error.code).toBe('no_slot');
       expect((await post('x')).status).toBe(400);
       // the sweep sends 14 (asked for) and 15 (20 USDG, nobody asked) together in loanRef order, and skips 16 (below the floor)
       const swept = await rep.sweep();
       expect(swept.attested).toEqual(['14', '15']);
+      // slashed 7 and 25 are skipped (never sent, never "failed"); backed 20 and 22 are not even candidates
+      expect(swept.skipped).toEqual([{ loanRef: '7', reason: 'slashed' }, { loanRef: '25', reason: 'slashed' }]);
+      expect(swept.failed).toEqual([]);
       // the borrower's wallet is nowhere in the transaction: only the relayer's hot wallet signs and pays
       const tx = await connection.getTransaction(swept.signatures[0], { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
       expect(tx!.transaction.message.staticAccountKeys[0].equals(hot.publicKey)).toBe(true);

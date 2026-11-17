@@ -10,7 +10,7 @@ export const reputationRequestAction = makeAction({
   name: 'H081_REPUTATION_REQUEST',
   similes: ['ask an agent to prove its repayment record', 'request a private credit score', 'challenge an agent for its loan history without seeing it'],
   examples: [[{
-    input: { audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '500', minSpanDays: 90 },
+    input: { audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 },
     output: { status: 'success', code: ASK, thresholds: { minLoans: 3, minVolume: '500', minSpanDays: 90 }, expiresAt: 1900000600 },
     explanation: 'Make a request code with a fresh challenge; the agent answers it with h081_prove_reputation and you check the answer with h081_verify_reputation and this request.',
   }]],
@@ -25,7 +25,7 @@ export const proveReputationAction = makeAction({
     output: { status: 'success', code: CODE, presentation: SIG, binding: 'session-key', counted: { loans: 4 } },
     explanation: 'Prove, locally, at least what the request asks over repaid loans under this account\'s loan keys, revealing none of them. Give the verifier the code, and the presentation only when presenting.',
   }, {
-    input: { audience: 'acme-desk', minLoans: 3, minVolumeUsdg: '700' },
+    input: { audience: 'acme-desk', minLoans: 3, minVolume: '700' },
     output: { status: 'error', message: 'ReputationUnreachable: minVolume needs 700000000, has 420000000. Attested so far: 4 loans, 420 volume, 2 lenders, 120 days, 4 periods. Nothing was proven.' },
     explanation: 'A claim the record does not support is refused and the message says what is short.',
   }]],

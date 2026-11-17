@@ -18,7 +18,8 @@ import { RelayError } from './errors.js';
 import { decodeSlot, slotPda } from '../src/solana/lender.js';
 import { sendLegacy } from '../src/solana/send.js';
 import {
-  attestIx, fetchRepEventsSince, fetchRepTree, isAttested, rebuildRepTree, snapshotOf, type RepAttestedEvent, type RepSnapshot,
+  REP_BLOCK_NOTE, attestIx, fetchRepEventsSince, fetchRepTree, isAttested, isBackedSlot, rebuildRepTree, repBlockOf, snapshotOf, type RepAttestedEvent,
+  type RepSnapshot,
 } from '../src/solana/reputation.js';
 
 export const DEFAULT_REP_MIN_PRINCIPAL = 10_000_000n;
@@ -133,6 +134,10 @@ export class RepRelayer {
     let s;
     try { s = decodeSlot(info.data); } catch { return new RelayError(400, 'bad_slot', `loan ${loanRef}'s slot could not be read`); }
     if (!s.funded) return new RelayError(409, 'not_funded', `loan ${loanRef} was never funded`);
+    // backed (pledge_bps 0: its Subrogation is the backer's fee, not a slash), slashed, or keyless: rep_registry would
+    // refuse it on chain, so it is refused here, named for what it is, and never queued
+    const block = await repBlockOf(this.opts.connection, s, this.opts.loanProgramId);
+    if (block) return new RelayError(409, block, `loan ${loanRef}: ${REP_BLOCK_NOTE[block]}`);
     if (s.repaid < s.principal) return new RelayError(409, 'not_repaid', `loan ${loanRef} is not fully repaid`);
     if (s.principal < this.minPrincipal) return new RelayError(402, 'below_floor', `the relayer attests loans of at least ${this.minPrincipal} base units; attest this one yourself (selfSign) or have its lender do it`);
     if (await isAttested(this.opts.connection, loanRef, this.opts.repProgramId)) return new RelayError(409, 'already_attested', `loan ${loanRef} is already attested`);
@@ -173,16 +178,21 @@ export class RepRelayer {
    * or not, in loanRef order (at most sweepMax per run). A loan whose lender closes it in the same transaction as its
    * last repayment is never seen here; H081 lenders attest before closing (bank.lendClose).
    */
-  async sweep(): Promise<{ attested: string[]; signatures: string[]; failed: Array<{ loanRef: string; error: string }>; candidates: number }> {
+  async sweep(): Promise<{
+    attested: string[]; signatures: string[]; failed: Array<{ loanRef: string; error: string }>;
+    /** repaid loans that can never count (backed, slashed): skipped every run, never sent */
+    skipped: Array<{ loanRef: string; reason: string }>; candidates: number;
+  }> {
     const accts = await this.opts.connection.getProgramAccounts(this.opts.loanProgramId, { commitment: 'confirmed', filters: [{ dataSize: 253 }] });
     const candidates = new Set<bigint>(this.queue);
     for (const a of accts) {
       let s;
       try { s = decodeSlot(a.account.data); } catch { continue; }
       if (!slotPda(s.loanRef, this.opts.loanProgramId).equals(a.pubkey)) continue;
-      if (s.funded && s.repaid >= s.principal && s.principal >= this.minPrincipal && s.agentPk !== 0n) candidates.add(s.loanRef);
+      // backed slots (pledge_bps 0, agent key 0) never count: not even a candidate
+      if (s.funded && !isBackedSlot(s) && s.repaid >= s.principal && s.principal >= this.minPrincipal && s.agentPk !== 0n) candidates.add(s.loanRef);
     }
-    const attested: string[] = [], signatures: string[] = [], failed: Array<{ loanRef: string; error: string }> = [];
+    const attested: string[] = [], signatures: string[] = [], failed: Array<{ loanRef: string; error: string }> = [], skipped: Array<{ loanRef: string; reason: string }> = [];
     for (const ref of [...candidates].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0))) {
       if (attested.length >= (this.opts.sweepMax ?? 50)) break;
       if (await isAttested(this.opts.connection, ref, this.opts.repProgramId)) { this.queue.delete(ref); continue; }
@@ -191,14 +201,17 @@ export class RepRelayer {
         attested.push(ref.toString());
         this.queue.delete(ref);
       } catch (e) {
+        if (e instanceof RelayError && BLOCKS.has(e.code)) { skipped.push({ loanRef: ref.toString(), reason: e.code }); this.queue.delete(ref); continue; }
         failed.push({ loanRef: ref.toString(), error: (e as Error).message });
         // a refusal will not change by waiting (closed, below the floor); a send failure is retried next sweep
         if (e instanceof RelayError) this.queue.delete(ref);
       }
     }
-    return { attested, signatures, failed, candidates: candidates.size };
+    return { attested, signatures, failed, skipped, candidates: candidates.size };
   }
 }
+
+const BLOCKS = new Set<string>(['backed', 'slashed', 'no_agent_key']);
 
 function loanRefOf(body: unknown): bigint {
   const raw = (body as { loanRef?: unknown } | undefined)?.loanRef;

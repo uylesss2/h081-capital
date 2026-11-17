@@ -12,7 +12,9 @@ else
 fi
 for i in $(seq 1 120); do
   if curl -s -m 2 -X POST -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://127.0.0.1:8899 | grep -q '"ok"'; then
-    echo "validator healthy on 8899"; exit 0
+    # 8899 may belong to another suite: only this suite's validator (matched by its ledger) counts
+    if pgrep -f "solana-test-validator.*--ledger $SOLANA_DIR/test-ledger/rep " >/dev/null; then echo "validator healthy on 8899"; exit 0; fi
+    echo "rpc 8899 answers but this suite's validator is not running (another validator holds the port)"; tail -30 "$LOG"; exit 1
   fi
   sleep 1
 done

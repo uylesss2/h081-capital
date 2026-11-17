@@ -15,7 +15,8 @@ import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { type Allowance, allowanceCommitment } from '../../src/crypto.js';
 import { minRemainingFor } from '../../src/inputs.js';
 import { fieldOf } from '../../src/solana/field.js';
-import { type SolLenderNote, closedSlotPda, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda } from '../../src/solana/lender.js';
+import { type SolLenderNote, closedSlotPda, maxPrincipal, payoutAudience, registryPda, slotInbox, slotPda, subrogationPda } from '../../src/solana/lender.js';
+import { LOCALNET_REP_PROGRAM_ID } from '../../src/solana/reputation.js';
 import type { StreamArgs } from '../../src/solana/program.js';
 import type { SolOwnedAllowance } from '../../src/solana/wallet.js';
 import { H081Bank } from '../../integrations/core/bank.js';
@@ -60,13 +61,13 @@ const NO_CIRCUITS = 'C:/nonexistent/h081-lend-circuits';
 
 type Conn = ReturnType<typeof fakeConnection>;
 
-async function openAgent(opts: { maxLend?: bigint; walletUsdg?: bigint; lamports?: number; circuits?: string; signer?: Keypair; cacheDir?: string } = {}) {
+async function openAgent(opts: { maxLend?: bigint; walletUsdg?: bigint; lamports?: number; circuits?: string; signer?: Keypair; cacheDir?: string; rep?: boolean; log?: (l: string) => void } = {}) {
   const signer = opts.signer ?? Keypair.generate();
   const conn = fakeConnection(signer, { now: NOW, walletUsdg: opts.walletUsdg ?? USD(500), lamports: opts.lamports });
   conn.accounts.set(registryPda(LOAN).toBase58(), { owner: LOAN, data: Buffer.concat([Buffer.alloc(8), u64(3n)]), executable: false, lamports: 1 });
   const bank = await H081Bank.open({
-    config: testConfig({ maxLend: opts.maxLend }), signer, accountSk: deriveAccountSk(signer),
-    connection: conn as unknown as Connection, prover: new FlatDirProver(opts.circuits ?? NO_CIRCUITS), cacheDir: opts.cacheDir ?? null,
+    config: testConfig({ maxLend: opts.maxLend, ...(opts.rep ? { repProgramId: LOCALNET_REP_PROGRAM_ID } : {}) }), signer, accountSk: deriveAccountSk(signer),
+    connection: conn as unknown as Connection, prover: new FlatDirProver(opts.circuits ?? NO_CIRCUITS), cacheDir: opts.cacheDir ?? null, log: opts.log,
   });
   vi.spyOn(bank.owner, 'sync').mockResolvedValue(undefined);
   vi.spyOn(bank.lender(), 'sync').mockResolvedValue(undefined);
@@ -552,4 +553,30 @@ describe('borrow picks a loan key the chain has not seen (private reputation)', 
     const file = readdirSync(cacheDir).find((f) => f.includes('loankeys'))!;
     expect(JSON.parse(readFileSync(join(cacheDir, file), 'utf8'))).toEqual({ keys: [0, 1, 3] });
   });
+});
+
+describe('lendClose never sends an attest that cannot land (backed and slashed loans)', () => {
+  const subrogation = (loanRef: bigint, safetyConfig: PublicKey) => {
+    const b = Buffer.alloc(97);
+    b.set(createHash('sha256').update('account:Subrogation').digest().subarray(0, 8), 0);
+    b.writeBigUInt64LE(loanRef, 8);
+    safetyConfig.toBuffer().copy(b, 16);
+    return b;
+  };
+
+  for (const kind of ['backed', 'slashed'] as const) {
+    it(`a repaid ${kind} loan closes without an attest attempt, and says why`, async () => {
+      const logs: string[] = [];
+      const ctx = await openAgent({ rep: true, log: (l) => logs.push(l) });
+      // backed: fund_backed leaves pledge_bps 0 (its Subrogation, the backer's fee, is not even read); slashed: a stream
+      // slot (pledge_bps > 0) with a Subrogation naming a safety config
+      putSlot([ctx.conn], slotData({ loanRef: 3n, lender: ctx.signer.publicKey, funded: true, settled: true, principal: USD(40), repaid: USD(40), pledgeBps: kind === 'backed' ? 0 : 4000 }));
+      if (kind === 'slashed') ctx.conn.accounts.set(subrogationPda(3n, LOAN).toBase58(), { owner: LOAN, data: subrogation(3n, Keypair.generate().publicKey), executable: false, lamports: 1 });
+      const close = vi.spyOn(ctx.bank.lender(), 'close').mockResolvedValue({ ...tx('sigClose'), refunded: 1n });
+      expect(await ctx.bank.lendClose({ loanRef: 3n, confirm: true })).toMatchObject({ sent: true, signatures: ['sigClose'] });
+      expect(close).toHaveBeenCalledOnce();
+      expect(logs).toContain(`loan #3 is not attested before close: ${kind}`);
+      expect(logs.some((l) => /attest before close skipped/.test(l))).toBe(false);
+    });
+  }
 });

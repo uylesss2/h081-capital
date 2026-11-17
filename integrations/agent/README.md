@@ -110,6 +110,39 @@ On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for 
 | `h081 openapi` | Prints the OpenAPI document. |
 | `h081 mcp` | The MCP server on stdio. |
 
+### Private reputation in one call
+
+A lender or desk (the verifier) wants proof of a repayment record; the agent (the prover) answers without revealing
+which loans, when, to whom, or under which keys. Proving is local (the account secret is in the witness; no service
+proves for you) and takes 3 to 15 s.
+
+```ts
+// prover: one call, to a named verifier, with the challenge (nonce) the verifier gave you
+const p = await agent.proveReputation({ audience: 'acme-desk', nonce: '0x1f2e', minLoans: 3, minVolume: '500' });
+// p.code ("h081-rep:"), p.presentation ("h081-rep-sig:", hand it over only when you present), p.audience, p.nonce
+
+// verifier: check it with its own name and the nonce it issued; accept each nonce once
+const r = await desk.verifyReputation(p.code, { audience: 'acme-desk', nonce: '0x1f2e', presentation: p.presentation });
+// r.ok, r.lowerBoundOnly === true, r.thresholds
+```
+
+- `minVolume` and `monthFloor` are decimal USDG (`"500"`); the first release's names `minVolumeUsdg` / `monthFloorUsdg`
+  still work (give one of each pair). The other thresholds: `minLenders`, `minSpanDays`, `minMonths`. They are rounded
+  DOWN to a public ladder when proving.
+- Without `nonce` the prover picks a fresh one and returns it; the verifier then has to trust that it never saw that
+  nonce before. A desk that wants a challenge it controls hands out a request code instead:
+  `desk.reputationRequest({ audience, minLoans, minVolume })` gives an `h081-rep-ask:` code, the agent answers
+  `agent.proveReputation({ request })`, and the desk checks with `verifyReputation(code, { request, presentation })`.
+- Same call elsewhere: CLI `h081 rep prove --audience acme-desk --nonce 0x1f2e --min-loans 3 --min-volume 500`; local API
+  `POST /v1/reputation/prove {"audience": "acme-desk", "nonce": "0x1f2e", "minLoans": 3, "minVolume": "500"}`; MCP tool
+  `h081_prove_reputation` and Agent Kit action `H081_PROVE_REPUTATION` with the same arguments.
+- `verifyReputation(…, { onChain: true })` also simulates rep_registry's on-chain check (read-only); the verifier's
+  wallet needs some SOL to pay for the simulation, and a wallet with none is told so (`onChain.ran: false`), never
+  reported as a refused proof.
+- What it says: at least that many fully repaid, attested loans under this account's loan keys. It says nothing about
+  defaults, and it is a pricing input, not a credit line. Backed loans (funded against a backer's stake) never count.
+  Beta: a single-party trusted setup, not deployed on mainnet yet.
+
 Global flags: `--json` (the API's envelope on stdout, logs on stderr), `--yes` (send it), `--home <dir>`, `--cluster mainnet-beta|localnet`, `--idempotency-key <k>` (default: a new random key per call). Exit codes: `0` ok, `1` error (with `--json`, stdout carries the error envelope), `2` bad usage.
 
 ## The local API
@@ -137,6 +170,9 @@ Global flags: `--json` (the API's envelope on stdout, logs on stderr), `--yes` (
 | `GET /v1/loans/lent[?loanRef=]` | This agent's loan slots |
 | `GET /v1/stake` / `POST /v1/stake` | `{action: stake\|request_unstake\|unstake, h081?, confirm?}` |
 | `POST /v1/codes/check` | `{code}` → `{kind, network, valid, reason?}` |
+| `POST /v1/reputation/prove` | `{audience, nonce?, minLoans?, minVolume?, …}` or `{request}` → `{code, presentation?, audience, nonce, …}` (local proof; sends nothing) |
+| `POST /v1/reputation/request` / `POST /v1/reputation/verify` | Verifier: make a request code; check a code against it (or against `{audience, nonce}`) |
+| `GET /v1/reputation` / `POST /v1/reputation/attest` | Prover: what counts, what is pending, what never counts; have the relayer queue repaid loans (`{confirm?}`) |
 | `GET /v1/events` | Server-sent events: `balance.changed`, `allowance.changed`, `op.completed`, `op.failed` |
 
 Amounts are decimal strings (`"usdg": "5.25"`); base units work too (`"amount": "5250000"`).
