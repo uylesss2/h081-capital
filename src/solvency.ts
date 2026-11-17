@@ -117,21 +117,77 @@ export function rootAge(roots: readonly bigint[], currentRootIndex: number, root
   return undefined;
 }
 
-export interface VaultCapView { mint: string; maxTotal: bigint; vaultBalance: bigint }
+export interface VaultCapView {
+  mint: string; maxTotal: bigint; vaultBalance: bigint;
+  /** the most the vault ever held, at any point of any transaction since it was created (vaultTxPeak over its history) */
+  peak: bigint;
+}
+
+const max = (...xs: bigint[]) => xs.reduce((m, x) => (x > m ? x : m), 0n);
 
 /**
- * The most base units any non-`usdg` vault could back: max over those vaults of max(cap.max_total, vault balance). A
- * vault never takes a deposit that would put it above its cap (ops.rs check_deposit), and notes of a mint are backed by
- * its vault, so a bound above this floor can only be held in `usdg`. 0n when there is no other vault.
+ * The most base units any non-`usdg` vault could back: max over those vaults of max(cap.max_total, balance, PEAK).
+ * Every unspent note of a mint is backed by its vault, so a note of remaining R was written while the vault held at
+ * least R. Notes are never removed from the tree (no nullifier in disclose), so a note written while the vault was
+ * large still proves after its cap is lowered and the vault drained: the vault's HISTORICAL peak bounds every note it
+ * ever backed; today's cap and balance alone do not. A bound above this floor can only be held in `usdg`. 0n when there
+ * is no other vault.
  */
 export function assetFloor(vaults: readonly VaultCapView[], usdg: string): bigint {
   let floor = 0n;
   for (const v of vaults) {
     if (v.mint === usdg) continue;
-    const m = v.maxTotal > v.vaultBalance ? v.maxTotal : v.vaultBalance;
+    const m = max(v.maxTotal, v.vaultBalance, v.peak);
     if (m > floor) floor = m;
   }
   return floor;
+}
+
+/** SPL Token and Token-2022: the programs whose instructions move a vault's tokens. */
+export const TOKEN_PROGRAM_IDS: readonly string[] = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
+
+/** One transaction of a vault's history, from a jsonParsed getTransaction (keys include lookup-table ones). */
+export interface VaultTx {
+  keys: readonly string[];
+  pre: ReadonlyArray<{ accountIndex: number; amount: string }>;
+  post: ReadonlyArray<{ accountIndex: number; amount: string }>;
+  /** top-level and inner instructions: parsed ({type, info}) or raw (accounts) */
+  ixs: ReadonlyArray<{ programId: string; parsed?: unknown; accounts?: readonly string[] }>;
+}
+
+/** Token instructions that never credit the account they name. */
+const NO_INFLOW = new Set([
+  'initializeAccount', 'initializeAccount2', 'initializeAccount3', 'initializeImmutableOwner', 'getAccountDataSize', 'burn', 'burnChecked', 'approve',
+  'approveChecked', 'revoke', 'setAuthority', 'closeAccount', 'freezeAccount', 'thawAccount', 'syncNative', 'reallocate',
+]);
+
+/**
+ * The most `vault` held at any point inside one transaction: max(before, after, before + every inflow). Inflows are
+ * counted without the outflows, so a deposit taken out again in the same transaction still counts. `createdHere`: the
+ * vault had no token balance before (the transaction that created it). Throws on what it cannot read (an unparsed
+ * token instruction naming the vault, a token instruction type it does not know): the caller fails closed.
+ */
+export function vaultTxPeak(vault: string, tx: VaultTx): { peak: bigint; createdHere: boolean } {
+  const i = tx.keys.indexOf(vault);
+  if (i < 0) throw new Error(`a transaction in the vault's history does not name the vault ${vault}`);
+  const amt = (xs: VaultTx['pre']) => { const b = xs.find((x) => x.accountIndex === i); return b ? BigInt(b.amount) : undefined; };
+  const before = amt(tx.pre), after = amt(tx.post) ?? 0n;
+  let inflow = 0n;
+  for (const ix of tx.ixs) {
+    if (!TOKEN_PROGRAM_IDS.includes(ix.programId)) continue;
+    const p = ix.parsed as { type?: string; info?: Record<string, unknown> } | undefined;
+    if (!p || typeof p !== 'object' || !p.info) {
+      if ((ix.accounts ?? []).includes(vault)) throw new Error(`a token instruction naming the vault ${vault} could not be read`);
+      continue;
+    }
+    const info = p.info;
+    const units = (o: Record<string, unknown>) => BigInt(String(o.amount ?? (o.tokenAmount as { amount?: string } | undefined)?.amount ?? 'x'));
+    if ((p.type === 'transfer' || p.type === 'transferChecked') && info.destination === vault) inflow += units(info);
+    else if ((p.type === 'mintTo' || p.type === 'mintToChecked') && info.account === vault) inflow += units(info);
+    else if (p.type === 'transfer' || p.type === 'transferChecked' || p.type === 'mintTo' || p.type === 'mintToChecked' || NO_INFLOW.has(String(p.type))) continue;
+    else if (Object.values(info).includes(vault)) throw new Error(`a token instruction "${p.type}" names the vault ${vault}; its effect on the balance is not known here`);
+  }
+  return { peak: max(before ?? 0n, after, (before ?? 0n) + inflow), createdHere: before === undefined };
 }
 
 /** The one-sentence statement a valid presentation supports (spec section 6). */

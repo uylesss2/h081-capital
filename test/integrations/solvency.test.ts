@@ -16,7 +16,7 @@ import { encodeProof, fieldOf } from '../../src/solana/field.js';
 import { poolPda, vaultPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE, encodeDiscloseArgs } from '../../src/solana/program.js';
 import {
-  SOLVENCY_DOES_NOT_SAY, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience, solvencyStatement,
+  SOLVENCY_DOES_NOT_SAY, type VaultTx, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience, solvencyStatement, vaultTxPeak,
 } from '../../src/solvency.js';
 import {
   type CodeContext, CodeError, SOLVENCY_ASK_PREFIX, SOLVENCY_PREFIX, decodeSolvencyCode, decodeSolvencyRequest, encodeAddressCode, encodeSolvencyCode,
@@ -188,10 +188,31 @@ describe('root recency and the asset floor', () => {
     expect(rootAge(roots, 2, 0n)).toBeUndefined();
   });
 
-  it('is the largest of cap and balance over non-USDG vaults', () => {
+  it('is the largest of cap, balance and HISTORICAL peak over non-USDG vaults', () => {
     const usdg = MAINNET.usdg.mint;
-    expect(assetFloor([{ mint: usdg, maxTotal: 10n ** 12n, vaultBalance: 5n }], usdg)).toBe(0n);
-    expect(assetFloor([{ mint: 'A', maxTotal: 10_000n * U, vaultBalance: 3n }, { mint: 'B', maxTotal: 0n, vaultBalance: 12_000n * U }], usdg)).toBe(12_000n * U);
+    expect(assetFloor([{ mint: usdg, maxTotal: 10n ** 12n, vaultBalance: 5n, peak: 10n ** 13n }], usdg)).toBe(0n);
+    expect(assetFloor([{ mint: 'A', maxTotal: 10_000n * U, vaultBalance: 3n, peak: 3n }, { mint: 'B', maxTotal: 0n, vaultBalance: 12_000n * U, peak: 12_000n * U }], usdg)).toBe(12_000n * U);
+    // capped at 0 and drained today, but it once held 10,000: a note made then is still a leaf, so it still counts
+    expect(assetFloor([{ mint: 'C', maxTotal: 0n, vaultBalance: 0n, peak: 10_000n * U }], usdg)).toBe(10_000n * U);
+  });
+
+  it('a vault transaction\'s peak is its balance before plus every inflow (a deposit withdrawn in the same transaction counts)', () => {
+    const V = 'Vau1t1111111111111111111111111111111111111';
+    const SPL = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+    const tx = (pre: bigint | null, post: bigint, ixs: VaultTx['ixs']): VaultTx => ({
+      keys: ['payer', V], pre: pre === null ? [] : [{ accountIndex: 1, amount: pre.toString() }], post: [{ accountIndex: 1, amount: post.toString() }], ixs,
+    });
+    const tIn = (a: bigint) => ({ programId: SPL, parsed: { type: 'transferChecked', info: { source: 'x', destination: V, tokenAmount: { amount: a.toString() } } } });
+    const tOut = (a: bigint) => ({ programId: SPL, parsed: { type: 'transferChecked', info: { source: V, destination: 'x', tokenAmount: { amount: a.toString() } } } });
+    expect(vaultTxPeak(V, tx(null, 0n, [{ programId: SPL, parsed: { type: 'initializeAccount3', info: { account: V, mint: 'M', owner: 'A' } } }]))).toEqual({ peak: 0n, createdHere: true });
+    expect(vaultTxPeak(V, tx(5n, 12n, [tIn(7n)]))).toEqual({ peak: 12n, createdHere: false });
+    // in and out again inside one transaction: the balance after is 5, the peak inside was 5 + 1000
+    expect(vaultTxPeak(V, tx(5n, 5n, [tIn(1000n), tOut(1000n)]))).toEqual({ peak: 1005n, createdHere: false });
+    expect(vaultTxPeak(V, tx(5n, 5n, [{ programId: SPL, parsed: { type: 'mintTo', info: { account: V, amount: '40' } } }])).peak).toBe(45n);
+    // what it cannot read, it refuses (the caller fails closed)
+    expect(() => vaultTxPeak(V, tx(5n, 5n, [{ programId: SPL, accounts: ['x', V] }]))).toThrow(/could not be read/);
+    expect(() => vaultTxPeak(V, tx(5n, 5n, [{ programId: SPL, parsed: { type: 'confidentialTransfer', info: { destination: V } } }]))).toThrow(/confidentialTransfer/);
+    expect(() => vaultTxPeak(V, { keys: ['payer'], pre: [], post: [], ixs: [] })).toThrow(/does not name the vault/);
   });
 });
 
@@ -220,10 +241,47 @@ function assetCapData(mint: PublicKey, maxTotal: bigint): Buffer {
 }
 function tokenAccount(amount: bigint): Buffer { const b = Buffer.alloc(165); b.writeBigUInt64LE(amount, 64); return b; }
 
-interface Chain { roots: bigint[]; cur: number; caps: Array<{ mint: PublicKey; maxTotal: bigint; balance: bigint }>; capsFail?: boolean; lamports?: number }
+/** One transaction in a vault's history: its balance before (null: the vault did not exist yet), after, and inflows. */
+interface HistTx { pre: bigint | null; post: bigint; inflows?: bigint[] }
+interface Chain {
+  roots: bigint[]; cur: number; caps: Array<{ mint: PublicKey; maxTotal: bigint; balance: bigint; history?: HistTx[] }>; capsFail?: boolean; lamports?: number;
+  /** getSignaturesForAddress / getParsedTransactions fail */
+  historyFail?: boolean;
+}
+
+const SPL_TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+/** A jsonParsed transaction touching `vault` (account index 1), as getParsedTransactions returns it. */
+function parsedVaultTx(vault: PublicKey, t: HistTx) {
+  return {
+    slot: 1, blockTime: null,
+    transaction: { signatures: ['s'], message: { accountKeys: [{ pubkey: Keypair.generate().publicKey, signer: true, writable: true }, { pubkey: vault, signer: false, writable: true }], instructions: [], recentBlockhash: '' } },
+    meta: {
+      err: null, fee: 5000, preBalances: [], postBalances: [],
+      preTokenBalances: t.pre === null ? [] : [{ accountIndex: 1, mint: 'M', uiTokenAmount: { amount: t.pre.toString(), decimals: 6, uiAmount: null } }],
+      postTokenBalances: [{ accountIndex: 1, mint: 'M', uiTokenAmount: { amount: t.post.toString(), decimals: 6, uiAmount: null } }],
+      innerInstructions: [{ index: 0, instructions: (t.inflows ?? []).map((a) => ({ program: 'spl-token', programId: new PublicKey(SPL_TOKEN), parsed: { type: 'transferChecked', info: { source: 'x', destination: vault.toBase58(), tokenAmount: { amount: a.toString() } } } })) }],
+    },
+  };
+}
 
 function host(signer: Keypair, chain: Chain, over: Partial<SolvencyHost> = {}): SolvencyHost {
+  // each vault's history, oldest first; by default one transaction: the creation, ending at today's balance
+  const hist = (vault: PublicKey) => {
+    const c = chain.caps.find((x) => vaultPda(POOL, x.mint).equals(vault));
+    return c ? (c.history ?? [{ pre: null, post: c.balance }]) : [];
+  };
   const connection = {
+    getSignaturesForAddress: vi.fn(async (vault: PublicKey, o: { until?: string } = {}) => {
+      if (chain.historyFail) throw new Error('history unavailable');
+      const sigs = hist(vault).map((_, i) => ({ signature: `${vault.toBase58()}:${i}`, slot: i, err: null, memo: null, blockTime: null })).reverse();
+      const stop = o.until ? sigs.findIndex((s) => s.signature === o.until) : -1;
+      return stop >= 0 ? sigs.slice(0, stop) : sigs;
+    }),
+    getParsedTransactions: vi.fn(async (sigs: string[]) => sigs.map((s) => {
+      const [v, i] = s.split(':');
+      const vault = new PublicKey(v);
+      return parsedVaultTx(vault, hist(vault)[Number(i)]);
+    })),
     getAccountInfo: vi.fn(async (k: PublicKey) => (k.equals(poolPda(POOL)) ? { data: poolAccount(chain.roots, chain.cur), owner: POOL, lamports: 1, executable: false } : null)),
     getProgramAccounts: vi.fn(async () => {
       if (chain.capsFail) throw new Error('429 Too Many Requests');
@@ -357,9 +415,26 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     expect(unbound.statement).toMatch(/SOME asset/);
     const allowed = await v(present(), { allowUnboundAsset: true }, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, junk] }));
     expect(allowed).toMatchObject({ ok: true, assetSound: false });
-    // a junk vault capped at 0 but still holding more than the bound counts by its balance
-    const drained = { ...junk, maxTotal: 0n, balance: 2000n * U };
-    expect(await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, drained] }))).toMatchObject({ ok: true, assetSound: true, assetFloor: 2000n * U });
+    // a junk vault capped at 0 that never held more than 2,000 counts by that: a 2,500 claim is sound
+    const small = { ...junk, maxTotal: 0n, balance: 2000n * U };
+    expect(await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, small] }))).toMatchObject({ ok: true, assetSound: true, assetFloor: 2000n * U });
+    // capped at 0 and drained TODAY, but it once held 3,000: a junk note made then is still a leaf and still proves,
+    // so the floor is the historical peak, never today's cap and balance
+    const drained = { ...junk, maxTotal: 0n, balance: 0n, history: [{ pre: null, post: 0n }, { pre: 0n, post: 3000n * U, inflows: [3000n * U] }, { pre: 3000n * U, post: 0n }] };
+    expect(await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, drained] }))).toMatchObject({ ok: false, reason: 'asset_not_bound', assetFloor: 3000n * U });
+    // in and out inside ONE transaction: the balances around it show nothing, the inflow does
+    const flash = { ...junk, maxTotal: 0n, balance: 0n, history: [{ pre: null, post: 0n }, { pre: 0n, post: 0n, inflows: [2600n * U] }] };
+    expect(await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, flash] }))).toMatchObject({ ok: false, reason: 'asset_not_bound', assetFloor: 2600n * U });
+    // a history that does not reach the vault's creation (a pruned RPC), or no history at all: fails closed
+    const pruned = { ...junk, maxTotal: 0n, balance: 0n, history: [{ pre: 3000n * U, post: 0n }] };
+    expect((await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, pruned] }))).reason).toBe('asset_floor_unavailable');
+    const none = { ...junk, maxTotal: 0n, balance: 0n, history: [] };
+    expect((await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, none] }))).reason).toBe('asset_floor_unavailable');
+    expect((await v(present(), {}, host(Keypair.generate(), { ...chainOk(), caps: [...chainOk().caps, small], historyFail: true }))).reason).toBe('asset_floor_unavailable');
+    // USDG's own vault history is never read
+    const hu = host(Keypair.generate(), chainOk());
+    expect(await v(present(), {}, hu)).toMatchObject({ ok: true });
+    expect((hu.connection as unknown as { getSignaturesForAddress: { mock: { calls: unknown[] } } }).getSignaturesForAddress.mock.calls).toHaveLength(0);
     // an RPC that refuses getProgramAccounts fails closed
     expect((await v(present(), {}, host(Keypair.generate(), { ...chainOk(), capsFail: true }))).reason).toBe('asset_floor_unavailable');
   });

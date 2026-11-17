@@ -98,12 +98,23 @@ share routing on reclaim. Not chosen; listed as owner decision D6.
 ### 2.1 Asset soundness (off chain, closes fact 1 without a circuit)
 
 Every outstanding note of mint M is backed by M's vault, and a vault can never take deposits above its `AssetCap.max_total`
-(`ops.rs`: `require!(after <= cap.max_total)`; a cap of 0 blocks deposits). So at verification:
+(`ops.rs`: `require!(after <= cap.max_total)`; a cap of 0 blocks deposits). A note of remaining R was therefore
+written while M's vault held at least R. Notes are never removed from the tree (fact 3), so a note written while the
+vault was large keeps proving after the cap is lowered and the vault drained: TODAY's cap and balance do not bound it,
+the vault's HISTORICAL peak does. So at verification:
 
 ```
-assetFloor = max over every AssetCap account whose mint is not USDG of max(cap.max_total, vault balance)
+peak(M)    = the most M's vault held at any point of any transaction since its creation
+             (per transaction: max(before, after, before + every inflow), so a deposit withdrawn in the same
+             transaction counts; read from getSignaturesForAddress + jsonParsed getTransaction, remembered per vault
+             in the cache dir so later checks read only new transactions)
+assetFloor = max over every AssetCap account whose mint is not USDG of max(cap.max_total, vault balance, peak(M))
 assetSound = bound > assetFloor
 ```
+
+The history read fails closed (`asset_floor_unavailable`): when the RPC returns no history, when the oldest
+transaction is not the vault's creation (a pruned RPC), when a token instruction naming the vault cannot be read, or
+when more than 10,000 new transactions would have to be read.
 
 `verifySolvency` reads the AssetCap accounts (`getProgramAccounts` with a size filter; no instruction closes an AssetCap,
 only buffers close, so a vault made for an attack stays visible) and their vaults, and returns
@@ -113,9 +124,8 @@ only buffers close, so a vault made for an attack stays visible) and their vault
 Owner action (config authority, Squads; NOT a program change, not done here): `set_default_caps(0, 0)` so a new
 vault takes no deposits until the owner sets its caps, and `set_asset_caps(m, 0, 0)` for any non-USDG vault that should
 not count. Until then any vault created by anyone sets the floor to 10,000 USDG-equivalent base units, and every
-claim at or below it is reported `assetSound: false`. Residual: a mint whose cap the owner LOWERED after deposits and
-whose vault was drained after the proof's root can undercount; the root-age rule (3.2) keeps that window to a few
-operations.
+claim at or below it is reported `assetSound: false`. Caps of 0 stop a vault from backing NEW notes; they never
+lower the floor below what the vault already held (its peak), because the notes it backed then are still provable.
 
 ### 2.2 Code kinds (v2 frame, `integrations/core/codes.ts`; letters and digits, checksum, kind, network tag)
 
@@ -246,7 +256,7 @@ Localnet (`npm run test:solana:pool` style: `scripts/solana-localnet.mjs restart
 Says: "Someone who knows the figures of ONE allowance note that was written into the H081 pool at some point (it may
 since have been spent or reclaimed: the circuit checks no nullifier) proved that the note had at least `bound`
 remaining when it was written; the proof was made against a pool root `rootAge` operations old, which dates when the
-proof was made, not when the note was last unspent; the wallet `wallet` signed this presentation for this one request." With `assetSound: true`: no non-USDG vault could back that many units, so the
+proof was made, not when the note was last unspent; the wallet `wallet` signed this presentation for this one request." With `assetSound: true`: no non-USDG vault ever held that many units (its historical peak, 2.1), so the
 note is USDG.
 
 Does NOT say (every verifier surface prints this):
@@ -274,7 +284,8 @@ Does NOT say (every verifier surface prints this):
 ## 8. Owner decisions
 
 - D1 `set_default_caps(0, 0)` and review every existing non-USDG vault's caps (config authority, Squads). Without it
-  claims at or below 10,000 USDG are not asset-sound. Config only; no program upgrade.
+  claims at or below 10,000 USDG are not asset-sound. Config only; no program upgrade. It bounds the floor from now on;
+  a vault that already held X keeps the floor at X or above for good (its peak), whatever its caps become.
 - D2 code kind registry: 10/11 solvency; renumber backer (8/9 -> 12/13 proposed) or reputation before either merges.
 - D3 free relayer verify route (`POST /v1/solvency/verify`)? Default no (matches reputation).
 - D4 one reserve per account (default) or one per counterparty (unlinkable, a grant each).
@@ -306,8 +317,10 @@ code is `nonce_reused`; `pay` never picks the reserve; a larger request reclaims
 a released reserve's proof still verified one operation later and was `stale_root` three operations later with
 `maxRootAge: 2`, while a FRESH proof over the same released note at the current root verified `ok: true, rootAge 0`
 (fact 3: root recency dates the proof, not the note); a junk mint at the default caps (scaled to 10 units) made a valid proof that was reported
-`asset_not_bound` (and an honest USDG claim of the same size too), `set_asset_caps(junk, 0, 0)` plus the drained
-vault made the floor 0 again, and after `set_default_caps(0, 0)` a new vault refused a deposit.
+`asset_not_bound` (and an honest USDG claim of the same size too); after `set_asset_caps(junk, 0, 0)` and the
+vault drained, the ORIGINAL junk note re-proved at the current root is still `asset_not_bound` (floor = the vault's
+historical peak of 10 units), a 25-unit USDG claim is sound, and after `set_default_caps(0, 0)` a new vault refused a
+deposit (its empty history adds nothing to the floor).
 
 Decisions taken while building (not owner decisions; each is easy to change):
 

@@ -10,7 +10,8 @@
 //      a FRESH proof over the released note at the current root verifies (rootAge 0): disclose checks no nullifier, so
 //      root recency dates the proof, never the note (pinned so the docs cannot claim otherwise);
 //   6. a junk mint with the default caps backs a fake claim: assetSound false; after set_asset_caps(junk, 0, 0) and the
-//      vault drained, a claim at that size is asset-sound; after set_default_caps(0, 0) a new vault takes no deposit.
+//      vault drained, the ORIGINAL junk note re-proved at the current root is still asset_not_bound (the floor is the
+//      vault's historical peak), a claim above the peak is sound; after set_default_caps(0, 0) a new vault takes no deposit.
 import { writeFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
@@ -229,25 +230,41 @@ describe.skipIf(!LOCAL)('prove solvency on localnet (rpc 28899)', () => {
     expect(hp.selfCheck).toEqual({ ok: true, assetSound: false });
     expect(await verify(desk, hp.code, honest.code)).toMatchObject({ ok: false, reason: 'asset_not_bound' });
 
-    // the owner's fix for that vault: caps 0 (no deposit fits), and the vault drained (the attacker leaves)
+    // caps 0 and the vault drained do NOT fix it: the junk note stays a leaf (no nullifier), so the floor is the vault's
+    // historical peak, read from its transaction history, never today's cap and balance
     await send(connection, CONFIG_AUTH, [setAssetCapsIx(LOCALNET_POOL_PROGRAM_ID, CONFIG_AUTH.publicKey, junk, 0n, 0n)]);
     await jw.reclaim(note);
     await jw.sync();
     await jw.withdraw(junk, 10n * U, junkKey.publicKey);
     expect(await tokenBalance(vaultPda(LOCALNET_POOL_PROGRAM_ID, junk))).toBe(0n);
+    // the attacker re-proves over the ORIGINAL junk note at the current root, for a fresh request
+    const replay = ask(desk2, 10n);
+    const rq = decodeSolvencyRequest(desk2.codeContext, replay.code);
+    const rm = await jw.prove(note, 'remainingAtLeast', 10n * U, solvencyAudience(rq.digest, junkKey.publicKey.toBytes()));
+    const rargs = encodeDiscloseArgs(rm.args);
+    const rcode = encodeSolvencyCode(desk2.codeContext, {
+      requestDigest: rq.digest, proof: encodeProof(rm.proof.proof), args: rargs, wallet: junkKey.publicKey.toBytes(),
+      signature: ed25519.sign(presentationMessage(rq.digest, rargs), junkKey.secretKey.subarray(0, 32)),
+    });
+    expect(await verify(desk2, rcode, replay.code)).toMatchObject({ ok: false, reason: 'asset_not_bound', assetFloor: 10n * U, rootAge: 0 });
+    // an honest USDG claim at that size stays unsound too; one above the peak is sound
     const after = ask(desk2, 10n);
     const ap = await prove(after.code);
-    expect(await verify(desk2, ap.code, after.code)).toMatchObject({ ok: true, assetSound: true, assetFloor: 0n });
+    expect(await verify(desk2, ap.code, after.code)).toMatchObject({ ok: false, reason: 'asset_not_bound', assetFloor: 10n * U });
+    const above = ask(desk2, 25n);
+    const bp = await prove(above.code);
+    expect(await verify(desk2, bp.code, above.code)).toMatchObject({ ok: true, assetSound: true, assetFloor: 10n * U });
 
-    // D1: default caps 0, so a vault anyone creates from now on takes no deposit until the owner sets its caps
+    // D1: default caps 0, so a vault anyone creates from now on takes no deposit until the owner sets its caps (and an
+    // empty vault's history adds nothing to the floor)
     await send(connection, CONFIG_AUTH, [setDefaultCapsIx(LOCALNET_POOL_PROGRAM_ID, CONFIG_AUTH.publicKey, 0n, 0n)]);
     const junk2 = await createMint(junkKey);
     await fund(junkKey, junk2, junkKey.publicKey, 1n * U);
     jw.registerMint(junk2);
     await expect(jw.deposit(junk2, 1n * U)).rejects.toThrow(/DepositTooLarge|DepositCapExceeded|0x1794|0x1795|603[67]/);
-    const fresh = ask(desk2, 10n);
+    const fresh = ask(desk2, 25n);
     const fp = await prove(fresh.code, false);
-    expect(await verify(desk2, fp.code, fresh.code)).toMatchObject({ ok: true, assetSound: true, assetFloor: 0n });
+    expect(await verify(desk2, fp.code, fresh.code)).toMatchObject({ ok: true, assetSound: true, assetFloor: 10n * U });
     writeFileSync('solana/compute-units-solvency.json', JSON.stringify({ note: 'test/solana/solvency.test.ts on a private localnet validator; verify_disclosure as ONE simulated transaction (buffer_open, buffer_write 448 B, verify), sigVerify off', ...measured }, null, 2) + '\n');
   });
 });

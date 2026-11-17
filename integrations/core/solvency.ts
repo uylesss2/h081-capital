@@ -25,7 +25,7 @@ import * as snarkjs from 'snarkjs';
 import bs58 from 'bs58';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
-import { type Connection, type Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import { type Connection, type Keypair, LAMPORTS_PER_SOL, type ParsedInstruction, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction, PublicKey, type TokenBalance } from '@solana/web3.js';
 import type { Account } from '../../src/account.js';
 import { FIELD } from '../../src/crypto.js';
 import type { CircuitName, Prover, SolidityProof } from '../../src/prover.js';
@@ -36,7 +36,7 @@ import { simulateDisclosureCheck } from '../../src/solana/disclosure.js';
 import type { SolanaPool, SolanaWallet, SolOwnedAllowance } from '../../src/solana/wallet.js';
 import {
   SOLVENCY_DEFAULT_MAX_ROOT_AGE, SOLVENCY_DEFAULT_TTL_SEC, SOLVENCY_DISCLOSE_KIND, SOLVENCY_DOES_NOT_SAY, SOLVENCY_HANDSHAKE, SOLVENCY_MAX_TTL_SEC,
-  type ProbeEntry, type VaultCapView, assetFloor, presentationMessage, probeBlock, rootAge, snapUp, solvencyAudience, solvencyStatement, utcDay,
+  type ProbeEntry, type VaultCapView, type VaultTx, assetFloor, presentationMessage, probeBlock, rootAge, snapUp, solvencyAudience, solvencyStatement, utcDay, vaultTxPeak,
 } from '../../src/solvency.js';
 import { type CodeContext, CodeError, type DecodedSolvencyRequest, decodeSolvencyCode, decodeSolvencyRequest, encodeSolvencyCode, encodeSolvencyRequest } from './codes.js';
 import { FlatDirProver, fetchCircuits } from './circuits.js';
@@ -258,7 +258,65 @@ async function discloseVkey(host: SolvencyHost): Promise<{ vkey?: unknown; reaso
   return { vkey: JSON.parse(raw.toString('utf8')) };
 }
 
-/** Every non-USDG AssetCap with its vault balance; throws on any read failure (the caller fails closed). */
+/** Most signatures one verify reads for one vault's new history; beyond it the floor is unknown (fails closed). */
+export const VAULT_HISTORY_MAX = 10_000;
+
+interface VaultPeak { vault: string; newest: string; peak: string }
+
+/** A jsonParsed transaction as the pure vaultTxPeak reads it. */
+function vaultTxOf(tx: ParsedTransactionWithMeta | null, sig: string): VaultTx {
+  if (!tx?.meta) throw new Error(`the RPC did not return transaction ${sig} with its metadata`);
+  if (tx.meta.innerInstructions == null) throw new Error(`the RPC did not return the inner instructions of ${sig}`);
+  const ixOf = (ix: ParsedInstruction | PartiallyDecodedInstruction) =>
+    'parsed' in ix ? { programId: ix.programId.toBase58(), parsed: ix.parsed } : { programId: ix.programId.toBase58(), accounts: ix.accounts.map((a) => a.toBase58()) };
+  const bal = (xs: TokenBalance[] | null | undefined) =>
+    (xs ?? []).map((b) => ({ accountIndex: b.accountIndex, amount: b.uiTokenAmount.amount }));
+  return {
+    keys: tx.transaction.message.accountKeys.map((k) => k.pubkey.toBase58()),
+    pre: bal(tx.meta.preTokenBalances), post: bal(tx.meta.postTokenBalances),
+    ixs: [...tx.transaction.message.instructions, ...tx.meta.innerInstructions.flatMap((x) => x.instructions)].map(ixOf),
+  };
+}
+
+/**
+ * The most `vault` ever held (spec 2.1): every transaction since its creation, read once and remembered (the history
+ * is append-only, so later calls read only what is new). Throws when the history cannot be read in full or does not
+ * reach the vault's creation (a pruned RPC): the caller fails closed.
+ */
+async function vaultPeak(host: SolvencyHost, vault: PublicKey): Promise<bigint> {
+  const key = vault.toBase58();
+  const saved = readStore<VaultPeak>(host, 'vault-peaks').filter((e) => e.vault === key).at(-1);
+  const sigs: string[] = [];
+  for (let before: string | undefined; ;) {
+    const page = await host.connection.getSignaturesForAddress(vault, { limit: 1000, ...(before ? { before } : {}), ...(saved ? { until: saved.newest } : {}) }, 'confirmed');
+    sigs.push(...page.map((s) => s.signature));
+    if (sigs.length > VAULT_HISTORY_MAX) throw new Error(`the vault ${key} has more than ${VAULT_HISTORY_MAX} new transactions to read`);
+    if (page.length < 1000) break;
+    before = page[page.length - 1].signature;
+  }
+  if (!sigs.length) {
+    if (saved) return BigInt(saved.peak);
+    throw new Error(`the RPC returned no history for the vault ${key}`);
+  }
+  let peak = saved ? BigInt(saved.peak) : 0n;
+  let oldestCreated = false;
+  for (let i = 0; i < sigs.length; i += 50) {
+    const chunk = sigs.slice(i, i + 50);
+    const txs = await host.connection.getParsedTransactions(chunk, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+    chunk.forEach((sig, j) => {
+      const r = vaultTxPeak(key, vaultTxOf(txs[j] ?? null, sig));
+      if (r.peak > peak) peak = r.peak;
+      if (i + j === sigs.length - 1) oldestCreated = r.createdHere;
+    });
+  }
+  // newest first: the last one read must be the vault's creation, or the history was cut short
+  if (!saved && !oldestCreated) throw new Error(`the RPC's history of the vault ${key} does not reach its creation`);
+  const others = readStore<VaultPeak>(host, 'vault-peaks').filter((e) => e.vault !== key);
+  writeStore(host, 'vault-peaks', [...others, { vault: key, newest: sigs[0], peak: peak.toString() }]);
+  return peak;
+}
+
+/** Every AssetCap with its vault balance and (non-USDG) historical peak; throws on any read failure (the caller fails closed). */
 async function vaultCaps(host: SolvencyHost): Promise<VaultCapView[]> {
   const pid = host.config.poolProgramId;
   const disc = sha256(new TextEncoder().encode('account:AssetCap')).subarray(0, 8);
@@ -271,9 +329,10 @@ async function vaultCaps(host: SolvencyHost): Promise<VaultCapView[]> {
     chunk.forEach((c, j) => {
       const v = vaults[j];
       const vaultBalance = v && v.data.length >= 72 ? Buffer.from(v.data).readBigUInt64LE(64) : 0n;
-      out.push({ mint: c.mint.toBase58(), maxTotal: c.maxTotal, vaultBalance });
+      out.push({ mint: c.mint.toBase58(), maxTotal: c.maxTotal, vaultBalance, peak: 0n });
     });
   }
+  for (const v of out) if (v.mint !== host.usdg.toBase58()) v.peak = await vaultPeak(host, vaultPda(pid, new PublicKey(v.mint)));
   return out;
 }
 
@@ -337,7 +396,7 @@ export async function verifySolvency(host: SolvencyHost, code: string, opts: Sol
   const sound = { ...more, rootAge: age, assetSound, assetFloor: floor, assetFloorUsdg: fromUnits(floor, d) };
   const statement = solvencyStatement({ bound: fromUnits(bound, d), symbol: sym, rootAge: age, wallet, assetSound });
   if (!assetSound && !opts.allowUnboundAsset) {
-    return fail('asset_not_bound', `a vault of another asset could back up to ${fromUnits(floor, d)} units, so a bound of ${fromUnits(bound, d)} does not show ${sym} (the owner closes this with set_default_caps(0,0); allowUnboundAsset accepts "some asset")`, { ...sound, statement });
+    return fail('asset_not_bound', `a vault of another asset held up to ${fromUnits(floor, d)} units at some point (or may take that much under its cap), so a bound of ${fromUnits(bound, d)} does not show ${sym}; ask for more than that, or pass allowUnboundAsset to accept "some asset"`, { ...sound, statement });
   }
   // optional on-chain check: the deployed verifier agrees (known root + Groth16 only)
   let onChain: SolvencyVerifyResult['onChain'];

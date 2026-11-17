@@ -172,7 +172,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'is accepted once, the expected wallet, the public inputs, the wallet\'s signature, the zero-knowledge proof against the ' +
     'pinned ceremony key, that the pool root is at most maxRootAge operations old (that dates the PROOF only: disclose checks ' +
     'no nullifier, so a note spent or reclaimed earlier still proves at the current root), and that the bound is above what any ' +
-    'non-USDG vault could back (`assetSound`; otherwise ok is false with asset_not_bound unless `allowUnboundAsset`). ' +
+    'non-USDG vault ever held, from its transaction history (`assetSound`; otherwise ok is false with asset_not_bound unless `allowUnboundAsset`). ' +
     'Returns ok, the first failing reason, the statement, the wallet to deal with, and doesNotSay; `warning` when the request was ' +
     'not made by this wallet (then its maker chose the nonce, expiry and root age). RPC reads only. ' +
     '`onChain: "simulate"` also runs the deployed verify_disclosure as ONE simulated transaction (nothing signed or sent; ' +
