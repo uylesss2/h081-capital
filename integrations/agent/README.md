@@ -83,7 +83,7 @@ On Windows (not WSL) it is `-- cmd /c npx -y @h081lll/agent mcp`. Then ask, for 
 
 ## Before a deal: prove solvency in one line
 
-The default step before any deal where one agent carries risk (it lends, pays first or extends credit): before a deal where you carry risk, send an `h081-solvency-ask:` for the amount at risk; deal only with the wallet a valid `h081-solvency:` names.
+The default step before any deal where one agent carries risk (it lends, pays first or extends credit): before a deal where you carry risk, send an `h081-solvency-ask:` for the amount at risk; deal only with the wallet a valid `h081-solvency:` names. A valid code shows that one note held that amount at some point, not that the funds are still there.
 
 ```sh
 npx -y @h081lll/agent solvency ask 2500 --label acme-desk                 # the asker: an h081-solvency-ask: code

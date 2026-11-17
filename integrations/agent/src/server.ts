@@ -308,12 +308,12 @@ export const ROUTES: RouteDef[] = [
   {
     method: 'POST', path: '/v1/solvency/request', auth: true, summary: 'Asker: make an h081-solvency-ask: request (the default step before a deal where you carry risk)',
     description: 'Sends nothing, reads nothing. The minimum is rounded UP to the 1 / 2.5 / 5 ladder. Send the code to the counterparty; check its answer with POST /v1/solvency/verify and this request.',
-    body: obj({ min: { ...usdgJ, description: 'the least the counterparty must prove it holds (decimal USDG)' }, label: prop('h081_solvency_request', 'label'), expectWallet: prop('h081_solvency_request', 'expectWallet'), maxRootAge: prop('h081_solvency_request', 'maxRootAge'), ttlMinutes: prop('h081_solvency_request', 'ttlMinutes') }, ['min']),
+    body: obj({ min: { ...usdgJ, description: 'the least the counterparty must prove one note held (decimal USDG)' }, label: prop('h081_solvency_request', 'label'), expectWallet: prop('h081_solvency_request', 'expectWallet'), maxRootAge: prop('h081_solvency_request', 'maxRootAge'), ttlMinutes: prop('h081_solvency_request', 'ttlMinutes') }, ['min']),
     result: '{code, min, minUsdg, expiresAt, maxRootAge, expectWallet, label, verifierKey, next, handshake}',
     handle: async (c) => {
       only(c.body, ['min', 'label', 'expectWallet', 'maxRootAge', 'ttlMinutes']);
       const min = optStr(c.body.min, 'min');
-      if (!min) throw bad('min is required: the least the counterparty must prove it holds (decimal USDG)');
+      if (!min) throw bad('min is required: the least the counterparty must prove one note held (decimal USDG)');
       return done(await c.h.solvencyRequest({ min, label: optStr(c.body.label, 'label'), expectWallet: optStr(c.body.expectWallet, 'expectWallet'), maxRootAge: optNum(c.body.maxRootAge, 'maxRootAge'), ttlMinutes: optNum(c.body.ttlMinutes, 'ttlMinutes') }));
     },
   },

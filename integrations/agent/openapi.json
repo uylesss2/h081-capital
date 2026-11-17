@@ -1628,7 +1628,7 @@
                   "min": {
                     "type": "string",
                     "pattern": "^\\d+(\\.\\d+)?$",
-                    "description": "the least the counterparty must prove it holds (decimal USDG)"
+                    "description": "the least the counterparty must prove one note held (decimal USDG)"
                   },
                   "label": {
                     "type": "string",

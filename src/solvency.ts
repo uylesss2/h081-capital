@@ -46,7 +46,7 @@ export const SOLVENCY_DOES_NOT_SAY: readonly string[] = [
 
 /** The default pre-deal step, for agent prompts and docs. */
 export const SOLVENCY_HANDSHAKE =
-  'Before a deal where you carry risk, send an `h081-solvency-ask:` for the amount at risk; deal only with the wallet a valid `h081-solvency:` names.';
+  'Before a deal where you carry risk, send an `h081-solvency-ask:` for the amount at risk; deal only with the wallet a valid `h081-solvency:` names. A valid code shows that one note held that amount at some point, not that the funds are still there.';
 
 // ---- the ladder: 1 / 2.5 / 5 x 10^k whole tokens
 

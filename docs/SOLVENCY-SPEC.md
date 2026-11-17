@@ -73,7 +73,7 @@ share routing on reclaim. Not chosen; listed as owner decision D6.
   `'simulate'` mode (`SolanaPool.check`): there is no read-only path.
 - Nothing tells a verifier what the proof does NOT say (asset, key, time, one note), so it could not be relied on.
 
-## 1. The reserve (how "I hold >= X" becomes one disclose proof)
+## 1. The reserve (how "I hold >= X" becomes one disclose proof; a verifier learns only "one note held >= X")
 
 - A dedicated **reserve key**: `deriveReserveSk(keypair, derivation)` with label `h081/agent-account/v1/solvency-reserve`
   (same construction as `deriveLenderSk`; not a 0..15 sub-account index, so `freeAgentIndex`, reputation's virtual
@@ -234,7 +234,7 @@ still proves at the current root.
   `openapi.json` regenerated.
 - Every description and every verify result carries `doesNotSay` (section 6) verbatim.
 - Default handshake text for agent prompts / docs: "Before a deal where you carry risk, send an `h081-solvency-ask:`
-  for the amount at risk; deal only with the wallet a valid `h081-solvency:` names."
+  for the amount at risk; deal only with the wallet a valid `h081-solvency:` names. A valid code shows that one note held that amount at some point, not that the funds are still there."
 - Not in this repo: the site (code kinds in `src/lib/live/codes.ts`, a LiveBank panel, a docs page, a
   `drive-live-localnet.mjs` check per AGENTS.md).
 

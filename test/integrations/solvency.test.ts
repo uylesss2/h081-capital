@@ -18,7 +18,7 @@ import { encodeProof, fieldOf } from '../../src/solana/field.js';
 import { poolPda, vaultPda } from '../../src/solana/pda.js';
 import { POOL_DISCRIMINATOR, POOL_SIZE, encodeDiscloseArgs } from '../../src/solana/program.js';
 import {
-  SOLVENCY_DOES_NOT_SAY, type VaultTx, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience, solvencyStatement, vaultTxPeak,
+  SOLVENCY_DOES_NOT_SAY, SOLVENCY_HANDSHAKE, type VaultTx, assetFloor, isOnLadder, presentationMessage, probeBlock, rootAge, snapDown, snapUp, solvencyAudience, solvencyStatement, vaultTxPeak,
 } from '../../src/solvency.js';
 import {
   type CodeContext, CodeError, SOLVENCY_ASK_PREFIX, SOLVENCY_PREFIX, decodeSolvencyCode, decodeSolvencyRequest, encodeAddressCode, encodeSolvencyCode,
@@ -207,6 +207,7 @@ describe('what a proof says: a note that existed, not one still unspent (disclos
     expect(s).not.toMatch(/as of a pool root/);
     expect(SOLVENCY_DOES_NOT_SAY[0]).toMatch(/still proves against the CURRENT root/);
     expect(SOLVENCY_DOES_NOT_SAY[0]).toMatch(/BEFORE the proof/);
+    expect(SOLVENCY_HANDSHAKE).toMatch(/not that the funds are still there/);
   });
 });
 

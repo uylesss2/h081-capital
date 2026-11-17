@@ -152,7 +152,7 @@ export const DESCRIPTIONS: Record<OpName, string> = {
     'transact circuit. Give `amount` (base units) or `usdg` (decimal). ' + NOTICE_SHORT,
   h081_solvency_request:
     'Default first step before any deal where this agent carries risk (lending, paying first, extending credit): ask the ' +
-    'counterparty to prove it holds at least `min` USDG. Makes an "h081-solvency-ask:" code (a fresh nonce, an expiry of ' +
+    'counterparty to prove that one note it knows held at least `min` USDG (not that it still does; see doesNotSay). Makes an "h081-solvency-ask:" code (a fresh nonce, an expiry of ' +
     'at most a day, the minimum rounded UP to the 1 / 2.5 / 5 ladder, how old the proof\'s pool root may be, optionally the ' +
     'only wallet allowed to answer). Send the code to the counterparty; it answers with h081_prove_solvency; check the answer ' +
     'with h081_verify_solvency and this same request, then deal only with the wallet it names. Sends nothing, reads nothing. ' +
@@ -523,7 +523,7 @@ export const JSON_SCHEMA: Record<OpName, Record<string, unknown>> = {
   h081_solvency_request: {
     type: 'object',
     properties: {
-      min: { ...amountJ, description: 'the least the counterparty must prove it holds (base units); rounded UP to the 1 / 2.5 / 5 ladder' }, minUsdg: decimalJ('USDG'),
+      min: { ...amountJ, description: 'the least the counterparty must prove one note held (base units); rounded UP to the 1 / 2.5 / 5 ladder' }, minUsdg: decimalJ('USDG'),
       label: { type: 'string', maxLength: 32, description: 'a short name for you, shown to the prover (at most 32 bytes)' },
       expectWallet: { ...b58J, description: 'only this wallet may answer (default: anyone; the answer names its wallet either way)' },
       maxRootAge: { type: 'integer', minimum: 1, maximum: 1023, description: 'how many pool operations old the proof may be (default 32)' },

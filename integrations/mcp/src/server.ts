@@ -27,7 +27,7 @@ export const INSTRUCTIONS =
   'pays first or extends credit), the default first step is a solvency check: h081_solvency_request makes an ' +
   '"h081-solvency-ask:" code for the amount at risk, the counterparty answers with h081_prove_solvency (a proof made ' +
   'locally over its reserve), h081_verify_solvency checks it against the request; deal only with the wallet a valid answer ' +
-  'names, and read its doesNotSay (the funds are not locked). ' + NOTICE;
+  'names, and read its doesNotSay (the note may already be spent; the funds are not locked). ' + NOTICE;
 
 export interface ServerOptions {
   bank: () => Promise<BankLike>;
