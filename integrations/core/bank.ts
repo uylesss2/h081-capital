@@ -49,7 +49,11 @@ import { FlatDirProver } from './circuits.js';
 import { type CodeContext, PLEDGE_BPS_MAX, PLEDGE_BPS_MIN, decodeAddressCode, decodeLoanProof, decodeLoanTerms, encodeAddressCode, encodeLoanProof, encodeLoanTerms } from './codes.js';
 import { DEPOSIT_SOL_MIN, type H081Config, MAINNET, NOTICE, PUBLIC_RPC_HOSTS, checkCluster, isMainnetConfig, rpcHost } from './constants.js';
 import { type ProgramKind, RpcUnreachableError, explained, networkFailure } from './errors.js';
-import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk } from './keys.js';
+import { ACCOUNT_SOURCE_NOTES, type AccountDerivation, type AccountSource, deriveAgentSk, deriveLenderSk, deriveReserveSk } from './keys.js';
+import {
+  type ProveSolvencyArgs, type SolvencyHost, type SolvencyRequestArgs, type SolvencyVerifyOptions, proveSolvency as solvencyProve, reserveNotes,
+  solvencyRequest as solvencyAsk, solvencyReserve as solvencyReserveOf, verifySolvency as solvencyVerify,
+} from './solvency.js';
 import { fromUnits } from './units.js';
 
 export interface Caps { perDeposit: bigint; total: bigint; inVault: bigint; paused: boolean }
@@ -80,6 +84,8 @@ export interface BalanceView {
   grantedToOthers: AllowanceView[];
   /** allowances sub-accounts hold that another account owns (delegated to them from an allowance granted by someone else); h081_pay spends them with agentIndex */
   heldBySubAccounts: AllowanceView[];
+  /** the solvency reserve (h081_prove_solvency): an allowance this account granted to its own reserve key; h081_pay never spends it. Not listed in grantedToOthers */
+  reserve: { id: bigint; remaining: bigint; remainingUsdg: string } | null;
   caps: Caps | null;
 }
 
@@ -322,6 +328,9 @@ export class H081Bank {
   private readonly derivation: AccountDerivation;
   private readonly accountSource: AccountSource;
   private readonly fetchFn: typeof fetch;
+  /** event cache, sub-account list and the solvency logs (null: none) */
+  private readonly cacheDir?: string;
+  private reserveAcct?: Account;
 
   private constructor(opts: BankOptions, connection: Connection, prover: Prover) {
     this.config = opts.config;
@@ -347,6 +356,7 @@ export class H081Bank {
     this.owner.registerMint(this.usdg);
     if (opts.config.relayerUrl) this.relayer = new RelayerClient(opts.config.relayerUrl, opts.fetch);
     const cacheDir = opts.cacheDir === undefined ? join(opts.config.circuitsDir, '..', 'cache') : opts.cacheDir;
+    this.cacheDir = cacheDir ?? undefined;
     if (cacheDir) {
       this.cacheFile = join(cacheDir, `${opts.config.cluster}-${opts.config.poolProgramId.toBase58()}.events.json`);
       this.subAccountsFile = join(cacheDir, `${opts.config.cluster}-${opts.config.poolProgramId.toBase58()}.subaccounts-${opts.signer.publicKey.toBase58()}.json`);
@@ -506,7 +516,9 @@ export class H081Bank {
     const byPk = this.agentPks();
     const shielded = this.owner.balance(this.usdg);
     const usdgOnly = (a: SolOwnedAllowance) => a.allowance.asset === this.owner.registerMint(this.usdg);
-    const granted = this.owner.grantedAllowances().filter(usdgOnly).filter((a) => a.allowance.agentPk !== this.account.keys.pk);
+    const reservePk = this.reserveAccount().keys.pk;
+    const granted = this.owner.grantedAllowances().filter(usdgOnly).filter((a) => a.allowance.agentPk !== this.account.keys.pk && a.allowance.agentPk !== reservePk);
+    const reserve = reserveNotes({ owner: this.owner, reserve: this.reserveAccount(), usdg: this.usdg })[0];
     // what sub-accounts hold that this account does not own (its own grants are already in subAccounts)
     const heldBySubAccounts: AllowanceView[] = [];
     for (const i of this.subAccountsInUse()) {
@@ -522,6 +534,7 @@ export class H081Bank {
       agentAllowances: this.owner.agentAllowances(this.usdg).map((a) => this.view(a)),
       grantedToOthers: granted.filter((a) => !byPk.has(a.allowance.agentPk)).map((a) => this.view(a)),
       heldBySubAccounts,
+      reserve: reserve ? { id: reserve.commitment, remaining: reserve.allowance.remaining, remainingUsdg: fromUnits(reserve.allowance.remaining, this.decimals) } : null,
       caps,
     };
   }
@@ -1833,6 +1846,35 @@ export class H081Bank {
   }
 
   // ---- info
+
+  // ---- prove solvency in one line (docs/SOLVENCY-SPEC.md; integrations/core/solvency.ts)
+
+  /** The solvency reserve account (deriveReserveSk): a key used for nothing else, so a proof reveals no other key of this account. */
+  reserveAccount(): Account {
+    if (!this.reserveAcct) this.reserveAcct = new Account(deriveReserveSk(this.signer, this.derivation));
+    return this.reserveAcct;
+  }
+
+  private solvencyHost(): SolvencyHost {
+    return {
+      connection: this.connection, config: this.config, signer: this.signer, prover: this.prover, pool: this.pool, owner: this.owner, usdg: this.usdg,
+      decimals: this.decimals, codeContext: this.codeContext, reserve: this.reserveAccount(), cacheDir: this.cacheDir, fetch: this.fetchFn, log: this.log,
+      sync: () => this.sync(), saveCache: () => this.saveCache(), requireArtifacts: (n) => this.requireArtifacts(n), needSol: (m, w) => this.needSol(m, w),
+      grantCeiling: (a) => this.grantCeiling(a), explain: (e) => explained(e, { program: 'pool', ids: this.programIds }),
+    };
+  }
+
+  /** Asker: an "h081-solvency-ask:" code (min snapped UP to the ladder, fresh nonce, expiry). Sends nothing, reads nothing. */
+  solvencyRequest(req: SolvencyRequestArgs) { return solvencyAsk(this.solvencyHost(), req); }
+
+  /** Agent: answers a request with an "h081-solvency:" code, proven locally over the reserve (a top-up is a plan unless confirm). */
+  proveSolvency(req: ProveSolvencyArgs) { return solvencyProve(this.solvencyHost(), req); }
+
+  /** Asker: checks a presentation against its own request (RPC reads; onChain 'send' is the only write). */
+  verifySolvency(code: string, opts: SolvencyVerifyOptions) { return solvencyVerify(this.solvencyHost(), code, opts); }
+
+  /** Agent: shows the reserve; `release` takes it back into the shielded balance (plan unless confirm). */
+  solvencyReserve(req: { release?: boolean; confirm?: boolean } = {}) { return solvencyReserveOf(this.solvencyHost(), req); }
 
   /** Facts about the deployment and this agent. Never the RPC URL (its path/query may carry an API key): only its host. */
   async protocolInfo(): Promise<Record<string, unknown>> {
