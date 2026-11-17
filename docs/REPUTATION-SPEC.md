@@ -345,13 +345,14 @@ All three are in `CODE_KIND`, `KIND_NAME` and `PREFIX_KIND`; a pasted code of th
 
 ## 8. Tests (what ran on this branch)
 
-Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL), after the third pass (section 9.5):
+Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL), after the fourth pass (section 9.6;
+the `cargo test` and `npm test` rows are from the third pass and were not re-run):
 
 | Command | Result |
 |---|---|
-| `npm run test:solana:rep` (validator on rpc 8899: rep_registry + stream_loan built from this worktree, fixtures) | 16 passed (was 14) |
+| `npm run test:solana:rep` (validator on rpc 8899: rep_registry + stream_loan built from this worktree, fixtures) | 16 passed (14 before the third pass) |
 | `npx vitest run test/circuits/reputation.test.ts test/sdk/rep-consistency.test.ts` | 21 passed (18 circuit, 3 drift) |
-| `npx vitest run test/integrations test/relayer` | 338 passed, 9 skipped (localnet-only files without their validator); was 324 before the pass |
+| `npx vitest run test/integrations test/relayer` | 345 passed, 9 skipped (localnet-only, POSIX-permission and mainnet-read tests); 338 after the third pass, 324 before it |
 | `cargo test -p rep_registry` (WSL; the program is unchanged in this pass) | 9 passed |
 | `npm run typecheck` | clean |
 | `npm run build:integrations` | mcp, plugin and agent build |
@@ -416,7 +417,9 @@ Last full run, 2026-11-17, on this machine (Windows, the Solana toolchain in WSL
   - Fourth pass (9.6): `test/integrations/reputation.test.ts` 21 (was 18: who chose the nonce; the thresholds a verifier
     without a request states; an on-chain check that could not run, on a mocked RPC) and
     `test/integrations/reputation-surfaces.test.ts` 9 (was 7: verify thresholds through the schema and `runOp`; the
-    prove route's result string). Each failed before its fix.
+    prove route's result string). Each failed before its fix (the schema test against the third pass's
+    `schemas.ts` / `operations.ts`). The takeover-race test cannot run against the old lock (it has no hook), so it was
+    checked by mutation instead: with the token re-check under the takeover file removed, it fails.
   - `test/integrations/core-lend.test.ts` (+2): `lendClose` on a repaid backed loan and on a repaid slashed loan closes
     with no attest attempt and logs why.
 

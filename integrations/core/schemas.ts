@@ -593,7 +593,7 @@ export const EXAMPLE_INPUTS: Record<OpName, Record<string, unknown>[]> = {
   h081_transfer: [{ usdg: '1', toAddressCode: 'h081-address:2Q4hfqVf8dZ3vSt6EzNw3hMKx5mT1nJxkPZfFh9cYbLwRb7uA2gE5sQ1rVhC7jYtUe2kWxN8pD6mHf3LzR9aB4cXv' }],
   h081_reputation_request: [{ audience: 'acme-desk', minLoans: 3, minVolume: '500', minSpanDays: 90 }, { audience: 'acme-desk', minLoans: 5, minMonths: 3, monthFloor: '50', bindTo: 'E1ZAVTjMEAtPoUPAfsLrfJHpTXNtdmzgBWuZtUM1uKKv' }],
   h081_prove_reputation: [{ request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4' }, { audience: 'acme-desk', minLoans: 3, minVolume: '500' }],
-  h081_verify_reputation: [{ code: 'h081-rep:7Yk3LmQ9pR2', request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4', presentation: 'h081-rep-sig:3Df8Kq2' }, { code: 'h081-rep:7Yk3LmQ9pR2', audience: 'acme-desk', nonce: '0x1f2e', onChain: true }],
+  h081_verify_reputation: [{ code: 'h081-rep:7Yk3LmQ9pR2', request: 'h081-rep-ask:5Hq2Vb7Zr9KcTmW3xLpN4', presentation: 'h081-rep-sig:3Df8Kq2' }, { code: 'h081-rep:7Yk3LmQ9pR2', audience: 'acme-desk', nonce: '0x1f2e', presentation: 'h081-rep-sig:3Df8Kq2', minLoans: 3, minVolume: '500', onChain: true }],
   h081_reputation_attest: [{}, { confirm: true }],
   h081_reputation_status: [{}],
 };
