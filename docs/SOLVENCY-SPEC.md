@@ -133,7 +133,7 @@ Network tag over `(cluster, stipend_pool program id, USDG mint)` (the same conte
 
 | Kind | Prefix | Body |
 |---|---|---|
-| 10 | `h081-solvency-ask:` | ver u8 = 1, verifierKey 32 (ed25519 pub of the asker, or 32 random bytes), nonce 16, expiry u64 (unix s, at most now + 1 day), min u64 (USDG base units), maxRootAge u16 (default 32), expectWallet 32 (0 = anyone), label len u8 + UTF-8 <= 32 |
+| 10 | `h081-solvency-ask:` | ver u8 = 1, verifierKey 32 (ed25519 pub of the asker, or 32 random bytes), nonce 16 (from `solvencyRequest`: 8 random bytes then the first 8 bytes of an HMAC-SHA256, under a key only the asker's wallet derives, over the network and every other field; `askedByThisWallet` is true only when it checks, so a request that merely names a verifier's key gets a warning), expiry u64 (unix s, at most now + 1 day; the verifier refuses more too, `bad_request`), min u64 (USDG base units), maxRootAge u16 (default 32), expectWallet 32 (0 = anyone), label len u8 + UTF-8 <= 32 |
 | 11 | `h081-solvency:` | ver u8 = 1, requestDigest 32, proof 256, DiscloseArgs 192, wallet 32, signature 64 |
 
 - `proof` and `DiscloseArgs` bytes are exactly kind 3's first 448 bytes (`encodeProof` + `encodeDiscloseArgs`), so a

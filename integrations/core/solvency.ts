@@ -25,6 +25,7 @@ import * as snarkjs from 'snarkjs';
 import bs58 from 'bs58';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
+import { hmac } from '@noble/hashes/hmac';
 import { type Connection, type Keypair, LAMPORTS_PER_SOL, type ParsedInstruction, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction, PublicKey, type TokenBalance } from '@solana/web3.js';
 import type { Account } from '../../src/account.js';
 import { FIELD } from '../../src/crypto.js';
@@ -175,6 +176,39 @@ export interface SolvencyRequestResult {
   verifierKey: string; next: string; handshake: string;
 }
 
+/** The fields of a request a nonce MAC covers (everything but the nonce). */
+export interface SolvencyAskFields { verifierKey: Uint8Array; expiry: bigint; min: bigint; maxRootAge: number; expectWallet: Uint8Array; label: string }
+
+const u64le = (x: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(x); return b; };
+
+/** HMAC-SHA256 over the network and every request field, under a key only `signer` can derive; first 8 bytes. */
+function askMac(signer: Keypair, ctx: CodeContext, f: SolvencyAskFields, rand: Uint8Array): Uint8Array {
+  const key = hmac(sha256, signer.secretKey.subarray(0, 32), new TextEncoder().encode('h081-solvency-ask-key|v1|'));
+  const label = new TextEncoder().encode(f.label);
+  const msg = Buffer.concat([
+    Buffer.from(`h081-solvency-ask-mac|v1|${ctx.cluster}|${ctx.program}|${ctx.mint}|`), Buffer.from(f.verifierKey), Buffer.from(rand), u64le(f.expiry), u64le(f.min),
+    Buffer.from([f.maxRootAge & 0xff, f.maxRootAge >> 8]), Buffer.from(f.expectWallet), Buffer.from([label.length]), Buffer.from(label),
+  ]);
+  return hmac(sha256, key, msg).subarray(0, 8);
+}
+
+/**
+ * The 16-byte nonce of a request this wallet makes: 8 random bytes, then a MAC over every other field (askMac). It
+ * keeps the kind-10 format and needs no store, so a verifier recognises its own requests across restarts and cache
+ * dirs; a request that merely NAMES its key (anyone can write one) does not carry it.
+ */
+export function solvencyAskNonce(signer: Keypair, ctx: CodeContext, f: SolvencyAskFields, rand: Uint8Array = randomBytes(8)): Uint8Array {
+  if (rand.length !== 8) throw new Error('rand must be 8 bytes');
+  return Uint8Array.from([...rand, ...askMac(signer, ctx, f, rand)]);
+}
+
+/** Whether `signer` made request `r` (its key, and its MAC in the nonce). */
+function madeByThisWallet(host: SolvencyHost, r: DecodedSolvencyRequest): boolean {
+  if (!new PublicKey(r.verifierKey).equals(host.signer.publicKey)) return false;
+  const want = askMac(host.signer, host.codeContext, r, r.nonce.subarray(0, 8));
+  return hex(want) === hex(r.nonce.subarray(8, 16));
+}
+
 export function solvencyRequest(host: SolvencyHost, req: SolvencyRequestArgs): SolvencyRequestResult {
   const d = host.decimals;
   if (req.min <= 0n) throw new Error('min must be positive');
@@ -187,9 +221,8 @@ export function solvencyRequest(host: SolvencyHost, req: SolvencyRequestArgs): S
   if (new TextEncoder().encode(label).length > 32) throw new Error('label must be at most 32 bytes');
   const expectWallet = req.expectWallet ? walletBytes(req.expectWallet, 'expectWallet') : new Uint8Array(32);
   const expiry = BigInt(nowSec() + ttl);
-  const { code } = encodeSolvencyRequest(host.codeContext, {
-    verifierKey: host.signer.publicKey.toBytes(), nonce: randomBytes(16), expiry, min, maxRootAge, expectWallet, label,
-  });
+  const fields: SolvencyAskFields = { verifierKey: host.signer.publicKey.toBytes(), expiry, min, maxRootAge, expectWallet, label };
+  const { code } = encodeSolvencyRequest(host.codeContext, { ...fields, nonce: solvencyAskNonce(host.signer, host.codeContext, fields) });
   return {
     code, min, minUsdg: fromUnits(min, d), ...(min !== req.min ? { snappedFrom: fromUnits(req.min, d) } : {}), expiresAt: iso(expiry), maxRootAge,
     expectWallet: isZero(expectWallet) ? null : new PublicKey(expectWallet).toBase58(), label, verifierKey: host.signer.publicKey.toBase58(),
@@ -348,9 +381,12 @@ export async function verifySolvency(host: SolvencyHost, code: string, opts: Sol
   // the request: decodes, and its digest (recomputed here) is the one the presentation commits to
   let r: DecodedSolvencyRequest;
   try { r = decodeSolvencyRequest(host.codeContext, opts.request); } catch (e) { return fail('bad_request', (e as Error).message); }
-  const request = { label: r.label, min: r.min, minUsdg: fromUnits(r.min, d), expiresAt: iso(r.expiry), askedByThisWallet: new PublicKey(r.verifierKey).equals(host.signer.publicKey) };
+  const namesMe = new PublicKey(r.verifierKey).equals(host.signer.publicKey);
+  const request = { label: r.label, min: r.min, minUsdg: fromUnits(r.min, d), expiresAt: iso(r.expiry), askedByThisWallet: madeByThisWallet(host, r) };
   const wallet = new PublicKey(p.wallet).toBase58();
   const base = { request, wallet, maxRootAge: r.maxRootAge };
+  // the prover refuses these; a verifier does too, so a request made to stay valid for months is no standing claim
+  if (r.expiry > BigInt(now + SOLVENCY_MAX_TTL_SEC + 300)) return fail('bad_request', `the request expires at ${iso(r.expiry)}, more than a day from now; a request lives at most a day (ask again with h081_solvency_request)`, base);
   if (hex(p.requestDigest) !== hex(r.digest)) return fail('other_request', 'this proof answers another request, not this one', base);
   if (BigInt(now) > r.expiry) return fail('expired', `the request expired at ${iso(r.expiry)}`, base);
   if (!opts.selfCheck && nonceSeen(host, r.nonce, now)) return fail('nonce_reused', 'this request was already answered and accepted once; a presentation counts once per request (ask again for a fresh one)', base);
@@ -420,7 +456,7 @@ export async function verifySolvency(host: SolvencyHost, code: string, opts: Sol
   }
   if (!opts.selfCheck) recordNonce(host, r.nonce, r.expiry, now);
   const warning = request.askedByThisWallet || opts.selfCheck ? undefined
-    : `this request was not made by this wallet (its verifierKey is ${new PublicKey(r.verifierKey).toBase58()}): whoever supplied it chose its nonce, its expiry (${request.expiresAt}) and its root age (${r.maxRootAge}), so whether this proof was made for you, and recently, rests on them. Ask with h081_solvency_request yourself for a check you control.`;
+    : `this request ${namesMe ? 'names this wallet as the asker but was not made by it (its nonce does not carry this wallet\'s MAC)' : `was not made by this wallet (its verifierKey is ${new PublicKey(r.verifierKey).toBase58()})`}: whoever supplied it chose its nonce, its expiry (${request.expiresAt}) and its root age (${r.maxRootAge}), so whether this proof was made for you, and recently, rests on them. Ask with h081_solvency_request yourself for a check you control.`;
   return { ok: true, statement, ...sound, ...(onChain ? { onChain } : {}), ...(warning ? { warning } : {}), doesNotSay };
 }
 

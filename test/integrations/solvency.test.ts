@@ -24,7 +24,7 @@ import {
 } from '../../integrations/core/codes.js';
 import { CIRCUIT_HASHES, MAINNET } from '../../integrations/core/constants.js';
 import { deriveReserveSk, deriveLenderSk, deriveAgentSk, deriveAccountSk } from '../../integrations/core/keys.js';
-import { type SolvencyHost, checkSolvencyProbe, decodeProofBytes, verifySolvency } from '../../integrations/core/solvency.js';
+import { type SolvencyHost, checkSolvencyProbe, decodeProofBytes, solvencyAskNonce, verifySolvency } from '../../integrations/core/solvency.js';
 
 const U = 1_000_000n;
 const CTX: CodeContext = { cluster: 'mainnet-beta', program: MAINNET.programs.pool, mint: MAINNET.usdg.mint };
@@ -309,7 +309,10 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
   let root: bigint;
   let proofBytes: Uint8Array;
   let argsOf: (o?: Partial<Record<'kind' | 'bound' | 'windowId' | 'agentPk' | 'audience', bigint>>) => Uint8Array;
-  const req = request({ verifierKey: asker.publicKey.toBytes(), expiry: BigInt(NOW + 600) });
+  // made the way solvencyRequest makes it: the nonce carries the asker's MAC, so the asker can tell it made it
+  const askFields = { verifierKey: asker.publicKey.toBytes(), expiry: BigInt(NOW + 600), min: 2500n * U, maxRootAge: 32, expectWallet: new Uint8Array(32), label: 'acme-desk' };
+  const req = request({ ...askFields, nonce: solvencyAskNonce(asker, CTX, askFields) });
+  let proveFor: (digest: Uint8Array) => Promise<{ proof: Uint8Array; args: Uint8Array }>;
   const chainOk = (): Chain => ({ roots: [root], cur: 40, caps: [{ mint: USDG, maxTotal: 10n ** 12n, balance: 3000n * U }] });
   const present = (o: { args?: Uint8Array; proof?: Uint8Array; wallet?: Keypair; signer?: Keypair; digest?: Uint8Array } = {}) => {
     const args = o.args ?? argsOf();
@@ -338,6 +341,11 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     // the program's encoding decodes back to the same proof
     expect(decodeProofBytes(proofBytes)).toEqual(p.proof);
     argsOf = (o = {}) => encodeDiscloseArgs({ root, kind: 0n, bound: 2500n * U, windowId: 0n, agentPk: reserve.keys.pk, audience, ...o });
+    proveFor = async (digest) => {
+      const aud = solvencyAudience(digest, agent.publicKey.toBytes());
+      const q = await prover.prove('disclose', discloseInput({ root, allowance, path: tree.path(i), kind: 'remainingAtLeast', bound: 2500n * U, audience: aud }).input);
+      return { proof: encodeProof(q.proof), args: encodeDiscloseArgs({ root, kind: 0n, bound: 2500n * U, windowId: 0n, agentPk: reserve.keys.pk, audience: aud }) };
+    };
   });
 
   it.skipIf(!CEREMONY)('the build tree is the ceremony\'s disclose (hash-checked against CIRCUIT_HASHES)', () => {
@@ -371,6 +379,31 @@ describe.skipIf(!HAVE)('verifySolvency over a real disclose proof', () => {
     expect(foreign).toMatchObject({ ok: true, request: { askedByThisWallet: false } });
     expect(foreign.warning).toMatch(/not made by this wallet/);
     expect(await verifySolvency(h, present(), { request: req.code, now: NOW })).toMatchObject({ ok: false, reason: 'nonce_reused' });
+  });
+
+  it('a request that names this wallet but was not made by it is flagged, and one living longer than a day is refused', async () => {
+    // anyone can write a request naming the asker's key, with its own nonce and a far expiry: no MAC from the asker
+    const forged = request({ ...askFields, nonce: new Uint8Array(16).fill(9), maxRootAge: 1023 });
+    const f = await proveFor(forged.digest);
+    const code = present({ digest: forged.digest, args: f.args, proof: f.proof });
+    const r = await verifySolvency(host(asker, chainOk()), code, { request: forged.code, now: NOW });
+    expect(r).toMatchObject({ ok: true, request: { askedByThisWallet: false } });
+    expect(r.warning).toMatch(/names this wallet as the asker but was not made by it/);
+    // the MAC covers every field: the same nonce with another expiry does not pass
+    const moved = request({ ...askFields, expiry: BigInt(NOW + 900), nonce: solvencyAskNonce(asker, CTX, askFields) });
+    const m = await proveFor(moved.digest);
+    const rm = await verifySolvency(host(asker, chainOk()), present({ digest: moved.digest, args: m.args, proof: m.proof }), { request: moved.code, now: NOW });
+    expect(rm.request?.askedByThisWallet).toBe(false);
+    // and another wallet's MAC'd nonce is not this one's
+    const theirs = solvencyAskNonce(Keypair.generate(), CTX, askFields);
+    const t = request({ ...askFields, nonce: theirs });
+    const tp = await proveFor(t.digest);
+    expect((await verifySolvency(host(asker, chainOk()), present({ digest: t.digest, args: tp.args, proof: tp.proof }), { request: t.code, now: NOW })).request?.askedByThisWallet).toBe(false);
+    // a request living longer than a day is refused by the verifier too, whoever made it
+    const long = request({ ...askFields, expiry: BigInt(NOW + 2 * 86_400) });
+    const lv = await verifySolvency(host(asker, chainOk()), present(), { request: long.code, now: NOW });
+    expect(lv).toMatchObject({ ok: false, reason: 'bad_request' });
+    expect(lv.message).toMatch(/more than a day from now/);
   });
 
   const fresh = () => host(Keypair.generate(), chainOk());
